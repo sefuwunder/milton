@@ -54,7 +54,7 @@ Save your own multi-step routines, run them on a schedule, or fire them from exe
 
 **Runs** — `automation runs` (or the Runs tab) shows the last 50 runs with per-step detail; every run is also pushed live over `GET /api/events` (SSE).
 
-**Wiring exec-crm**: point an outgoing webhook at `POST /api/hooks/exec-crm` with header `X-Milton-Secret` set to your `MILTON_HOOK_SECRET`. Payload shape: `{ event, sent_at, data }`. One honest limitation: exec-crm's webhook sender (read-only for us) doesn't support custom headers, so direct UI wiring isn't possible today — use a small proxy or automation platform to add the header.
+**Wiring exec-crm**: point an outgoing webhook at `POST /api/hooks/exec-crm` with header `X-Milton-Secret` set to your `MILTON_HOOK_SECRET`. Payload shape: `{ event, sent_at, data }`. exec-crm's webhook sender supports custom headers (Automations → Add webhook → Custom headers), so direct wiring works with no proxy.
 
 **Camera & OCR** — tap the 📷 button to snap a photo of printed text (whiteboard, business card, document); Milton transcribes it automatically. Then `read this`, `analyze handwriting` (geometric analysis: slant, stroke pressure, size consistency, spacing, baseline drift — with raw numbers, not mysticism), or save the transcription as a note on a deal.
 
