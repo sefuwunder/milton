@@ -121,7 +121,7 @@ Natural dates (`tomorrow`, `friday`, `in 3 days`, `2026-10-02`) and money (`50k`
 ## Tests
 
 ```bash
-bun test tests/   # 248 tests: intent parser, brain vs stubbed CRM, OCR engine, uploads, LLM error paths, DOM-stubbed UI, routines/schedules/triggers, webhook + scheduler, Meridian read + run-request intents
+bun test tests/   # 282 tests: intent parser, help/parser sync, brain vs stubbed CRM, OCR engine, uploads, LLM error paths, DOM-stubbed UI, routines/schedules/triggers, webhook + scheduler, Meridian read + run-request intents
 ```
 
 ## Layout

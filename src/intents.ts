@@ -300,21 +300,64 @@ export const HELP_CHIPS = [
   "KPIs", "Pipeline hygiene", "List deals in negotiation",
 ];
 
+// Structured help: every example command is paired with the intent it must
+// parse to. helpText() renders this; the test suite asserts each example
+// parses to its paired intent so help and parser can't drift apart.
+export interface HelpRow { cmds: [string, IntentName][]; note: string }
+export interface HelpLevel { title: string; rows: HelpRow[] }
+
+export const HELP_LEVELS: HelpLevel[] = [
+  {
+    title: "🟢 Beginner — everyday commands",
+    rows: [
+      { cmds: [["morning brief", "brief"]], note: "today's digest: pipeline, closing soon, tasks, activity" },
+      { cmds: [["my tasks", "tasks"], ["kpis", "kpis"], ["list deals in negotiation", "deals"], ["show deal Acme", "deal_detail"]], note: "" },
+      { cmds: [["move Acme deal to negotiation", "move_deal"]], note: "" },
+      { cmds: [["add contact Jane Doe at Acme jane@acme.com", "add_contact"]], note: "" },
+      { cmds: [["add task Call Acme tomorrow", "add_task"]], note: "" },
+      { cmds: [["workspaces", "list_workspaces"], ["switch to Acme", "switch_workspace"]], note: "" },
+      { cmds: [["meridian recons", "list_recons"], ["meridian dossier Austin", "meridian_dossier"]], note: "read Meridian recon" },
+    ],
+  },
+  {
+    title: "🟡 Intermediate — automate the repeatable",
+    rows: [
+      { cmds: [["save routine EOD: my tasks; kpis", "save_routine"]], note: "chain commands into one routine" },
+      { cmds: [["run EOD", "run_routine"], ["show routine EOD", "show_routine"], ["delete routine EOD", "delete_routine"]], note: "" },
+      { cmds: [["schedule EOD every weekday at 6pm", "schedule_add"]], note: "put routines on a clock" },
+      { cmds: [["pause schedule 3", "pause_schedule"], ["resume schedule 3", "resume_schedule"], ["unschedule 3", "unschedule"]], note: "" },
+      { cmds: [["add stage Discovery before proposal", "add_stage"], ["rename stage Proposal to Scoping", "rename_stage"]], note: "edit the pipeline schema" },
+      { cmds: [["meridian recon Austin", "meridian_request"]], note: "request a new Meridian recon — I report back when it finishes" },
+      { cmds: [["meridian entities Austin company", "meridian_entities"]], note: "its orgs, filtered by type" },
+    ],
+  },
+  {
+    title: "🔴 Advanced — events, webhooks, destructive ops",
+    rows: [
+      { cmds: [["when deal won run celebrate", "trigger_add"]], note: "fire a routine on exec-crm events" },
+      { cmds: [["when deal.stage_changed where stage=negotiation run prep", "trigger_add"]], note: "filtered triggers" },
+      { cmds: [["trigger help", "trigger_help"]], note: "every supported event" },
+      { cmds: [["delete stage Discovery", "delete_stage"]], note: "asks first, moves its deals somewhere safe" },
+      { cmds: [["delete deal Old Opp", "delete_deal"]], note: "destructive — always confirms first" },
+      { cmds: [["read this", "ocr_read"], ["analyze handwriting", "handwriting"]], note: "after 📷-snapping text" },
+      { cmds: [], note: "Webhooks in: `POST /api/hooks/exec-crm` · `POST /api/hooks/meridian` (header `X-Milton-Secret` from `MILTON_HOOK_SECRET`)" },
+      { cmds: [["automation runs", "list_runs"]], note: "history, 🔔 bell, and live toasts in the ⚙️ Automations panel" },
+    ],
+  },
+];
+
 export function helpText(): string {
-  return [
-    "Here's what I can do inside exec-crm:",
-    "",
-    "**Look things up** — pipeline, KPIs, deals, contacts, companies, tasks, recent activity, webhooks.",
-    "**Work the pipeline** — `add deal Website redesign for Acme worth 50k`, `move Acme deal to negotiation`, `mark Acme deal as won`, `set Acme deal value to 75k`.",
-    "**People & companies** — `add contact Jane Doe at Acme jane@acme.com`, `add company Globex`.",
-    "**Tasks** — `add task Call Acme tomorrow`, `remind me to send the proposal Friday`, `complete task 3`.",
-    "**Routines** — `morning brief` for today's digest, `pipeline hygiene` for stale deals and gaps.",
-    "**Automations** — `save routine EOD: my tasks; pipeline hygiene` then `run EOD`. `schedule EOD daily at 6pm`, `list schedules`, `unschedule 3`. `when deal won run celebrate`, `list triggers`, `trigger help` for the event list.",
-    "**Workspaces** — `workspaces` lists exec-crm's workspaces, `switch to Acme` works inside one, `current workspace` shows where you are. Schedules and triggers pin the workspace they were created in.",
-    "**Pipeline schema** — `stages` lists the pipeline stages, `add stage Discovery before proposal`, `rename stage Proposal to Scoping`, `move stage Negotiation after Proposal`, `delete stage Discovery` (I'll ask first, and move its deals somewhere safe).",
-    "**Meridian recon** — read: `meridian recons` lists recon sprints, `meridian dossier Austin` summarizes one, `meridian entities Austin` shows its companies and orgs (add a type like `company` to filter). Request a new run: `meridian recon Austin` (or `meridian run Austin`) — I'll ask Meridian's router for it and report back when it finishes, as long as `MILTON_HOOK_SECRET` is set so Meridian can call me back.",
-    "**Camera** — tap the 📷 button to snap a photo of text; I'll transcribe it. Then `read this`, `analyze handwriting`, or save the transcription as a note on a deal.",
-    "",
-    "I'll ask before anything destructive, and if a name matches more than one record I'll let you pick.",
-  ].join("\n");
+  const lines = ["**Milton — what I can do**", ""];
+  for (const level of HELP_LEVELS) {
+    lines.push(`**${level.title}**`);
+    for (const row of level.rows) {
+      if (!row.cmds.length) { lines.push(row.note); continue; }
+      const cmds = row.cmds.map(([c]) => `\`${c}\``).join(" · ");
+      lines.push(row.note ? `${cmds} — ${row.note}` : cmds);
+    }
+    lines.push("");
+  }
+  lines.push("Anything else I don't recognize goes to your LLM if `MILTON_LLM_URL` is set.");
+  lines.push("I'll ask before anything destructive, and let you pick when a name matches more than one record.");
+  return lines.join("\n");
 }

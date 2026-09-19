@@ -1,6 +1,6 @@
 // intents.test.ts — parser unit tests
 import { describe, test, expect } from "bun:test";
-import { parseIntent, parseMoney, parseDate, parseStage, extractMoney, extractDate } from "../src/intents";
+import { parseIntent, parseMoney, parseDate, parseStage, extractMoney, extractDate, HELP_LEVELS, helpText } from "../src/intents";
 
 describe("parseIntent reads", () => {
   const cases: [string, string, Record<string, string>?][] = [
@@ -130,6 +130,38 @@ describe("parseIntent writes", () => {
     expect(parseIntent("no").name).toBe("confirm_no");
     expect(parseIntent("2").slots.n).toBe("2");
     expect(parseIntent("pick 1").name).toBe("choose_number");
+  });
+});
+
+describe("help stays in sync with the parser", () => {
+  let total = 0;
+  for (const level of HELP_LEVELS) {
+    for (const row of level.rows) {
+      for (const [cmd, intent] of row.cmds) {
+        total++;
+        test(`help example "${cmd}" -> ${intent}`, () => {
+          expect(parseIntent(cmd).name).toBe(intent);
+        });
+      }
+    }
+  }
+  test("help covers all three levels", () => {
+    expect(HELP_LEVELS.map((l) => l.title)).toEqual([
+      "🟢 Beginner — everyday commands",
+      "🟡 Intermediate — automate the repeatable",
+      "🔴 Advanced — events, webhooks, destructive ops",
+    ]);
+    expect(total).toBeGreaterThan(20);
+  });
+  test("helpText renders every example", () => {
+    const text = helpText();
+    for (const level of HELP_LEVELS) {
+      expect(text).toContain(level.title);
+      for (const row of level.rows) {
+        for (const [cmd] of row.cmds) expect(text).toContain(`\`${cmd}\``);
+        if (row.note) expect(text).toContain(row.note);
+      }
+    }
   });
 });
 
