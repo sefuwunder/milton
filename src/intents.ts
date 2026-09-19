@@ -9,6 +9,9 @@ export type IntentName =
   | "add_contact" | "add_company" | "add_task" | "complete_task" | "reopen_task"
   | "delete_task" | "remind"
   | "ocr_read" | "handwriting" | "save_note"
+  | "save_routine" | "run_routine" | "list_routines" | "delete_routine" | "show_routine"
+  | "schedule_add" | "list_schedules" | "unschedule" | "pause_schedule" | "resume_schedule"
+  | "trigger_add" | "list_triggers" | "delete_trigger" | "trigger_help" | "list_runs"
   | "confirm_yes" | "confirm_no" | "choose_number"
   | "unknown";
 
@@ -136,6 +139,25 @@ export function parseIntent(raw: string): Intent {
   // ---- help -----------------------------------------------------------------
   if (/^(help|what can you do|commands|how do (i|you) work|start)$/.test(text)) set("help");
 
+  // ---- automations (routines / schedules / triggers) --------------------------------
+  // Must precede the brief/hygiene/read/write matchers: "schedule morning brief …"
+  // contains "morning brief", "delete routine x" would otherwise read as delete_task, etc.
+  else if ((m = text.match(/^(?:save|create) routine ([a-z0-9][\w\- ]{0,40}?):\s*(.+)$/))) set("save_routine", { name: m[1].trim(), steps: m[2].trim() });
+  else if (/^(list |show )?routines$/.test(text)) set("list_routines");
+  else if ((m = text.match(/^delete routine (.+)$/))) set("delete_routine", { name: m[1].trim() });
+  else if ((m = text.match(/^(?:show |describe )?routine (.+)$/))) set("show_routine", { name: m[1].trim() });
+  else if ((m = text.match(/^schedule (.+?) (every weekday at .+|daily at .+|each day at .+|every (?:sunday|monday|tuesday|wednesday|thursday|friday|saturday) at .+|every \d+ (?:minutes?|hours?))$/))) set("schedule_add", { routine: m[1].trim(), when: m[2].trim() });
+  else if (/^(list |show )?schedules$/.test(text)) set("list_schedules");
+  else if ((m = text.match(/^unschedule (.+)$/))) set("unschedule", { ref: m[1].trim() });
+  else if ((m = text.match(/^pause schedule (.+)$/))) set("pause_schedule", { ref: m[1].trim() });
+  else if ((m = text.match(/^resume schedule (.+)$/))) set("resume_schedule", { ref: m[1].trim() });
+  else if ((m = text.match(/^when (.+?) run (.+)$/))) set("trigger_add", { event: m[1].trim(), routine: m[2].trim() });
+  else if (/^(list |show )?triggers$/.test(text)) set("list_triggers");
+  else if ((m = text.match(/^delete trigger (\d+)$/))) set("delete_trigger", { id: m[1] });
+  else if (/^trigger help$/.test(text)) set("trigger_help");
+  else if (/^(automation runs|list runs|run history|recent runs)$/.test(text)) set("list_runs");
+  else if ((m = text.match(/^run (.+)$/))) set("run_routine", { name: m[1].trim() });
+
   // ---- routines ---------------------------------------------------------------
   else if (/\b(morning brief|daily brief|brief me|briefing)\b/.test(text)) set("brief");
   else if (/\b(pipeline hygiene|hygiene|health check|cleanup|stale deals)\b/.test(text)) set("hygiene");
@@ -245,6 +267,7 @@ export function helpText(): string {
     "**People & companies** — `add contact Jane Doe at Acme jane@acme.com`, `add company Globex`.",
     "**Tasks** — `add task Call Acme tomorrow`, `remind me to send the proposal Friday`, `complete task 3`.",
     "**Routines** — `morning brief` for today's digest, `pipeline hygiene` for stale deals and gaps.",
+    "**Automations** — `save routine EOD: my tasks; pipeline hygiene` then `run EOD`. `schedule EOD daily at 6pm`, `list schedules`, `unschedule 3`. `when deal won run celebrate`, `list triggers`, `trigger help` for the event list.",
     "**Camera** — tap the 📷 button to snap a photo of text; I'll transcribe it. Then `read this`, `analyze handwriting`, or save the transcription as a note on a deal.",
     "",
     "I'll ask before anything destructive, and if a name matches more than one record I'll let you pick.",

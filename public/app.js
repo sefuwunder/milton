@@ -10,6 +10,13 @@
   const camBtn = document.getElementById("cam-btn");
   const photoInput = document.getElementById("photo-input");
   const tray = document.getElementById("tray");
+  const bellBtn = document.getElementById("bell-btn");
+  const bellBadge = document.getElementById("bell-badge");
+  const autoBtn = document.getElementById("auto-btn");
+  const autoView = document.getElementById("auto-view");
+  const autoTabs = document.getElementById("auto-tabs");
+  const autoBody = document.getElementById("auto-body");
+  const toastEl = document.getElementById("toast");
 
   // photos uploaded and waiting to be sent with the next message
   const pending = []; // { id, url, objUrl }
@@ -237,6 +244,147 @@
     renderTray();
   }
 
+  // ---- automations view ------------------------------------------------------------
+  let autoTab = "routines";
+  const statusIcon = (st) => st === "ok" ? "✅" : st === "partial" ? "⚠️" : st === "skipped" ? "⏭️" : "❌";
+
+  function routineRow(r) {
+    return `<div class="arow"><span><b>${esc(r.name)}</b><br><small style="color:var(--muted)">${r.steps.length} step${r.steps.length === 1 ? "" : "s"}: ${esc(r.steps.join("; ").slice(0, 80))}</small></span>` +
+      `<span class="ops"><button class="mini" data-arun="${esc(r.name)}">Run</button>` +
+      `<button class="mini danger" data-ardel="${esc(r.name)}">Delete</button></span></div>`;
+  }
+  function scheduleRow(s) {
+    const next = new Date(s.next_run).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    return `<div class="arow"><span><b>#${s.id} ${esc(s.routine_name)}</b><br><small style="color:var(--muted)">${esc(s.spec_text)} · next ${esc(next)}${s.active ? "" : " · paused"}</small></span>` +
+      `<span class="ops"><button class="mini" data-spause="${s.id}" data-active="${s.active ? 0 : 1}">${s.active ? "Pause" : "Resume"}</button>` +
+      `<button class="mini danger" data-sdel="${s.id}">Delete</button></span></div>`;
+  }
+  function triggerRow(t) {
+    const f = Object.entries(t.filter || {}).map(([k, v]) => `${k}=${v}`).join(", ");
+    return `<div class="arow"><span><b>#${t.id} ${esc(t.event)}</b>${f ? ` <small>(${esc(f)})</small>` : ""}<br><small style="color:var(--muted)">→ ${esc(t.routine_name)}</small></span>` +
+      `<span class="ops"><button class="mini danger" data-tdel="${t.id}">Delete</button></span></div>`;
+  }
+  function runRow(r) {
+    const when = new Date((r.ran_at || "").replace(" ", "T") + "Z").toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    return `<div class="arow"><span>${statusIcon(r.status)} <b>${esc(r.routine_name)}</b> <small style="color:var(--muted)">[${esc(r.kind)}]</small><br><small style="color:var(--muted)">${esc(r.summary || "")} · ${esc(when)}</small></span></div>`;
+  }
+
+  async function refreshAutoTab() {
+    autoTabs.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.getAttribute("data-tab") === autoTab));
+    autoBody.innerHTML = `<div class="aloading">Loading…</div>`;
+    try {
+      if (autoTab === "routines") {
+        const j = await fetch("/api/routines").then((r) => r.json());
+        autoBody.innerHTML = (j.routines || []).length
+          ? (j.routines || []).map(routineRow).join("")
+          : `<div class="ahint">No routines yet. In chat: <code>save routine EOD: my tasks; pipeline hygiene</code></div>`;
+      } else if (autoTab === "schedules") {
+        const j = await fetch("/api/schedules").then((r) => r.json());
+        autoBody.innerHTML = (j.schedules || []).length
+          ? (j.schedules || []).map(scheduleRow).join("")
+          : `<div class="ahint">No schedules yet. In chat: <code>schedule EOD daily at 6pm</code></div>`;
+      } else if (autoTab === "triggers") {
+        const j = await fetch("/api/triggers").then((r) => r.json());
+        autoBody.innerHTML = `<div class="ahint">Point an exec-crm outgoing webhook at <code>POST /api/hooks/exec-crm</code> with header <code>X-Milton-Secret</code>. In chat: <code>when deal won run celebrate</code></div>` +
+          ((j.triggers || []).map(triggerRow).join("") || `<div class="ahint">No triggers yet.</div>`);
+      } else {
+        const j = await fetch("/api/automation-runs?limit=50").then((r) => r.json());
+        autoBody.innerHTML = (j.runs || []).length
+          ? (j.runs || []).map(runRow).join("")
+          : `<div class="ahint">No automation runs yet.</div>`;
+      }
+    } catch { autoBody.innerHTML = `<div class="ahint">Couldn't load.</div>`; }
+  }
+
+  function showAuto(tab) {
+    autoTab = tab || autoTab;
+    chat.hidden = true;
+    chipsEl.hidden = true;
+    autoView.hidden = false;
+    refreshAutoTab();
+  }
+  function hideAuto() {
+    autoView.hidden = true;
+    chat.hidden = false;
+    chipsEl.hidden = false;
+    scroll();
+  }
+
+  autoBtn.addEventListener("click", () => (autoView.hidden ? showAuto() : hideAuto()));
+  autoTabs.addEventListener("click", (e) => {
+    const t = e.target.closest("[data-tab]");
+    if (t) showAuto(t.getAttribute("data-tab"));
+  });
+  autoBody.addEventListener("click", async (e) => {
+    const run = e.target.closest("[data-arun]");
+    if (run) { hideAuto(); send("run " + run.getAttribute("data-arun")); return; }
+    const ardel = e.target.closest("[data-ardel]");
+    if (ardel && confirm(`Delete routine "${ardel.getAttribute("data-ardel")}"?`)) {
+      await fetch("/api/routines/" + encodeURIComponent(ardel.getAttribute("data-ardel")), { method: "DELETE" });
+      refreshAutoTab(); return;
+    }
+    const pause = e.target.closest("[data-spause]");
+    if (pause) {
+      await fetch("/api/schedules/" + pause.getAttribute("data-spause"), {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active: pause.getAttribute("data-active") === "1" }),
+      });
+      refreshAutoTab(); return;
+    }
+    const sdel = e.target.closest("[data-sdel]");
+    if (sdel && confirm("Delete this schedule?")) {
+      await fetch("/api/schedules/" + sdel.getAttribute("data-sdel"), { method: "DELETE" });
+      refreshAutoTab(); return;
+    }
+    const tdel = e.target.closest("[data-tdel]");
+    if (tdel && confirm("Delete this trigger?")) {
+      await fetch("/api/triggers/" + tdel.getAttribute("data-tdel"), { method: "DELETE" });
+      refreshAutoTab(); return;
+    }
+  });
+
+  // ---- automation runs: badge, toast, SSE ----------------------------------------
+  function updateBadge(runs) {
+    const seen = Number(localStorage.getItem("milton_runs_seen") || 0);
+    const unread = (runs || []).filter((r) => r.id > seen).length;
+    if (unread > 0) { bellBadge.hidden = false; bellBadge.textContent = unread > 9 ? "9+" : String(unread); }
+    else bellBadge.hidden = true;
+    return unread;
+  }
+  function refreshBadge() {
+    fetch("/api/automation-runs?limit=50").then((r) => r.json())
+      .then((j) => updateBadge(j.runs || []))
+      .catch(() => {});
+  }
+  function markRunsSeen() {
+    fetch("/api/automation-runs?limit=1").then((r) => r.json()).then((j) => {
+      const max = Math.max(0, ...((j.runs || []).map((r) => r.id)));
+      localStorage.setItem("milton_runs_seen", String(max));
+      bellBadge.hidden = true;
+    }).catch(() => {});
+  }
+  bellBtn.addEventListener("click", () => { showAuto("runs"); markRunsSeen(); });
+
+  let toastTimer = null;
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.hidden = false;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toastEl.hidden = true; }, 6000);
+  }
+
+  if (typeof EventSource !== "undefined") {
+    const es = new EventSource("/api/events");
+    es.addEventListener("automation-run", (ev) => {
+      try {
+        const run = JSON.parse(ev.data);
+        toast(`⚡ ${run.routine_name} (${run.kind}): ${run.summary}`);
+        refreshBadge();
+        if (!autoView.hidden && autoTab === "runs") refreshAutoTab();
+      } catch { /* ignore malformed */ }
+    });
+  }
+
   async function send(text) {
     text = (text || "").trim();
     const atts = pending.filter((p) => p.id);
@@ -283,6 +431,7 @@
       addMsg("milton", { text: "Hey, I'm **Milton** — your copilot inside exec-crm. Ask for a **morning brief**, check the **pipeline**, move a deal — or tap 📷 to snap a photo of text and I'll read it. What are we working on?" });
       setChips(["Morning brief", "Show pipeline", "My tasks", "Help"]);
     }
+    refreshBadge();
     input.focus();
   })();
 })();

@@ -2,10 +2,11 @@
 // Bun + zero dependencies + SQLite. Everything stays on your machine.
 
 import { Database } from "bun:sqlite";
-import { handleMessage, type Session, type Reply, type UploadRef } from "./brain";
+import { handleMessage, tickAutomation, handleWebhookEvent, type Session, type Reply, type UploadRef } from "./brain";
 import { ping, crmBase } from "./crm";
 import { helpText } from "./intents";
 import { detectKind } from "./ocr";
+import * as auto from "./automation";
 
 const PORT = Number(process.env.PORT || 3009);
 const DATA_DIR = process.env.MILTON_DATA || "./data";
@@ -36,6 +37,7 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now'))
   );
 `);
+auto.initAutomationDb(db);
 
 function loadSession(id: string): Session {
   const row = db.query("SELECT state FROM sessions WHERE id = ?").get(id) as any;
@@ -130,6 +132,7 @@ const crmOk = await ping();
 
 const server = Bun.serve({
   port: PORT,
+  idleTimeout: 120, // SSE streams stay open; 25s keep-alive pings refresh it
   async fetch(req) {
     const url = new URL(req.url);
     const path = url.pathname;
@@ -152,6 +155,88 @@ const server = Bun.serve({
       const sid = url.searchParams.get("session") || "";
       const rows = db.query("SELECT role, text, created_at FROM messages WHERE session_id = ? ORDER BY id ASC LIMIT 100").all(sid) as any[];
       return json({ messages: rows });
+    }
+
+    // ---- automations: SSE live events -------------------------------------------
+    if (path === "/api/events" && method === "GET") {
+      // NB: ReadableStream.cancel() receives the cancellation *reason*, not the
+      // controller — so capture the controller in the closure for cleanup.
+      let ctrl: ReadableStreamDefaultController | null = null;
+      let ping: ReturnType<typeof setInterval> | null = null;
+      const enc = new TextEncoder();
+      const stream = new ReadableStream({
+        start(c) {
+          ctrl = c as ReadableStreamDefaultController;
+          auto.sseAdd(c as any);
+          c.enqueue(enc.encode(": connected\n\n"));
+          // keep-alive: Bun drops requests idle longer than `idleTimeout`
+          ping = setInterval(() => { try { c.enqueue(enc.encode(": ping\n\n")); } catch { /* closed */ } }, 25000);
+        },
+        cancel() {
+          if (ping) clearInterval(ping);
+          if (ctrl) auto.sseRemove(ctrl as any);
+        },
+      });
+      return new Response(stream, {
+        headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
+      });
+    }
+
+    // ---- automations: REST for the UI -------------------------------------------
+    if (path === "/api/routines" && method === "GET") return json({ routines: auto.listRoutines() });
+    if (path.startsWith("/api/routines/") && method === "DELETE") {
+      const name = decodeURIComponent(path.slice("/api/routines/".length));
+      const d = auto.deleteRoutine(name);
+      if (!d.deleted) return json({ error: "not found" }, 404);
+      return json({ ok: true, ...d });
+    }
+    if (path === "/api/schedules" && method === "GET") return json({ schedules: auto.listSchedules() });
+    if (path === "/api/schedules" && method === "POST") {
+      let body: any = {};
+      try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const r = auto.getRoutine(String(body.routine || ""));
+      if (!r) return json({ error: `no routine named "${body.routine}"` }, 400);
+      const spec = auto.parseScheduleSpec(String(body.when || ""));
+      if (!spec) return json({ error: `couldn't parse schedule "${body.when}"` }, 400);
+      return json({ schedule: auto.createSchedule(r.name, spec, Date.now()) }, 201);
+    }
+    if (path.startsWith("/api/schedules/") && (method === "PATCH" || method === "DELETE")) {
+      const id = Number(path.slice("/api/schedules/".length).split("/")[0]);
+      if (!Number.isInteger(id) || id <= 0) return json({ error: "bad id" }, 400);
+      if (method === "DELETE") return json({ ok: auto.deleteScheduleByRef(String(id)) > 0 });
+      let body: any = {};
+      try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      if (!auto.getSchedule(id)) return json({ error: "not found" }, 404);
+      auto.setScheduleActive(id, body.active !== false);
+      return json({ schedule: auto.getSchedule(id) });
+    }
+    if (path === "/api/triggers" && method === "GET") return json({ triggers: auto.listTriggers(), events: auto.CRM_EVENTS });
+    if (path.startsWith("/api/triggers/") && method === "DELETE") {
+      const id = Number(path.slice("/api/triggers/".length).split("/")[0]);
+      if (!auto.deleteTrigger(id)) return json({ error: "not found" }, 404);
+      return json({ ok: true });
+    }
+    if (path === "/api/automation-runs" && method === "GET") {
+      const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 50), 1), 200);
+      return json({ runs: auto.listRuns(limit) });
+    }
+
+    // ---- incoming exec-crm webhook -> triggers -----------------------------------
+    if (path === "/api/hooks/exec-crm" && method === "POST") {
+      const secret = process.env.MILTON_HOOK_SECRET || "";
+      if (!secret) return json({ error: "hook secret not configured (set MILTON_HOOK_SECRET)" }, 503);
+      const given = req.headers.get("x-milton-secret") || "";
+      // constant-time-ish compare to avoid leaking via timing
+      const a = new TextEncoder().encode(given), b = new TextEncoder().encode(secret);
+      let diff = a.length === b.length ? 0 : 1;
+      for (let i = 0; i < Math.max(a.length, b.length); i++) diff |= (a[i] || 0) ^ (b[i] || 0);
+      if (diff !== 0) return json({ error: "bad secret" }, 401);
+      let body: any = {};
+      try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const event = String(body.event || req.headers.get("x-crm-event") || "");
+      if (!event) return json({ error: "missing event" }, 400);
+      const { matched, runs } = await handleWebhookEvent(event, body.data || {});
+      return json({ ok: true, event, matched, runs: runs.map((r) => r.id) });
     }
 
     if (path === "/api/upload" && method === "POST") {
@@ -225,7 +310,20 @@ const server = Bun.serve({
 console.log(`milton listening on http://localhost:${server.port}`);
 console.log(`exec-crm: ${crmBase()} (${crmOk ? "reachable" : "UNREACHABLE"})`);
 console.log(`LLM mode: ${process.env.MILTON_LLM_URL ? "enabled" : "local-only (set MILTON_LLM_URL for freeform chat)"}`);
+console.log(`automation scheduler: every 30s${process.env.MILTON_HOOK_SECRET ? "" : " (incoming webhooks disabled: set MILTON_HOOK_SECRET)"}`);
 if (!crmOk) console.log("Hint: start exec-crm first, or set MILTON_CRM_URL to its address.");
+
+// scheduler: run due schedules every 30s (plus one sweep shortly after boot)
+let ticking = false;
+async function sweep() {
+  if (ticking) return;
+  ticking = true;
+  try { await tickAutomation(Date.now()); }
+  catch (e) { console.error("scheduler sweep failed:", e); }
+  finally { ticking = false; }
+}
+setInterval(sweep, 30000);
+setTimeout(sweep, 5000);
 
 // exported for tests (boots the server against MILTON_DATA on import)
 export { server };

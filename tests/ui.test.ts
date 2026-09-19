@@ -9,6 +9,9 @@ function mkEl(tag: string): any {
     insertAdjacentHTML(_p: string, h: string) { this.innerHTML += h; },
     addEventListener() {}, remove() {}, focus() {}, scrollTop: 0, scrollHeight: 100,
     closest() { return null; }, getAttribute() { return null; },
+    querySelector() { return null; }, querySelectorAll() { return []; },
+    classList: { toggle() {}, add() {}, remove() {}, contains() { return false; } },
+    hidden: false, style: {},
   };
 }
 
@@ -18,7 +21,8 @@ let els: Record<string, any>;
 beforeAll(async () => {
   els = {};
   ["chat", "chips", "composer", "input", "status-dot", "status-text", "help-btn",
-   "cam-btn", "photo-input", "tray"].forEach((id) => (els[id] = mkEl("div")));
+   "cam-btn", "photo-input", "tray", "bell-btn", "bell-badge", "auto-btn",
+   "auto-view", "auto-tabs", "auto-body", "toast"].forEach((id) => (els[id] = mkEl("div")));
   (globalThis as any).document = {
     getElementById: (id: string) => els[id] || null,
     createElement: (t: string) => mkEl(t),
@@ -36,7 +40,7 @@ beforeAll(async () => {
   };
   afterAll(() => { (globalThis as any).fetch = prevFetch; });
   let src = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
-  src = src.replace("})();", ";globalThis.__t={cardHTML,md,money,esc};})();");
+  src = src.replace("})();", ";globalThis.__t={cardHTML,md,money,esc,routineRow,scheduleRow,triggerRow,runRow,updateBadge,showAuto,hideAuto};})();");
   eval(src);
   await new Promise((r) => setTimeout(r, 50));
   T = (globalThis as any).__t;
@@ -97,5 +101,59 @@ describe("cards", () => {
     expect(T.money(2500000)).toBe("$2.5M");
     expect(T.money(50000)).toBe("$50k");
     expect(T.money(0)).toBe("—");
+  });
+});
+
+describe("automations UI", () => {
+  test("routine row renders name, steps, Run/Delete", () => {
+    const h = T.routineRow({ name: "eod", steps: ["my tasks", "kpis"] });
+    expect(h).toContain("eod");
+    expect(h).toContain("my tasks; kpis");
+    expect(h).toContain("data-arun");
+    expect(h).toContain("data-ardel");
+  });
+  test("routine row escapes HTML (XSS)", () => {
+    const h = T.routineRow({ name: "<img src=x>", steps: ["<script>"] });
+    expect(h).not.toContain("<img");
+    expect(h).toContain("&lt;img");
+  });
+  test("schedule row shows pause/resume by state", () => {
+    const on = T.scheduleRow({ id: 3, routine_name: "eod", spec_text: "daily at 6:00 PM", next_run: Date.now() + 3600000, active: 1 });
+    expect(on).toContain("#3");
+    expect(on).toContain("Pause");
+    const off = T.scheduleRow({ id: 3, routine_name: "eod", spec_text: "daily at 6:00 PM", next_run: Date.now() + 3600000, active: 0 });
+    expect(off).toContain("Resume");
+    expect(off).toContain("paused");
+  });
+  test("trigger row shows event, filter and routine", () => {
+    const h = T.triggerRow({ id: 7, event: "deal.stage_changed", filter: { stage: "closed_won" }, routine_name: "celebrate" });
+    expect(h).toContain("deal.stage_changed");
+    expect(h).toContain("stage=closed_won");
+    expect(h).toContain("celebrate");
+  });
+  test("run row shows status icon, kind and summary", () => {
+    const h = T.runRow({ status: "partial", kind: "schedule", routine_name: "eod", summary: "1/2 steps ok", ran_at: "2026-09-19 12:00:00" });
+    expect(h).toContain("⚠️");
+    expect(h).toContain("eod");
+    expect(h).toContain("1/2 steps ok");
+    expect(T.runRow({ status: "ok", kind: "trigger", routine_name: "x", summary: "", ran_at: "2026-09-19 12:00:00" })).toContain("✅");
+  });
+  test("updateBadge counts runs newer than last-seen", () => {
+    (globalThis as any).localStorage.setItem("milton_runs_seen", "10");
+    const n = T.updateBadge([{ id: 9 }, { id: 11 }, { id: 12 }]);
+    expect(n).toBe(2);
+    expect(els["bell-badge"].hidden).toBe(false);
+    expect(els["bell-badge"].textContent).toBe("2");
+    const n2 = T.updateBadge([{ id: 5 }]);
+    expect(n2).toBe(0);
+    expect(els["bell-badge"].hidden).toBe(true);
+  });
+  test("showAuto/hideAuto toggle the views", () => {
+    T.showAuto("runs");
+    expect(els["auto-view"].hidden).toBe(false);
+    expect(els["chat"].hidden).toBe(true);
+    T.hideAuto();
+    expect(els["auto-view"].hidden).toBe(true);
+    expect(els["chat"].hidden).toBe(false);
   });
 });

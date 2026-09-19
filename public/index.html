@@ -18,11 +18,25 @@
       </div>
     </div>
     <div class="top-actions">
+      <button id="bell-btn" class="ghost bell" title="Automation runs">🔔<span id="bell-badge" class="badge" hidden></span></button>
+      <button id="auto-btn" class="ghost" title="Automations">⚙️</button>
       <button id="help-btn" class="ghost" title="What can Milton do?">?</button>
     </div>
   </header>
 
   <main id="chat" class="chat" aria-live="polite"></main>
+
+  <section id="auto-view" class="auto-view" hidden>
+    <nav class="tabs" id="auto-tabs">
+      <button class="tab active" data-tab="routines">Routines</button>
+      <button class="tab" data-tab="schedules">Schedules</button>
+      <button class="tab" data-tab="triggers">Triggers</button>
+      <button class="tab" data-tab="runs">Runs</button>
+    </nav>
+    <div id="auto-body" class="auto-body"></div>
+  </section>
+
+  <div id="toast" class="toast" hidden></div>
 
   <div id="chips" class="chips"></div>
 

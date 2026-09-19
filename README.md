@@ -39,6 +39,23 @@ If the model endpoint is misconfigured (wrong model name, unreachable host), Mil
 
 **Routines** — `morning brief` (open pipeline, closing this week, overdue/due-today tasks, latest activity) · `pipeline hygiene` (missing close dates, stale deals, deals without contacts, overdue tasks)
 
+### Automations — routines, schedules, triggers
+
+Save your own multi-step routines, run them on a schedule, or fire them from exec-crm webhooks. Everything is manageable from chat or the ⚙️ Automations panel (Routines / Schedules / Triggers / Runs tabs, with a 🔔 bell for run history and live toasts over SSE).
+
+**Routines** — named command sequences, steps separated by `;`:
+- `save routine EOD: my tasks; kpis` · `run EOD` · `list routines` · `show routine EOD` · `delete routine EOD`
+- Steps run in order through the normal chat pipeline; a failing step is reported and the rest continue. `run <name>` inside a routine calls another routine (recursion is guarded).
+- Destructive steps (`delete deal/task`, `mark … as lost`) ask once up front in chat; unattended runs (schedules, triggers) skip them and say so.
+
+**Schedules** — `schedule EOD daily at 6pm` · `schedule morning brief every weekday at 8am` · `schedule sync every monday at 9am` · `schedule pulse every 30 minutes`. Also `list schedules`, `pause schedule 3`, `resume schedule 3`, `unschedule 3`. A scheduler sweep runs every 30s (server-local time).
+
+**Triggers** — `when deal won run celebrate` · `when task completed run EOD` · `when deal.stage_changed where stage=negotiation run notify`. Supported exec-crm events: `deal.created`, `deal.stage_changed`, `deal.updated`, `contact.created`, `campaign.created`, `campaign.updated`, `campaign.deleted`, `task.created`, `task.completed`, `task.deleted`. Aliases: `deal won` / `deal lost` (stage filters), `new deal`, `task completed`, etc. `list triggers` · `delete trigger 4` · `trigger help`.
+
+**Runs** — `automation runs` (or the Runs tab) shows the last 50 runs with per-step detail; every run is also pushed live over `GET /api/events` (SSE).
+
+**Wiring exec-crm**: point an outgoing webhook at `POST /api/hooks/exec-crm` with header `X-Milton-Secret` set to your `MILTON_HOOK_SECRET`. Payload shape: `{ event, sent_at, data }`. One honest limitation: exec-crm's webhook sender (read-only for us) doesn't support custom headers, so direct UI wiring isn't possible today — use a small proxy or automation platform to add the header.
+
 **Camera & OCR** — tap the 📷 button to snap a photo of printed text (whiteboard, business card, document); Milton transcribes it automatically. Then `read this`, `analyze handwriting` (geometric analysis: slant, stroke pressure, size consistency, spacing, baseline drift — with raw numbers, not mysticism), or save the transcription as a note on a deal.
 
 The OCR engine is hand-written TypeScript with zero dependencies: PNG + baseline-JPEG decoders, Otsu binarization, deskew, and 5x7 template matching. It's tuned for printed text photographed straight-on — cursive handwriting won't transcribe reliably, which is why handwriting gets the analysis view instead. If `MILTON_LLM_URL` points at a vision-capable model, Milton can also offer a vision-model pass when local confidence is low.
@@ -52,17 +69,24 @@ Natural dates (`tomorrow`, `friday`, `in 3 days`, `2026-10-02`) and money (`50k`
 - `GET /api/file/:id` → serves the upload (scoped to its session)
 - `GET /api/history?session=…` → recent messages for a session
 - `GET /api/health` → `{ ok, crm, crm_url, llm, llm_url, llm_model }`
+- `GET /api/routines` · `POST /api/routines` / `DELETE /api/routines/:name`
+- `GET /api/schedules` · `POST /api/schedules` (`{ routine, when }`) · `PATCH /api/schedules/:id` (`{ active }`) · `DELETE /api/schedules/:id`
+- `GET /api/triggers` (includes supported `events`) · `POST /api/triggers` (`{ event, routine }`) · `DELETE /api/triggers/:id`
+- `GET /api/automation-runs?limit=50`
+- `GET /api/events` → SSE stream of automation runs
+- `POST /api/hooks/exec-crm` → exec-crm webhook ingress (requires `X-Milton-Secret: $MILTON_HOOK_SECRET`)
 
 ## Tests
 
 ```bash
-bun test tests/   # 112 tests: intent parser, brain vs stubbed CRM, OCR engine, uploads, LLM error paths, DOM-stubbed UI
+bun test tests/   # 171 tests: intent parser, brain vs stubbed CRM, OCR engine, uploads, LLM error paths, DOM-stubbed UI, routines/schedules/triggers, webhook + scheduler
 ```
 
 ## Layout
 
-- `src/server.ts` — Bun server, sessions + chat history in SQLite, static UI
-- `src/brain.ts` — intent dispatch, reply cards, confirmations, routines, photo/OCR replies
+- `src/server.ts` — Bun server, sessions + chat history in SQLite, static UI, automation REST + SSE + webhook ingress, 30s scheduler
+- `src/brain.ts` — intent dispatch, reply cards, confirmations, routines, photo/OCR replies, unattended routine runs
+- `src/automation.ts` — routines/schedules/triggers storage, schedule parser + next-run math, webhook event matching, run history, SSE fan-out
 - `src/intents.ts` — deterministic NL parser (dates, money, stages, commands)
 - `src/crm.ts` — exec-crm HTTP client + fuzzy entity resolution
 - `src/ocr.ts` — zero-dependency OCR: PNG/JPEG decoders, binarization, segmentation, template matching, handwriting metrics

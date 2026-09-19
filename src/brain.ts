@@ -4,6 +4,7 @@
 import * as crm from "./crm";
 import { parseIntent, helpText, HELP_CHIPS, parseStage, parseMoney, parseDate, type Intent } from "./intents";
 import { ocrUpload, type HandMetrics } from "./ocr";
+import * as auto from "./automation";
 
 export interface Card {
   kind: "deals" | "pipeline" | "kpis" | "tasks" | "contacts" | "companies" | "activities" | "webhooks" | "choices" | "confirm" | "findings" | "transcription" | "handwriting";
@@ -44,7 +45,7 @@ export interface Session {
 
 // A photo uploaded through /api/upload, resolved session-side.
 export interface UploadRef { id: string; mime: string; size: number; path: string }
-export interface MessageOpts { attachments?: UploadRef[]; latestUpload?: UploadRef | null }
+export interface MessageOpts { attachments?: UploadRef[]; latestUpload?: UploadRef | null; raw?: string }
 
 // ---- formatting helpers -------------------------------------------------------
 export function fmtMoney(n: number): string {
@@ -202,7 +203,7 @@ export async function handleMessage(session: Session, raw: string, opts: Message
   if (session.pending) {
     if (intent.name === "confirm_yes") {
       const p = session.pending; session.pending = undefined;
-      return runPending(p);
+      return runPending(session, p);
     }
     if (intent.name === "confirm_no") {
       session.pending = undefined;
@@ -215,7 +216,7 @@ export async function handleMessage(session: Session, raw: string, opts: Message
   session.history.push({ role: "user", text: raw });
   let reply: Reply;
   try {
-    reply = await dispatch(session, intent, opts);
+    reply = await dispatch(session, intent, { ...opts, raw });
   } catch (e: any) {
     const msg = String(e?.message || e);
     if (/fetch failed|ECONNREFUSED|ENOTFOUND|timeout/i.test(msg)) {
@@ -249,7 +250,7 @@ async function dispatchChoice(session: Session, ch: ChoiceState, id: number): Pr
   return { text: "I lost track of that choice — try the command again." };
 }
 
-async function runPending(p: PendingAction): Promise<Reply> {
+async function runPending(session: Session, p: PendingAction): Promise<Reply> {
   if (p.type === "delete_deal") {
     await crm.deleteDeal(p.payload.id);
     return { text: `Deleted deal "${p.label}".`, chips: ["Show pipeline", "List deals"] };
@@ -261,6 +262,349 @@ async function runPending(p: PendingAction): Promise<Reply> {
   if (p.type === "delete_task") {
     await crm.deleteTask(p.payload.id);
     return { text: `Deleted task "${p.label}".`, chips: ["My tasks"] };
+  }
+  if (p.type === "routine_run") {
+    const out = await runRoutineSteps(session, p.payload.steps, { unattended: false, confirmed: true });
+    const okCount = out.results.filter((r) => r.ok).length;
+    return {
+      text: `▶️ **${p.label}** — ${okCount}/${p.payload.steps.length} steps ok\n\n${out.text}`,
+      cards: out.cards, chips: ["List routines", "Morning brief"],
+    };
+  }
+  return { text: "Nothing to do." };
+}
+
+// ---- automations: routines, schedules, triggers ------------------------------------
+// Intents that currently ask for confirmation before acting. Routine steps resolving
+// to these never auto-confirm: interactive runs ask once up front, unattended runs skip.
+const DESTRUCTIVE_PENDING = new Set(["delete_deal", "delete_task", "close_lost"]);
+
+function isDestructiveIntent(intent: Intent): boolean {
+  if (intent.name === "delete_deal" || intent.name === "delete_task") return true;
+  if (intent.name === "close_deal" && intent.slots.result === "lost") return true;
+  return false;
+}
+
+interface StepResult { step: string; ok: boolean; text: string }
+
+async function runRoutineSteps(
+  session: Session, steps: string[],
+  opts: { unattended: boolean; confirmed?: boolean; visited?: Set<string> }
+): Promise<{ text: string; cards?: Card[]; results: StepResult[] }> {
+  const visited = opts.visited || new Set<string>();
+  const results: StepResult[] = [];
+  const cards: Card[] = [];
+  for (const step of steps) {
+    const intent = parseIntent(step);
+    // nested routine: inline with a recursion guard
+    if (intent.name === "run_routine") {
+      const key = intent.slots.name.toLowerCase();
+      const sub = auto.getRoutine(intent.slots.name);
+      if (!sub) { results.push({ step, ok: false, text: `routine "${intent.slots.name}" not found — skipped` }); continue; }
+      if (visited.has(key)) { results.push({ step, ok: false, text: `recursive routine "${sub.name}" — skipped` }); continue; }
+      const subRes = await runRoutineSteps(session, sub.steps, { ...opts, visited: new Set([...visited, key]) });
+      const ok = subRes.results.every((r) => r.ok);
+      results.push({ step: `${step} (→ ${sub.name})`, ok, text: subRes.text });
+      if (subRes.cards) cards.push(...subRes.cards);
+      continue;
+    }
+    if (isDestructiveIntent(intent) && (opts.unattended || !opts.confirmed)) {
+      results.push({ step, ok: false, text: "skipped: needs confirmation" });
+      continue;
+    }
+    let reply: Reply;
+    try {
+      reply = await handleMessage(session, step);
+    } catch (e: any) {
+      results.push({ step, ok: false, text: `failed: ${String(e?.message || e)}` });
+      continue;
+    }
+    if (session.choice) {
+      // a step needing disambiguation can't be answered mid-routine
+      session.choice = undefined;
+      results.push({ step, ok: false, text: "skipped: needs you to pick from matches — run it on its own" });
+      continue;
+    }
+    if (session.pending && DESTRUCTIVE_PENDING.has(session.pending.type) && opts.confirmed && !opts.unattended) {
+      // confirmed destructive step: resolve the confirmation it just raised
+      const p = session.pending; session.pending = undefined;
+      try { reply = await runPending(session, p); }
+      catch (e: any) { results.push({ step, ok: false, text: `failed: ${String(e?.message || e)}` }); continue; }
+    } else if (session.pending) {
+      session.pending = undefined;
+      results.push({ step, ok: false, text: "skipped: needs follow-up input — run it on its own" });
+      continue;
+    }
+    if (/^(something went wrong|i can't reach exec-crm)/i.test(reply.text.trim())) {
+      // handleMessage catches errors internally — surface them as failed steps
+      results.push({ step, ok: false, text: `failed: ${reply.text}` });
+      continue;
+    }
+    results.push({ step, ok: true, text: reply.text });
+    if (reply.cards) cards.push(...reply.cards);
+  }
+  const text = results.map((r, i) => `**${i + 1}. ${r.step}**\n${r.ok ? r.text : `⚠️ ${r.text}`}`).join("\n\n");
+  return { text, cards: cards.length ? cards : undefined, results };
+}
+
+/** Run a routine with no user present: destructive steps are skipped, never confirmed. */
+export async function runRoutineUnattended(name: string, kind: "schedule" | "trigger" | "manual", ref: string): Promise<auto.AutomationRun> {
+  const r = auto.getRoutine(name);
+  if (!r) {
+    return auto.recordRun({ kind, ref, routine_name: name, status: "failed", summary: `routine "${name}" not found (renamed or deleted?)`, detail: {} });
+  }
+  const sess: Session = { id: `auto:${kind}:${ref}:${Date.now()}`, history: [], notes: [] };
+  const out = await runRoutineSteps(sess, r.steps, { unattended: true });
+  const okCount = out.results.filter((x) => x.ok).length;
+  const status = okCount === r.steps.length ? "ok" : okCount === 0 ? "failed" : "partial";
+  const problems = out.results.filter((x) => !x.ok).map((x) => x.text).slice(0, 3).join("; ");
+  const summary = `${okCount}/${r.steps.length} steps ok` + (problems ? ` — ${problems}` : "");
+  return auto.recordRun({
+    kind, ref, routine_name: r.name, status, summary,
+    detail: { steps: out.results.map((x) => ({ step: x.step, ok: x.ok, text: x.text.slice(0, 500) })) },
+  });
+}
+
+/** Scheduler tick: run due schedules, then advance their next_run past now. */
+export async function tickAutomation(nowMs: number): Promise<void> {
+  for (const s of auto.dueSchedules(nowMs)) {
+    try {
+      await runRoutineUnattended(s.routine_name, "schedule", `schedule:${s.id}`);
+    } catch (e: any) {
+      auto.recordRun({ kind: "schedule", ref: `schedule:${s.id}`, routine_name: s.routine_name, status: "failed", summary: `scheduler error: ${String(e?.message || e)}` });
+    }
+    // advance from now so downtime doesn't pile up missed fires
+    auto.advanceSchedule(s.id, nowMs);
+  }
+}
+
+/** Incoming exec-crm webhook: match triggers, run their routines unattended. */
+export async function handleWebhookEvent(event: string, data: Record<string, any>): Promise<{ matched: number; runs: auto.AutomationRun[] }> {
+  const matched = auto.matchTriggers(event, data || {});
+  const runs: auto.AutomationRun[] = [];
+  for (const t of matched) {
+    runs.push(await runRoutineUnattended(t.routine_name, "trigger", `trigger:${t.id}:${event}`));
+  }
+  return { matched: matched.length, runs };
+}
+
+// ---- automation chat replies ---------------------------------------------------------
+// Parses the RAW message so routine names and steps keep their original casing.
+function saveRoutineReply(raw: string): Reply {
+  const m = raw.trim().match(/^save routine ([a-z0-9][\w\- ]{0,40}?):(.+)$/i);
+  if (!m) return { text: "Give it a name and at least one step, like `save routine EOD: my tasks; kpis`.", chips: ["List routines"] };
+  const steps = m[2].split(";").map((x) => x.trim()).filter(Boolean);
+  try {
+    const r = auto.saveRoutine(m[1].trim(), steps);
+    const list = r.steps.map((st, i) => `${i + 1}. \`${st}\``).join("\n");
+    return {
+      text: `Saved routine **${r.name}** (${r.steps.length} step${r.steps.length === 1 ? "" : "s"}):\n${list}\n\nSay \`run ${r.name}\` to run it, or \`schedule ${r.name} daily at 8am\`.`,
+      chips: [`Run ${r.name}`, "List routines", "Morning brief"],
+    };
+  } catch (e: any) {
+    return { text: String(e?.message || e), chips: ["List routines", "Help"] };
+  }
+}
+
+async function runRoutineReply(session: Session, name: string): Promise<Reply> {
+  const r = auto.getRoutine(name);
+  if (!r) {
+    return {
+      text: `No routine named "${name}". Save one first: \`save routine ${name}: my tasks; pipeline hygiene\``,
+      chips: ["List routines", "Help"],
+    };
+  }
+  const destructive = r.steps.filter((st) => isDestructiveIntent(parseIntent(st)));
+  if (destructive.length) {
+    session.pending = { type: "routine_run", label: r.name, payload: { steps: r.steps } };
+    return {
+      text: `Routine **${r.name}** has ${r.steps.length} steps, ${destructive.length} of them destructive:\n${destructive.map((d) => `• \`${d}\``).join("\n")}\n\nRun the whole routine?`,
+      cards: [{ kind: "confirm", options: [{ n: 1, label: "Yes, run it" }, { n: 2, label: "Cancel" }] }],
+      chips: ["Yes", "No"],
+    };
+  }
+  const out = await runRoutineSteps(session, r.steps, { unattended: false });
+  const okCount = out.results.filter((x) => x.ok).length;
+  return {
+    text: `▶️ **${r.name}** — ${okCount}/${r.steps.length} steps ok\n\n${out.text}`,
+    cards: out.cards, chips: ["List routines", "Morning brief"],
+  };
+}
+
+function listRoutinesReply(): Reply {
+  const rs = auto.listRoutines();
+  if (!rs.length) {
+    return {
+      text: "No routines yet. Save one like this:\n`save routine EOD: my tasks; pipeline hygiene`\nThen `run EOD` any time.",
+      chips: ["Morning brief", "Help"],
+    };
+  }
+  const list = rs.map((r) => `• **${r.name}** — ${r.steps.length} step${r.steps.length === 1 ? "" : "s"}: ${r.steps.join("; ")}`).join("\n");
+  return { text: `**${rs.length} routine${rs.length === 1 ? "" : "s"}:**\n${list}`, chips: ["Morning brief", "Help"] };
+}
+
+function showRoutineReply(name: string): Reply {
+  const r = auto.getRoutine(name);
+  if (!r) return { text: `No routine named "${name}".`, chips: ["List routines"] };
+  const list = r.steps.map((st, i) => `${i + 1}. \`${st}\``).join("\n");
+  return { text: `**${r.name}** (${r.steps.length} steps):\n${list}`, chips: [`Run ${r.name}`, "List routines"] };
+}
+
+function deleteRoutineReply(name: string): Reply {
+  const r = auto.getRoutine(name);
+  if (!r) return { text: `No routine named "${name}".`, chips: ["List routines"] };
+  const d = auto.deleteRoutine(r.name);
+  const extra = (d.schedules || d.triggers)
+    ? ` (also removed ${d.schedules} schedule${d.schedules === 1 ? "" : "s"} and ${d.triggers} trigger${d.triggers === 1 ? "" : "s"} using it)`
+    : "";
+  return { text: `Deleted routine **${r.name}**${extra}.`, chips: ["List routines", "Morning brief"] };
+}
+
+async function scheduleAddReply(slots: Record<string, string>): Promise<Reply> {
+  const r = auto.getRoutine(slots.routine);
+  if (!r) {
+    return {
+      text: `No routine named "${slots.routine}" — save it first with \`save routine ${slots.routine}: …\``,
+      chips: ["List routines"],
+    };
+  }
+  const spec = auto.parseScheduleSpec(slots.when);
+  if (!spec) {
+    return {
+      text: `I couldn't parse "${slots.when}". Try \`daily at 6pm\`, \`every weekday at 8am\`, \`every monday at 9am\`, or \`every 2 hours\`.`,
+      chips: ["List schedules"],
+    };
+  }
+  const sch = auto.createSchedule(r.name, spec, Date.now());
+  return {
+    text: `⏰ Scheduled **${r.name}** ${sch.spec_text} — next run ${new Date(sch.next_run).toLocaleString()}.`,
+    chips: ["List schedules", "List routines"],
+  };
+}
+
+function fmtNext(ms: number): string {
+  const d = new Date(ms);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const day = new Date(d); day.setHours(0, 0, 0, 0);
+  const diff = Math.round((day.getTime() - today.getTime()) / 86400000);
+  const when = diff === 0 ? "today" : diff === 1 ? "tomorrow" : d.toLocaleDateString();
+  return `${when} ${d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+}
+
+function listSchedulesReply(): Reply {
+  const ss = auto.listSchedules();
+  if (!ss.length) {
+    return {
+      text: "No schedules yet. Try `schedule EOD daily at 6pm` or `schedule morning brief every weekday at 8am`.",
+      chips: ["List routines", "Help"],
+    };
+  }
+  const list = ss.map((x) =>
+    `• #${x.id} **${x.routine_name}** — ${x.spec_text}, next ${fmtNext(x.next_run)}${x.active ? "" : " (paused)"}`
+  ).join("\n");
+  return { text: `**${ss.length} schedule${ss.length === 1 ? "" : "s"}:**\n${list}`, chips: ["List routines"] };
+}
+
+function findSchedule(ref: string): auto.Schedule | null {
+  const id = Number(ref);
+  if (Number.isInteger(id) && id > 0) return auto.getSchedule(id);
+  return auto.listSchedules().find((x) => x.routine_name.toLowerCase() === ref.toLowerCase()) || null;
+}
+
+function unscheduleReply(ref: string): Reply {
+  const n = auto.deleteScheduleByRef(ref);
+  if (!n) return { text: `No schedule matching "${ref}".`, chips: ["List schedules"] };
+  return { text: `Removed ${n} schedule${n === 1 ? "" : "s"}.`, chips: ["List schedules"] };
+}
+
+function pauseScheduleReply(ref: string, active: boolean): Reply {
+  const s = findSchedule(ref);
+  if (!s) return { text: `No schedule matching "${ref}".`, chips: ["List schedules"] };
+  auto.setScheduleActive(s.id, active);
+  return { text: `${active ? "▶️ Resumed" : "⏸️ Paused"} schedule #${s.id} (**${s.routine_name}**).`, chips: ["List schedules"] };
+}
+
+async function triggerAddReply(slots: Record<string, string>): Promise<Reply> {
+  const r = auto.getRoutine(slots.routine);
+  if (!r) {
+    return {
+      text: `No routine named "${slots.routine}" — save it first with \`save routine ${slots.routine}: …\``,
+      chips: ["List routines"],
+    };
+  }
+  const resolved = auto.resolveTriggerEvent(slots.event);
+  if (!resolved) {
+    return { text: `I don't know the event "${slots.event}". Say \`trigger help\` for the full list.`, chips: ["Trigger help"] };
+  }
+  const t = auto.createTrigger(resolved.event, resolved.filter, r.name);
+  const f = Object.entries(resolved.filter).map(([k, v]) => `${k}=${v}`).join(", ");
+  return {
+    text: `⚡ Trigger #${t.id}: when **${t.event}**${f ? ` (${f})` : ""}, run **${r.name}**.\n\nTo fire it, add an outgoing webhook in exec-crm → Automations pointed at \`POST /api/hooks/exec-crm\` on this server, with the secret from MILTON_HOOK_SECRET.`,
+    chips: ["List triggers", "Trigger help"],
+  };
+}
+
+function listTriggersReply(): Reply {
+  const ts = auto.listTriggers();
+  if (!ts.length) {
+    return {
+      text: "No triggers yet. Try `when deal won run celebrate` — say `trigger help` for the event list.",
+      chips: ["Trigger help", "List routines"],
+    };
+  }
+  const list = ts.map((t) => {
+    const f = Object.entries(t.filter).map(([k, v]) => `${k}=${v}`).join(", ");
+    return `• #${t.id} **${t.event}**${f ? ` (${f})` : ""} → **${t.routine_name}**${t.active ? "" : " (paused)"}`;
+  }).join("\n");
+  return { text: `**${ts.length} trigger${ts.length === 1 ? "" : "s"}:**\n${list}`, chips: ["Trigger help"] };
+}
+
+function deleteTriggerReply(id: string): Reply {
+  if (auto.deleteTrigger(Number(id))) return { text: `Deleted trigger #${id}.`, chips: ["List triggers"] };
+  return { text: `No trigger #${id}.`, chips: ["List triggers"] };
+}
+
+function triggerHelpText(): string {
+  return [
+    "**exec-crm events you can trigger on:**",
+    ...auto.CRM_EVENTS.map((e) => `• \`${e}\``),
+    "",
+    "Examples:",
+    "• `when deal won run celebrate` — fires when a deal hits closed_won",
+    "• `when deal.stage_changed where stage=negotiation run prep` — with a filter",
+    "• `when task completed run tidy`",
+    "",
+    "Wire exec-crm → Milton: in exec-crm's Automations view add an outgoing webhook to `POST http://<milton-host>:3009/api/hooks/exec-crm` with header `X-Milton-Secret` set to your MILTON_HOOK_SECRET.",
+  ].join("\n");
+}
+
+function listRunsReply(): Reply {
+  const runs = auto.listRuns(10);
+  if (!runs.length) return { text: "No automation runs yet — scheduled routines and triggers will show up here.", chips: ["List schedules", "List triggers"] };
+  const icon = (st: string) => st === "ok" ? "✅" : st === "partial" ? "⚠️" : st === "skipped" ? "⏭️" : "❌";
+  const list = runs.map((r) =>
+    `${icon(r.status)} #${r.id} [${r.kind}] **${r.routine_name}** — ${r.summary} (${new Date(r.ran_at + "Z").toLocaleString()})`
+  ).join("\n");
+  return { text: `**Recent automation runs:**\n${list}`, chips: ["List schedules", "List triggers"] };
+}
+
+async function dispatchAutomation(session: Session, slots: Record<string, string>, name: string, raw: string): Promise<Reply> {
+  switch (name) {
+    case "save_routine": return saveRoutineReply(raw);
+    case "run_routine": return runRoutineReply(session, slots.name);
+    case "list_routines": return listRoutinesReply();
+    case "delete_routine": return deleteRoutineReply(slots.name);
+    case "show_routine": return showRoutineReply(slots.name);
+    case "schedule_add": return scheduleAddReply(slots);
+    case "list_schedules": return listSchedulesReply();
+    case "unschedule": return unscheduleReply(slots.ref);
+    case "pause_schedule": return pauseScheduleReply(slots.ref, false);
+    case "resume_schedule": return pauseScheduleReply(slots.ref, true);
+    case "trigger_add": return triggerAddReply(slots);
+    case "list_triggers": return listTriggersReply();
+    case "delete_trigger": return deleteTriggerReply(slots.id);
+    case "trigger_help": return { text: triggerHelpText(), chips: ["List triggers", "List routines"] };
+    case "list_runs": return listRunsReply();
   }
   return { text: "Nothing to do." };
 }
@@ -285,6 +629,27 @@ async function dispatch(session: Session, intent: Intent, opts: MessageOpts): Pr
     case "hooks": return hooksReply();
     case "deliveries": return deliveriesReply();
     case "notes": return notesReply(session);
+
+    case "save_routine":
+    case "run_routine":
+    case "list_routines":
+    case "delete_routine":
+    case "show_routine":
+    case "schedule_add":
+    case "list_schedules":
+    case "unschedule":
+    case "pause_schedule":
+    case "resume_schedule":
+    case "trigger_add":
+    case "list_triggers":
+    case "delete_trigger":
+    case "trigger_help":
+    case "list_runs":
+      try {
+        return await dispatchAutomation(session, s, intent.name, opts.raw || "");
+      } catch (e: any) {
+        return { text: `Automations aren't available right now: ${String(e?.message || e)}`, chips: HELP_CHIPS.slice(0, 3) };
+      }
 
     case "ocr_read":
       if (!photo) return { text: "I don't see a photo yet — tap the camera button to take or upload one, then ask me to read it.", chips: ["Morning brief", "Show pipeline"] };
