@@ -13,6 +13,7 @@ export type IntentName =
   | "schedule_add" | "list_schedules" | "unschedule" | "pause_schedule" | "resume_schedule"
   | "trigger_add" | "list_triggers" | "delete_trigger" | "trigger_help" | "list_runs"
   | "list_workspaces" | "switch_workspace" | "current_workspace"
+  | "list_stages" | "add_stage" | "rename_stage" | "delete_stage" | "move_stage"
   | "confirm_yes" | "confirm_no" | "choose_number"
   | "unknown";
 
@@ -126,6 +127,7 @@ function stripDealWord(q: string): string {
 
 export function parseIntent(raw: string): Intent {
   const text = norm(raw);
+  const cased = raw.replace(/[?!.,;:]+$/g, "").replace(/\s+/g, " ").trim(); // no lowercasing: stage labels keep their case
   const slots: Record<string, string> = {};
   let name: IntentName = "unknown";
 
@@ -165,6 +167,18 @@ export function parseIntent(raw: string): Intent {
   else if (/^(list |show )?workspaces$/.test(text)) set("list_workspaces");
   else if (/^current workspace$/.test(text)) set("current_workspace");
   else if ((m = text.match(/^(?:switch to|use workspace|switch workspace to) (.+)$/))) set("switch_workspace", { name: m[1].trim() });
+
+  // ---- pipeline stages ------------------------------------------------------------
+  // Before the deal matchers: "move stage X before Y" must not read as move_deal.
+  // Stage names keep the user's capitalization (they're proper labels in the CRM);
+  // ref/query slots stay lowercase for fuzzy matching.
+  else if (/^(list |show |get |all )?(pipeline )?stages$/i.test(cased)) set("list_stages");
+  else if ((m = cased.match(/^(?:add|create|new)(?: a| an)? stage (.+?)(?: (before|after) (.+))?$/i))) {
+    set("add_stage", { name: m[1].trim(), ...(m[2] ? { pos: m[2].toLowerCase(), ref: m[3].trim().toLowerCase() } : {}) });
+  }
+  else if ((m = cased.match(/^rename stage (.+?) to (.+)$/i))) set("rename_stage", { query: m[1].trim().toLowerCase(), name: m[2].trim() });
+  else if ((m = cased.match(/^(?:delete|remove) stage (.+)$/i))) set("delete_stage", { query: m[1].trim().toLowerCase() });
+  else if ((m = cased.match(/^move stage (.+?) (before|after) (.+)$/i))) set("move_stage", { query: m[1].trim().toLowerCase(), pos: m[2].toLowerCase(), ref: m[3].trim().toLowerCase() });
 
   // ---- routines ---------------------------------------------------------------
   else if (/\b(morning brief|daily brief|brief me|briefing)\b/.test(text)) set("brief");
@@ -277,6 +291,7 @@ export function helpText(): string {
     "**Routines** — `morning brief` for today's digest, `pipeline hygiene` for stale deals and gaps.",
     "**Automations** — `save routine EOD: my tasks; pipeline hygiene` then `run EOD`. `schedule EOD daily at 6pm`, `list schedules`, `unschedule 3`. `when deal won run celebrate`, `list triggers`, `trigger help` for the event list.",
     "**Workspaces** — `workspaces` lists exec-crm's workspaces, `switch to Acme` works inside one, `current workspace` shows where you are. Schedules and triggers pin the workspace they were created in.",
+    "**Pipeline schema** — `stages` lists the pipeline stages, `add stage Discovery before proposal`, `rename stage Proposal to Scoping`, `move stage Negotiation after Proposal`, `delete stage Discovery` (I'll ask first, and move its deals somewhere safe).",
     "**Camera** — tap the 📷 button to snap a photo of text; I'll transcribe it. Then `read this`, `analyze handwriting`, or save the transcription as a note on a deal.",
     "",
     "I'll ask before anything destructive, and if a name matches more than one record I'll let you pick.",

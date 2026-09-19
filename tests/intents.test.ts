@@ -67,6 +67,28 @@ describe("parseIntent writes", () => {
     expect(i.name).toBe("delete_deal");
     expect(i.slots.query).toBe("acme website");
   });
+  test("stage intents", () => {
+    expect(parseIntent("stages").name).toBe("list_stages");
+    expect(parseIntent("list stages").name).toBe("list_stages");
+    expect(parseIntent("show pipeline stages").name).toBe("list_stages");
+    const a = parseIntent("add stage Discovery Call");
+    expect(a.name).toBe("add_stage");
+    expect(a.slots.name).toBe("Discovery Call"); // display names keep their case
+    const ab = parseIntent("add stage Discovery before Proposal");
+    expect(ab.slots).toMatchObject({ name: "Discovery", pos: "before", ref: "proposal" });
+    const r = parseIntent("rename stage Proposal to Scoping");
+    expect(r.name).toBe("rename_stage");
+    expect(r.slots).toMatchObject({ query: "proposal", name: "Scoping" });
+    const d = parseIntent("delete stage Discovery");
+    expect(d.name).toBe("delete_stage");
+    expect(d.slots.query).toBe("discovery");
+    const m = parseIntent("move stage Negotiation after Proposal");
+    expect(m.name).toBe("move_stage");
+    expect(m.slots).toMatchObject({ query: "negotiation", pos: "after", ref: "proposal" });
+    // no clash with deal intents
+    expect(parseIntent("move stage X before Y").name).toBe("move_stage");
+    expect(parseIntent("move acme deal to negotiation").name).toBe("move_deal");
+  });
   test("set deal field", () => {
     const i = parseIntent("set acme deal value to 75k");
     expect(i.name).toBe("set_deal_field");

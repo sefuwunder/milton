@@ -30,7 +30,7 @@ export interface Reply { text: string; cards?: Card[]; chips?: string[] }
 
 export interface PendingAction { type: string; label: string; payload: any }
 export interface ChoiceState {
-  kind: "deal" | "contact" | "company" | "task" | "workspace";
+  kind: "deal" | "contact" | "company" | "task" | "workspace" | "stage";
   options: { id: number; label: string; sub?: string }[];
   then: { action: string; payload: any };
 }
@@ -209,6 +209,28 @@ async function handleMessageScoped(session: Session, raw: string, opts: MessageO
     const p = session.pending; session.pending = undefined;
     return dealByName(session, raw, "save_note", { text: p.payload.text, uploadId: p.payload.uploadId });
   }
+  // 2c) resolve a pending delete-stage target: the reply names the stage that
+  // receives the doomed stage's deals. Anything but cancel is read as a stage name.
+  if (session.pending?.type === "delete_stage_target" && intent.name !== "confirm_no") {
+    const p = session.pending;
+    const names = (await crm.getStages()).map((s) => s.name);
+    const target = (await crm.resolveStage(raw))[0]?.item;
+    if (!target) {
+      return { text: `I don't know a stage called "${raw}". Pick one of: ${names.join(", ")}.`, chips: ["Cancel"] };
+    }
+    if (target.slug === p.payload.slug) {
+      return { text: `That's the stage being deleted — pick a different one: ${names.filter((n) => n !== p.label).join(", ")}.`, chips: ["Cancel"] };
+    }
+    session.pending = {
+      type: "delete_stage", label: p.label,
+      payload: { slug: p.payload.slug, deals: p.payload.deals, moveTo: target.slug, moveToName: target.name },
+    };
+    return {
+      text: `Move ${p.payload.deals} deal(s) from "${p.label}" to "${target.name}" and delete "${p.label}"? This can't be undone.`,
+      cards: [{ kind: "confirm", options: [{ n: 1, label: "Yes, move & delete" }, { n: 2, label: "Cancel" }] }],
+      chips: ["Yes", "No"],
+    };
+  }
   // 2b) resolve a pending confirmation
   if (session.pending) {
     if (intent.name === "confirm_yes") {
@@ -262,6 +284,12 @@ async function dispatchChoice(session: Session, ch: ChoiceState, id: number): Pr
     if (!w) return { text: "That workspace seems to be gone — say `workspaces` to see the current list." };
     return applyWorkspace(session, w);
   }
+  if (ch.kind === "stage") {
+    const slug = ch.then.payload?.slugs?.[id];
+    const st = (await crm.getStages()).find((x) => x.slug === slug);
+    if (!st) return { text: "That stage seems to be gone — say `stages` to see the current list." };
+    return stageAction(session, action, st, payload);
+  }
   return { text: "I lost track of that choice — try the command again." };
 }
 
@@ -278,6 +306,11 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
     await crm.deleteTask(p.payload.id);
     return { text: `Deleted task "${p.label}".`, chips: ["My tasks"] };
   }
+  if (p.type === "delete_stage") {
+    await crm.deleteStage(p.payload.slug, p.payload.moveTo);
+    const moved = p.payload.moveTo ? ` ${p.payload.deals} deal(s) moved to "${p.payload.moveToName}".` : "";
+    return { text: `Deleted stage "${p.label}".${moved}`, chips: ["Stages", "Show pipeline"] };
+  }
   if (p.type === "routine_run") {
     const out = await runRoutineSteps(session, p.payload.steps, { unattended: false, confirmed: true });
     const okCount = out.results.filter((r) => r.ok).length;
@@ -292,10 +325,10 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
 // ---- automations: routines, schedules, triggers ------------------------------------
 // Intents that currently ask for confirmation before acting. Routine steps resolving
 // to these never auto-confirm: interactive runs ask once up front, unattended runs skip.
-const DESTRUCTIVE_PENDING = new Set(["delete_deal", "delete_task", "close_lost"]);
+const DESTRUCTIVE_PENDING = new Set(["delete_deal", "delete_task", "close_lost", "delete_stage"]);
 
 function isDestructiveIntent(intent: Intent): boolean {
-  if (intent.name === "delete_deal" || intent.name === "delete_task") return true;
+  if (intent.name === "delete_deal" || intent.name === "delete_task" || intent.name === "delete_stage") return true;
   if (intent.name === "close_deal" && intent.slots.result === "lost") return true;
   return false;
 }
@@ -775,6 +808,12 @@ async function dispatch(session: Session, intent: Intent, opts: MessageOpts): Pr
     case "delete_deal": return dealByName(session, s.query, "delete_deal", {});
     case "set_deal_field": return dealByName(session, s.query, "set_deal_field", { field: s.field, value: s.value });
 
+    case "list_stages": return stagesReply();
+    case "add_stage": return addStageReply(session, s);
+    case "rename_stage": return stageByName(session, s.query, "rename_stage", { name: s.name });
+    case "delete_stage": return stageByName(session, s.query, "delete_stage", {});
+    case "move_stage": return stageByName(session, s.query, "move_stage", { pos: s.pos, ref: s.ref });
+
     case "add_contact": return addContactReply(s);
     case "add_company": {
       if (!s.name) return { text: "What should the company be called?" };
@@ -1157,6 +1196,111 @@ async function dealByName(session: Session, query: string, action: string, paylo
     then: { action, payload },
   };
   return need.reply!;
+}
+
+// ---- pipeline stages ------------------------------------------------------------
+async function pickStage(query: string): Promise<{ stage?: crm.Stage; matches: crm.Match<crm.Stage>[] }> {
+  const matches = await crm.resolveStage(query);
+  if (!matches.length) return { matches };
+  const [top, second] = [matches[0], matches[1]];
+  if (top.score >= 70 && (!second || top.score - second.score >= 20)) return { stage: top.item, matches };
+  return { matches };
+}
+
+async function stagesReply(): Promise<Reply> {
+  const stages = await crm.getStages();
+  if (!stages.length) return { text: "No pipeline stages yet — say `add stage <name>` to create one." };
+  const lines = stages.map((s, i) => `${i + 1}. **${s.name}**${s.deals ? ` — ${s.deals} deal(s)` : ""}`);
+  return {
+    text: `**Pipeline stages** (in order):\n${lines.join("\n")}`,
+    chips: ["Show pipeline", "Add stage …"],
+  };
+}
+
+function friendlyStageError(e: any, what: string): string {
+  const msg = String(e?.message || e);
+  const m = msg.match(/-> (\d+) (.*)$/);
+  if (m && m[1] === "409") return `There's already a stage like that — say \`stages\` to see them.`;
+  if (m) return `Couldn't ${what}: ${m[2]}`;
+  throw e; // connectivity etc: let handleMessage's catch phrase it
+}
+
+async function addStageReply(session: Session, s: Record<string, string>): Promise<Reply> {
+  const name = (s.name || "").trim();
+  if (!name) return { text: "What should the new stage be called?" };
+  let ref: crm.Stage | undefined;
+  if (s.ref) {
+    const r = await pickStage(s.ref);
+    if (!r.stage) return { text: `I couldn't find a stage called "${s.ref}". Say \`stages\` to see them.`, chips: ["Stages"] };
+    ref = r.stage;
+  }
+  try {
+    const st = await crm.addStage(name, s.pos && ref ? { [s.pos]: ref.slug } : {});
+    const where = s.pos && ref ? ` ${s.pos} **${ref.name}**` : " at the end";
+    return { text: `Added stage **${st.name}**${where} of the pipeline.`, chips: ["Stages", "Show pipeline"] };
+  } catch (e: any) {
+    return { text: friendlyStageError(e, "add the stage") };
+  }
+}
+
+async function stageByName(session: Session, query: string, action: string, payload: any): Promise<Reply> {
+  if (!query) return { text: "Which stage?" };
+  const { stage, matches } = await pickStage(query);
+  if (stage) return stageAction(session, action, stage, payload);
+  if (!matches.length) {
+    const names = (await crm.getStages()).map((s) => s.name).join(", ");
+    return { text: `I couldn't find a stage called "${query}". Current stages: ${names}.`, chips: ["Stages"] };
+  }
+  const top = matches.slice(0, 5);
+  session.choice = {
+    kind: "stage",
+    options: top.map((m, i) => ({ id: i, n: i + 1, label: m.item.name, sub: `${m.item.deals || 0} deal(s)` })),
+    then: { action, payload: { ...payload, slugs: top.map((m) => m.item.slug) } },
+  };
+  return {
+    text: "A few stages match — which one did you mean?",
+    cards: [{ kind: "choices", options: session.choice.options }],
+    chips: session.choice.options.map((o) => String(o.n)),
+  };
+}
+
+async function stageAction(session: Session, action: string, stage: crm.Stage, payload: any): Promise<Reply> {
+  if (action === "rename_stage") {
+    const name = (payload.name || "").trim();
+    if (!name) return { text: "What should it be renamed to?" };
+    try {
+      const st = await crm.patchStage(stage.slug, { name });
+      return { text: `Renamed "${stage.name}" → **${st.name}**.`, chips: ["Stages", "Show pipeline"] };
+    } catch (e: any) {
+      return { text: friendlyStageError(e, "rename the stage") };
+    }
+  }
+  if (action === "move_stage") {
+    const r = await pickStage(payload.ref || "");
+    if (!r.stage) return { text: `I couldn't find a stage called "${payload.ref}". Say \`stages\` to see them.`, chips: ["Stages"] };
+    if (r.stage.slug === stage.slug) return { text: "That's the same stage — pick a different one." };
+    try {
+      await crm.patchStage(stage.slug, { [payload.pos]: r.stage.slug });
+      return { text: `Moved **${stage.name}** ${payload.pos} **${r.stage.name}**.`, chips: ["Stages", "Show pipeline"] };
+    } catch (e: any) {
+      return { text: friendlyStageError(e, "move the stage") };
+    }
+  }
+  if (action === "delete_stage") {
+    const deals = stage.deals || 0;
+    if (deals > 0) {
+      // destructive with occupants: first pick a safe home for the deals
+      session.pending = { type: "delete_stage_target", label: stage.name, payload: { slug: stage.slug, deals } };
+      return { text: `🗑️ "${stage.name}" holds ${deals} deal(s). Which stage should I move them into?`, chips: ["Cancel"] };
+    }
+    session.pending = { type: "delete_stage", label: stage.name, payload: { slug: stage.slug, deals: 0 } };
+    return {
+      text: `Delete stage "${stage.name}"? It holds no deals. This can't be undone.`,
+      cards: [{ kind: "confirm", options: [{ n: 1, label: "Yes, delete" }, { n: 2, label: "Cancel" }] }],
+      chips: ["Yes", "No"],
+    };
+  }
+  return { text: "I lost track of that stage action — try again." };
 }
 
 async function dealAction(session: Session, action: string, deal: crm.Deal, payload: any): Promise<Reply> {

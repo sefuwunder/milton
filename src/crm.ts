@@ -19,6 +19,9 @@ export interface Task {
 export interface Kpis { [k: string]: any }
 export interface Activity { id: number; kind: string; text: string; ref_type: string; ref_id: number; created_at: string }
 export interface Webhook { id: number; name: string; url: string; events: string; active: number }
+export interface Stage {
+  slug: string; name: string; position: number; color: string; deals?: number;
+}
 export interface IncomingHook { id: number; name: string; key: string; created_at: string }
 
 import { currentWorkspaceId } from "./workspace";
@@ -99,6 +102,35 @@ export async function patchDeal(id: number, d: Partial<Deal>): Promise<Deal> {
 }
 export async function deleteDeal(id: number): Promise<void> {
   await req(`/api/deals/${id}`, "DELETE");
+}
+
+// ---- pipeline stages (per-workspace editable schema; req() scopes ?workspace=)
+export async function getStages(): Promise<Stage[]> {
+  const j = await req("/api/stages");
+  return j.stages || [];
+}
+export async function addStage(name: string, opts: { before?: string; after?: string; color?: string } = {}): Promise<Stage> {
+  const j = await req("/api/stages", "POST", { name, ...opts });
+  return j.stage;
+}
+export async function patchStage(slug: string, patch: { name?: string; color?: string; before?: string; after?: string; position?: number }): Promise<Stage> {
+  const j = await req(`/api/stages/${encodeURIComponent(slug)}`, "PATCH", patch);
+  return j.stage;
+}
+export async function deleteStage(slug: string, moveTo?: string): Promise<{ ok: boolean; moved: number }> {
+  const q = moveTo ? `?move_to=${encodeURIComponent(moveTo)}` : "";
+  return req(`/api/stages/${encodeURIComponent(slug)}${q}`, "DELETE");
+}
+/** Fuzzy-resolve a stage by display name (or slug). */
+export async function resolveStage(query: string): Promise<Match<Stage>[]> {
+  const stages = await getStages();
+  const items = stages.map((s, i) => ({ ...s, id: i, name: s.name }));
+  const bySlug = stages.findIndex((s) => s.slug === query.toLowerCase().trim());
+  const matches = matchByName(items, query) as Match<Stage>[];
+  if (bySlug >= 0 && !matches.some((m) => m.item.slug === stages[bySlug].slug)) {
+    matches.unshift({ item: stages[bySlug] as Stage, score: 100 });
+  }
+  return matches;
 }
 export async function createContact(c: Partial<Contact>): Promise<Contact> {
   const j = await req("/api/contacts", "POST", c);

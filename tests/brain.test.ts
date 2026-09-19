@@ -21,6 +21,12 @@ const stubTasks = [
   { id: 1, title: "Call Acme", deal_id: 1, campaign_id: null, due_date: "2026-09-18", done: 0, owner: "", created_at: "2026-09-15" },
   { id: 2, title: "Send invoice", deal_id: null, campaign_id: null, due_date: "", done: 1, owner: "", created_at: "2026-09-10" },
 ];
+const stubStages = [
+  { slug: "prospecting", name: "Prospecting", position: 0, color: "#579bfc", deals: 0 },
+  { slug: "negotiation", name: "Negotiation", position: 1, color: "#ffcb00", deals: 2 },
+  { slug: "pre_negotiation", name: "Pre-Negotiation", position: 2, color: "#a9bee8", deals: 0 },
+  { slug: "closed_won", name: "Closed Won", position: 3, color: "#00ca72", deals: 0 },
+];
 
 function stubFetch(input: any, init: any = {}): Promise<Response> {
   const url = String(input);
@@ -57,6 +63,23 @@ function stubFetch(input: any, init: any = {}): Promise<Response> {
   const taskPatch = path.match(/^\/api\/tasks\/(\d+)$/);
   if (taskPatch && method === "PATCH") return ok({ task: { id: Number(taskPatch[1]), ...body } });
   if (taskPatch && method === "DELETE") return ok({ ok: true });
+
+  // pipeline stages (query-stripped so ?workspace= scoping still matches)
+  const base = path.split("?")[0];
+  const err = (data: any, status: number) => Promise.resolve(new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } }));
+  if (method === "GET" && base === "/api/stages") return ok({ stages: stubStages });
+  if (method === "POST" && base === "/api/stages") {
+    const slug = String(body.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+    if (stubStages.some((s) => s.slug === slug)) return err({ error: `stage "${slug}" already exists` }, 409);
+    return ok({ stage: { slug, name: body.name, position: 9, color: "#579bfc", deals: 0 } }, 201);
+  }
+  const stageRec = base.match(/^\/api\/stages\/([a-z0-9_]+)$/);
+  if (stageRec && method === "PATCH") {
+    const st = stubStages.find((s) => s.slug === stageRec[1]);
+    if (!st) return err({ error: "unknown stage" }, 404);
+    return ok({ stage: { ...st, ...(body.name ? { name: body.name } : {}) } });
+  }
+  if (stageRec && method === "DELETE") return ok({ ok: true, moved: 0 });
 
   return Promise.resolve(new Response("not found", { status: 404 }));
 }
@@ -181,6 +204,117 @@ describe("people writes", () => {
     const post = calls.find((c) => c.method === "POST" && c.path === "/api/contacts");
     expect(post?.body.company_id).toBe(1);
     expect(post?.body.email).toBe("john@acme.com");
+  });
+});
+
+describe("pipeline stages", () => {
+  test("lists stages in order with deal counts", async () => {
+    const r = await handleMessage(freshSession(), "stages");
+    expect(r.text).toContain("Prospecting");
+    expect(r.text).toContain("Negotiation");
+    expect(r.text).toContain("2 deal(s)");
+    expect(calls.some((c) => c.method === "GET" && c.path === "/api/stages")).toBe(true);
+  });
+
+  test("workspace id is passed through on schema calls", async () => {
+    const s = freshSession();
+    s.workspaceId = 2;
+    await handleMessage(s, "stages");
+    expect(calls.some((c) => c.path.includes("workspace=2"))).toBe(true);
+  });
+
+  test("add stage", async () => {
+    const r = await handleMessage(freshSession(), "add stage Discovery");
+    expect(r.text).toContain("Added stage");
+    const post = calls.find((c) => c.method === "POST" && c.path === "/api/stages");
+    expect(post?.body.name).toBe("Discovery");
+  });
+
+  test("add stage before another", async () => {
+    await handleMessage(freshSession(), "add stage Discovery before Negotiation");
+    const post = calls.find((c) => c.method === "POST" && c.path === "/api/stages");
+    expect(post?.body.before).toBe("negotiation");
+  });
+
+  test("add duplicate stage is refused gracefully", async () => {
+    const r = await handleMessage(freshSession(), "add stage Negotiation");
+    expect(r.text).toMatch(/already a stage/i);
+    expect(r.text).not.toMatch(/Something went wrong/);
+  });
+
+  test("rename stage", async () => {
+    const r = await handleMessage(freshSession(), "rename stage Negotiation to Haggling");
+    expect(r.text).toContain("Haggling");
+    const patch = calls.find((c) => c.method === "PATCH" && c.path === "/api/stages/negotiation");
+    expect(patch?.body.name).toBe("Haggling");
+  });
+
+  test("ambiguous stage name offers numbered choices", async () => {
+    const s = freshSession();
+    const r = await handleMessage(s, "rename stage egotiat to Haggling");
+    expect(r.cards?.[0].kind).toBe("choices");
+    expect(s.choice?.kind).toBe("stage");
+    const r2 = await handleMessage(s, "1");
+    const patch = calls.find((c) => c.method === "PATCH" && c.path.startsWith("/api/stages/"));
+    expect(patch).toBeTruthy();
+    expect(r2.text).toContain("Haggling");
+  });
+
+  test("unknown stage name is reported", async () => {
+    const r = await handleMessage(freshSession(), "delete stage zzz-nope");
+    expect(r.text).toMatch(/couldn't find a stage/i);
+  });
+
+  test("delete empty stage confirms then deletes", async () => {
+    const s = freshSession();
+    const r1 = await handleMessage(s, "delete stage closed won");
+    expect(r1.cards?.[0].kind).toBe("confirm");
+    expect(s.pending?.type).toBe("delete_stage");
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    const r2 = await handleMessage(s, "yes");
+    expect(r2.text).toContain("Deleted stage");
+    const del = calls.find((c) => c.method === "DELETE");
+    expect(del?.path).toBe("/api/stages/closed_won");
+  });
+
+  test("delete stage with deals asks for a target, then confirms", async () => {
+    const s = freshSession();
+    const r1 = await handleMessage(s, "delete stage negotiation");
+    expect(r1.text).toMatch(/holds 2 deal\(s\)/);
+    expect(r1.text).toMatch(/which stage should i move them into/i);
+    expect(s.pending?.type).toBe("delete_stage_target");
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    const r2 = await handleMessage(s, "prospecting");
+    expect(r2.cards?.[0].kind).toBe("confirm");
+    expect(r2.text).toMatch(/move 2 deal\(s\) from "Negotiation" to "Prospecting"/i);
+    const r3 = await handleMessage(s, "yes");
+    expect(r3.text).toContain("Deleted stage");
+    const del = calls.find((c) => c.method === "DELETE");
+    expect(del?.path).toContain("/api/stages/negotiation");
+    expect(del?.path).toContain("move_to=prospecting");
+  });
+
+  test("delete stage target can be cancelled", async () => {
+    const s = freshSession();
+    await handleMessage(s, "delete stage negotiation");
+    const r = await handleMessage(s, "no");
+    expect(r.text).toContain("Cancelled");
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  test("delete stage rejects an unknown target", async () => {
+    const s = freshSession();
+    await handleMessage(s, "delete stage negotiation");
+    const r = await handleMessage(s, "zzz-nope");
+    expect(r.text).toMatch(/don't know a stage/i);
+    expect(s.pending?.type).toBe("delete_stage_target");
+  });
+
+  test("move stage before another", async () => {
+    const r = await handleMessage(freshSession(), "move stage closed won before negotiation");
+    expect(r.text).toMatch(/before.*Negotiation/);
+    const patch = calls.find((c) => c.method === "PATCH" && c.path === "/api/stages/closed_won");
+    expect(patch?.body.before).toBe("negotiation");
   });
 });
 
