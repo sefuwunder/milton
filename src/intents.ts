@@ -11,6 +11,7 @@ export type IntentName =
   | "add_contact" | "add_company" | "add_task" | "complete_task" | "reopen_task"
   | "delete_task" | "remind"
   | "ocr_read" | "handwriting" | "save_note"
+  | "prep_brief"
   | "save_routine" | "run_routine" | "list_routines" | "delete_routine" | "show_routine"
   | "schedule_add" | "list_schedules" | "unschedule" | "pause_schedule" | "resume_schedule"
   | "trigger_add" | "list_triggers" | "delete_trigger" | "trigger_help" | "list_runs"
@@ -200,6 +201,13 @@ export function parseIntent(raw: string): Intent {
   else if ((m = cased.match(/^(?:delete|remove) stage (.+)$/i))) set("delete_stage", { query: m[1].trim().toLowerCase() });
   else if ((m = cased.match(/^move stage (.+?) (before|after) (.+)$/i))) set("move_stage", { query: m[1].trim().toLowerCase(), pos: m[2].toLowerCase(), ref: m[3].trim().toLowerCase() });
 
+  // ---- meeting prep -------------------------------------------------------------------
+  // Before the brief/hygiene matchers: "brief me on Acme" contains "brief me".
+  else if ((m = cased.match(/^prep me for my call with (.+)$/i))) set("prep_brief", { name: m[1].trim() });
+  else if ((m = cased.match(/^brief me on (.+)$/i))) set("prep_brief", { name: m[1].trim() });
+  else if ((m = cased.match(/^meeting prep(?: for)? (.+)$/i))) set("prep_brief", { name: m[1].trim() });
+  else if ((m = cased.match(/^prep for (.+)$/i))) set("prep_brief", { name: m[1].trim() });
+
   // ---- routines ---------------------------------------------------------------
   else if (/\b(morning brief|daily brief|brief me|briefing)\b/.test(text)) set("brief");
   else if (/\b(pipeline hygiene|hygiene|health check|cleanup|stale deals)\b/.test(text)) set("hygiene");
@@ -317,6 +325,7 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["add task Call Acme tomorrow", "add_task"]], note: "" },
       { cmds: [["workspaces", "list_workspaces"], ["switch to Acme", "switch_workspace"]], note: "" },
       { cmds: [["meridian recons", "list_recons"], ["meridian dossier Austin", "meridian_dossier"]], note: "read Meridian recon" },
+      { cmds: [["prep me for my call with Acme", "prep_brief"]], note: "meeting prep: who, open deals, tasks, talking points" },
     ],
   },
   {

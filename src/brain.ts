@@ -33,7 +33,7 @@ export interface Reply { text: string; cards?: Card[]; chips?: string[] }
 
 export interface PendingAction { type: string; label: string; payload: any }
 export interface ChoiceState {
-  kind: "deal" | "contact" | "company" | "task" | "workspace" | "stage" | "recon";
+  kind: "deal" | "contact" | "company" | "task" | "workspace" | "stage" | "recon" | "prep";
   options: { id: number | string; n?: number; label: string; sub?: string }[];
   then: { action: string; payload: any };
 }
@@ -293,11 +293,18 @@ async function dispatchChoice(session: Session, ch: ChoiceState, id: number | st
     if (!st) return { text: "That stage seems to be gone — say `stages` to see the current list." };
     return stageAction(session, action, st, payload);
   }
-  if (ch.kind === "recon") {
+    if (ch.kind === "recon") {
     const r = await mer.getRecon(String(id));
     if (!r) return { text: "That recon seems to be gone — say `meridian recons` to see the current list." };
     if (action === "meridian_entities") return entitiesReplyFor(r, payload.etype);
     return dossierReplyFor(r);
+  }
+  if (ch.kind === "prep") {
+    const p = ch.then.payload?.sel?.[id];
+    if (!p || (p.type !== "contact" && p.type !== "company")) {
+      return { text: "I lost track of that choice — try the command again." };
+    }
+    return prepBriefReply(session, p.type, p.id);
   }
   return { text: "I lost track of that choice — try the command again." };
 }
@@ -990,6 +997,7 @@ async function dispatch(session: Session, intent: Intent, opts: MessageOpts): Pr
     case "companies": return companiesReply(s.search);
     case "brief": return briefReply();
     case "hygiene": return hygieneReply();
+    case "prep_brief": return prepBriefForName(session, s.name);
     case "activities": return activitiesReply();
     case "webhooks": return webhooksReply();
     case "hooks": return hooksReply();
@@ -1409,6 +1417,173 @@ async function hygieneReply(): Promise<Reply> {
     text: `Found ${findings.length} thing${findings.length === 1 ? "" : "s"} worth fixing:`,
     cards: [{ kind: "findings", title: "Pipeline hygiene", items: findings }],
     chips: ["Show pipeline", "My tasks"],
+  };
+}
+
+// ---- meeting prep brief -----------------------------------------------------------------
+// Deterministic, read-only, offline-first: assembles a brief from exec-crm
+// records. The optional LLM "talking points" section only appears when
+// MILTON_LLM_URL is set, is grounded in the brief facts, and can never
+// break the deterministic brief.
+
+interface PrepCandidate { type: "contact" | "company"; id: number; label: string; sub?: string; score: number }
+
+async function prepCandidates(query: string): Promise<PrepCandidate[]> {
+  const [cm, com] = await Promise.all([crm.resolveContact(query), crm.resolveCompany(query)]);
+  const list: PrepCandidate[] = [
+    ...cm.map((m) => ({ type: "contact" as const, id: m.item.id, label: m.item.name, sub: m.item.title || m.item.company_name || "", score: m.score })),
+    ...com.map((m) => ({ type: "company" as const, id: m.item.id, label: m.item.name, sub: m.item.industry || "", score: m.score })),
+  ];
+  return list.sort((a, b) => b.score - a.score || a.label.localeCompare(b.label));
+}
+
+async function prepBriefForName(session: Session, name: string): Promise<Reply> {
+  const q = (name || "").trim();
+  if (!q) return { text: "Prep for whom? Try `prep me for my call with <name>`.", chips: ["Help"] };
+  const cands = await prepCandidates(q);
+  if (!cands.length) {
+    return {
+      text: `I couldn't find any contact or company matching "${q}". Want me to create it?`,
+      chips: [`Add contact ${q}`, `Add company ${q}`],
+    };
+  }
+  const [top, second] = [cands[0], cands[1]];
+  if (top.score >= 70 && (!second || top.score - second.score >= 20)) {
+    return prepBriefReply(session, top.type, top.id);
+  }
+  // ambiguous: numbered disambiguation, following the existing choice pattern
+  const options = cands.slice(0, 5).map((c, i) => ({
+    id: i, n: i + 1,
+    label: c.label,
+    sub: `${c.type}${c.sub ? ` · ${c.sub}` : ""}`,
+  }));
+  session.choice = {
+    kind: "prep",
+    options,
+    then: { action: "prep_brief", payload: { sel: Object.fromEntries(cands.slice(0, 5).map((c, i) => [i, { type: c.type, id: c.id, label: c.label }])) } },
+  };
+  return {
+    text: "A few people and companies match — who are you meeting with?",
+    cards: [{ kind: "choices", options }],
+    chips: options.map((o) => String(o.n)),
+  };
+}
+
+/** Days since a YYYY-MM-DD[-ish] date, or null when unparseable. */
+function daysSince(isoDate: string): number | null {
+  const n = daysUntil((isoDate || "").slice(0, 10));
+  return n === null ? null : -n;
+}
+
+async function prepBriefReply(session: Session, type: "contact" | "company", id: number): Promise<Reply> {
+  const [contacts, companies, deals, tasks] = await Promise.all([
+    crm.getContacts(), crm.getCompanies(), crm.getDeals(), crm.getTasks(),
+  ]);
+  const contact = type === "contact" ? contacts.find((c) => c.id === id) : undefined;
+  const company = type === "company"
+    ? companies.find((c) => c.id === id)
+    : contact?.company_id ? companies.find((c) => c.id === contact.company_id) : undefined;
+  if (type === "contact" && !contact) return { text: "That contact seems to be gone — try again." };
+  if (type === "company" && !company) return { text: "That company seems to be gone — try again." };
+
+  const whoName = type === "contact" ? contact!.name : company!.name;
+  // primary contact for a company brief: most open deals at that company
+  let primary: crm.Contact | undefined;
+  if (type === "company") {
+    const atCo = contacts.filter((c) => c.company_id === company!.id);
+    const dealCount = (c: crm.Contact) => deals.filter((d) => d.contact_id === c.id && !d.stage.startsWith("closed_")).length;
+    primary = atCo.sort((a, b) => dealCount(b) - dealCount(a) || a.id - b.id)[0];
+  }
+
+  const open = deals.filter((d) => !d.stage.startsWith("closed_"));
+  const linked = open.filter((d) =>
+    (contact && d.contact_id === contact.id) ||
+    (company && d.company_id != null && d.company_id === company.id)
+  ).sort((a, b) => (b.value || 0) - (a.value || 0));
+  const dealIds = new Set(linked.map((d) => d.id));
+  const today = todayStr();
+  const linkedTasks = tasks
+    .filter((t) => !t.done && t.deal_id != null && dealIds.has(t.deal_id))
+    .sort((a, b) => (a.due_date || "9999").localeCompare(b.due_date || "9999"));
+  const overdue = linkedTasks.filter((t) => t.due_date && t.due_date < today);
+  const staleDeals = linked.filter((d) => { const n = daysSince(d.updated_at); return n !== null && n >= 30; });
+  const openValue = linked.reduce((a, d) => a + (d.value || 0), 0);
+
+  // Who: contact + their company, or company + primary contact.
+  const whoLine = type === "contact"
+    ? `**${contact!.name}**${contact!.title ? ` — ${contact!.title}` : ""}\n` +
+      [contact!.email ? `📧 ${contact!.email}` : "", contact!.phone ? `📞 ${contact!.phone}` : ""].filter(Boolean).join(" · ") +
+      (company ? `\n🏢 **${company.name}**${company.industry ? ` — ${company.industry}` : ""}${company.website ? ` · ${company.website}` : ""}` : "")
+    : `🏢 **${company!.name}**${company!.industry ? ` — ${company!.industry}` : ""}${company!.website ? ` · ${company!.website}` : ""}` +
+      (primary ? `\n👤 **${primary.name}**${primary.title ? ` — ${primary.title}` : ""}${primary.email ? ` · ${primary.email}` : ""}` : "");
+
+  const dealLines = linked.map((d) => {
+    const n = daysSince(d.updated_at);
+    const stale = n !== null && n >= 30;
+    return `• **${d.title}** — ${stageLabel(d.stage)} · ${fmtMoney(d.value)}${n !== null ? ` · ${n}d since update` : ""}${stale ? " ⚠️" : ""}`;
+  });
+  const taskLines = linkedTasks.map((t) => {
+    const n = t.due_date ? daysUntil(t.due_date) : null;
+    return n !== null && n < 0 ? `⏰ **${t.title}** — ${-n}d overdue` : `• **${t.title}** — ${t.due_date ? `due ${t.due_date}` : "no due date"}`;
+  });
+
+  // Meridian angle: only when a recon city is genuinely mentioned in the
+  // company/contact record. Best-effort; an unreachable Meridian means
+  // no section, never an error.
+  let meridianLine = "";
+  try {
+    const hay = [company?.name, company?.notes, company?.website, contact?.notes, contact?.company_name]
+      .filter(Boolean).join(" ").toLowerCase();
+    const recons = await mer.listRecons();
+    const hit = recons?.find((r) => r.city && hay.includes(r.city.toLowerCase()));
+    if (hit) meridianLine = `🗺️ Meridian has a recon on **${hit.city}** — say \`meridian dossier ${hit.city}\`.`;
+  } catch { /* never break the brief */ }
+
+  const lines = [
+    `📋 **Meeting prep: ${whoName}**`,
+    "",
+    whoLine,
+    "",
+    linked.length
+      ? `**Open deals (${linked.length}, ${fmtMoney(openValue)}):**\n${dealLines.join("\n")}`
+      : "No open deals linked.",
+    "",
+    linkedTasks.length
+      ? `**Open tasks (${linkedTasks.length}):**\n${taskLines.join("\n")}`
+      : "No open tasks linked.",
+    // Recent activity: exec-crm's activities carry no ref linkage
+    // (ref_type/ref_id are never populated), so there's nothing honest
+    // to attach here — skipped silently.
+    meridianLine ? `\n${meridianLine}` : "",
+    "",
+    `**Bottom line:** ${linked.length} open deal${linked.length === 1 ? "" : "s"} (${fmtMoney(openValue)}), ` +
+      `${staleDeals.length} stuck 30+ days, ${overdue.length} overdue task${overdue.length === 1 ? "" : "s"}.`,
+  ];
+
+  // Optional LLM talking points: grounded only in the brief facts, clearly
+  // labeled, and never allowed to break the deterministic brief above.
+  if (process.env.MILTON_LLM_URL) {
+    const facts = [
+      `Meeting with: ${whoName}${type === "contact" && company ? ` (${contact!.title || "no title"}, ${company.name})` : ""}${type === "company" && primary ? ` (primary contact: ${primary.name})` : ""}`,
+      `Open deals: ${linked.length ? linked.map((d) => `"${d.title}" (${stageLabel(d.stage)}, ${fmtMoney(d.value)})`).join("; ") : "none"}`,
+      `Stale deals (30+ days since update): ${staleDeals.length ? staleDeals.map((d) => d.title).join(", ") : "none"}`,
+      `Tasks: ${linkedTasks.length ? linkedTasks.map((t) => `"${t.title}" (${t.due_date ? (t.due_date < today ? `${-daysUntil(t.due_date)!}d overdue` : `due ${t.due_date}`) : "no due date"})`).join("; ") : "none"}`,
+    ].join("\n");
+    const llm = await llmReply(
+      `Suggest 3-5 short bullet talking points for my upcoming call, based ONLY on these facts (do not invent anything):\n${facts}`,
+      []
+    );
+    if (llm.ok) lines.push("", `**Talking points** _(from your LLM)_:\n${llm.text}`);
+    else lines.push("", `_Talking points skipped — the LLM didn't respond (${llm.error.slice(0, 160)})._`);
+  }
+
+  return {
+    text: lines.filter((l) => l !== "").join("\n").replace(/\n{3,}/g, "\n\n"),
+    cards: [
+      ...(linked.length ? [{ kind: "deals" as const, title: "Open deals", items: linked.map((d) => ({ ...d, sub: `${stageLabel(d.stage)} · ${fmtMoney(d.value)}` })) }] : []),
+      ...(linkedTasks.length ? [{ kind: "tasks" as const, title: "Open tasks", items: linkedTasks }] : []),
+    ],
+    chips: ["Show pipeline", "My tasks", "Morning brief"],
   };
 }
 
