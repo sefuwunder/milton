@@ -89,17 +89,69 @@ body {
 }
 .chip:hover { background: rgba(255,255,255,.13); }
 
-.composer { display: flex; gap: 10px; padding: 12px 18px 16px; border-top: 1px solid var(--glass-border); }
+.composer { display: flex; gap: 10px; padding: 12px 18px 16px; border-top: 1px solid var(--glass-border); align-items: center; }
 .composer input {
   flex: 1; padding: 12px 16px; border-radius: 999px; font-size: 15px;
   background: var(--glass); border: 1px solid var(--glass-border); color: var(--text); outline: none;
+  min-width: 0;
 }
 .composer input:focus { border-color: var(--accent); }
+.cam {
+  width: 46px; height: 46px; border-radius: 50%; border: 1px solid var(--glass-border);
+  background: var(--glass); font-size: 20px; cursor: pointer; flex: 0 0 auto;
+  display: grid; place-items: center;
+}
+.cam:hover { background: rgba(255,255,255,.13); }
 .send {
-  width: 46px; height: 46px; border-radius: 50%; border: 0; cursor: pointer;
+  width: 46px; height: 46px; border-radius: 50%; border: 0; cursor: pointer; flex: 0 0 auto;
   background: linear-gradient(135deg, var(--accent), #9b7cff); color: #fff; font-size: 20px;
 }
 .send:hover { filter: brightness(1.1); }
+
+/* attachment tray */
+.tray { display: flex; gap: 10px; padding: 2px 18px 10px; overflow-x: auto; }
+.tray[hidden] { display: none; }
+.tray-item {
+  position: relative; width: 76px; height: 76px; border-radius: 12px; overflow: hidden;
+  border: 1px solid var(--glass-border); background: var(--glass); flex: 0 0 auto;
+}
+.tray-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tray-item.done { border-color: var(--accent2); }
+.tray-item.done::after {
+  content: "✓"; position: absolute; right: 4px; bottom: 2px;
+  color: var(--accent2); font-weight: 700; font-size: 14px; text-shadow: 0 1px 4px rgba(0,0,0,.6);
+}
+.tray-item.failed { border-color: #ff6b6b; }
+.tray-item .prog { position: absolute; left: 0; right: 0; bottom: 0; height: 6px; background: rgba(0,0,0,.45); }
+.tray-item .prog .bar { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+.tray-item .rm {
+  position: absolute; top: 2px; right: 2px; width: 22px; height: 22px; border-radius: 50%;
+  border: 0; background: rgba(0,0,0,.55); color: #fff; font-size: 14px; line-height: 1; cursor: pointer;
+}
+.tray-item .err {
+  position: absolute; left: 0; right: 0; bottom: 0; font-size: 10px; color: #ffb3b3;
+  background: rgba(0,0,0,.6); padding: 2px 4px;
+}
+
+/* photos in messages + cards */
+.msg .thumb { display: block; max-width: 220px; border-radius: 10px; margin-bottom: 8px; border: 1px solid var(--glass-border); }
+.card .shot { display: block; max-width: 100%; max-height: 220px; border-radius: 10px; margin-bottom: 10px; border: 1px solid var(--glass-border); }
+.ocr-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.ocr-head .conf { font-weight: 700; color: var(--accent2); }
+.ocr-head .script { font-size: 12px; color: var(--muted); }
+.confbar { height: 6px; border-radius: 3px; background: rgba(255,255,255,.08); overflow: hidden; margin-bottom: 10px; }
+.confbar div { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 3px; }
+.ocr-text {
+  margin: 0; padding: 10px 12px; border-radius: 10px; font-size: 14px; line-height: 1.6;
+  background: rgba(0,0,0,.25); border: 1px solid rgba(255,255,255,.07);
+  white-space: pre-wrap; word-break: break-word; font-family: inherit;
+}
+.metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-bottom: 10px; }
+.mrow { display: flex; justify-content: space-between; gap: 8px; padding: 5px 0; border-top: 1px solid rgba(255,255,255,.06); font-size: 13px; }
+.mrow span { color: var(--muted); } .mrow b { font-weight: 600; }
+.notes { margin: 0; padding-left: 18px; font-size: 13.5px; line-height: 1.55; color: var(--text); }
+.notes li { margin-bottom: 4px; }
+.notes li:last-child { color: var(--muted); font-style: italic; }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 @media (max-width: 640px) { .msg { max-width: 92%; } .app { border: 0; } }

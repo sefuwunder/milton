@@ -1,5 +1,5 @@
 // ui.test.ts — DOM-stubbed smoke test for public/app.js (zero-dependency UI).
-import { describe, test, expect, beforeAll } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { readFileSync } from "fs";
 
 function mkEl(tag: string): any {
@@ -17,19 +17,24 @@ let els: Record<string, any>;
 
 beforeAll(async () => {
   els = {};
-  ["chat", "chips", "composer", "input", "status-dot", "status-text", "help-btn"].forEach((id) => (els[id] = mkEl("div")));
+  ["chat", "chips", "composer", "input", "status-dot", "status-text", "help-btn",
+   "cam-btn", "photo-input", "tray"].forEach((id) => (els[id] = mkEl("div")));
   (globalThis as any).document = {
     getElementById: (id: string) => els[id] || null,
     createElement: (t: string) => mkEl(t),
     addEventListener() {},
   };
   (globalThis as any).localStorage = { _s: {}, getItem(k: string) { return this._s[k] || null; }, setItem(k: string, v: string) { this._s[k] = v; } };
+  // stub fetch for the DOM smoke test only — restored afterwards so later
+  // test files (e.g. upload.test.ts) get the real fetch back
+  const prevFetch = (globalThis as any).fetch;
   (globalThis as any).fetch = async (url: string) => {
     const ok = (d: any) => ({ json: async () => d });
     if (String(url).includes("/api/health")) return ok({ crm: true, llm: false });
     if (String(url).includes("/api/history")) return ok({ messages: [{ role: "milton", text: "**hi** there" }] });
     return ok({});
   };
+  afterAll(() => { (globalThis as any).fetch = prevFetch; });
   let src = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
   src = src.replace("})();", ";globalThis.__t={cardHTML,md,money,esc};})();");
   eval(src);
@@ -61,8 +66,27 @@ describe("cards", () => {
       { kind: "choices", options: [{ n: 1, label: "One", sub: "sub" }] },
       { kind: "confirm", options: [{ n: 1, label: "Yes, delete" }] },
       { kind: "findings", items: [{ icon: "📅", text: "gap" }] },
+      { kind: "transcription", title: "Photo transcription", ocrText: "HELLO 123", confidence: 0.93, script: "print", imageUrl: "/api/file/abc" },
+      { kind: "handwriting", title: "Handwriting analysis", metrics: { slantDeg: 8.5, strokeMedian: 4.2, strokeStd: 1.1, heightMean: 22.4, heightStd: 3.3, spacingRatio: 2.8, baselineDrift: -1.2, inkDensity: 0.14, chars: 42, words: 9, lines: 3 }, notes: ["Slant: leans right by 8.5°."], imageUrl: "/api/file/abc" },
     ];
     for (const c of cards) expect(() => T.cardHTML(c)).not.toThrow();
+  });
+  test("transcription card shows text, confidence and script", () => {
+    const h = T.cardHTML({ kind: "transcription", ocrText: "HELLO", confidence: 0.93, script: "handwriting", imageUrl: "/api/file/abc" });
+    expect(h).toContain("HELLO");
+    expect(h).toContain("93%");
+    expect(h).toContain("Handwriting");
+    expect(h).toContain("/api/file/abc?session=");
+  });
+  test("transcription card escapes OCR text (XSS)", () => {
+    const h = T.cardHTML({ kind: "transcription", ocrText: "<script>alert(1)</script>", confidence: 0.5, script: "print" });
+    expect(h).not.toContain("<script>");
+    expect(h).toContain("&lt;script&gt;");
+  });
+  test("handwriting card shows raw metrics and notes", () => {
+    const h = T.cardHTML({ kind: "handwriting", metrics: { slantDeg: -6, strokeMedian: 3, strokeStd: 1, heightMean: 20, heightStd: 4, spacingRatio: 2.1, baselineDrift: 0.5, inkDensity: 0.12, chars: 10, words: 2, lines: 1 }, notes: ["Slant: leans left by 6.0°."] });
+    expect(h).toContain("-6°");
+    expect(h).toContain("Slant: leans left");
   });
   test("escapes HTML in entity names (XSS)", () => {
     const h = T.cardHTML({ kind: "deals", items: [{ title: "<img src=x onerror=y>", stage: "proposal", value: 1 }] });

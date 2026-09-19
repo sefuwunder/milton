@@ -7,6 +7,14 @@
   const input = document.getElementById("input");
   const statusDot = document.getElementById("status-dot");
   const statusText = document.getElementById("status-text");
+  const camBtn = document.getElementById("cam-btn");
+  const photoInput = document.getElementById("photo-input");
+  const tray = document.getElementById("tray");
+
+  // photos uploaded and waiting to be sent with the next message
+  const pending = []; // { id, url, objUrl }
+
+  const fileUrl = (card) => card.imageUrl ? card.imageUrl + "?session=" + encodeURIComponent(sid) : "";
 
   let sid = localStorage.getItem("milton_sid");
   if (!sid) { sid = "s-" + Math.random().toString(36).slice(2, 10); localStorage.setItem("milton_sid", sid); }
@@ -80,6 +88,32 @@
       case "findings":
         h += (card.items || []).map((f) => `<div class="finding">${esc(f.icon || "•")} ${esc(f.text)}</div>`).join("");
         break;
+      case "transcription": {
+        const pct = Math.round((card.confidence || 0) * 100);
+        const script = card.script === "handwriting" ? "Handwriting" : card.script === "mixed" ? "Mixed print + handwriting" : "Printed text";
+        if (card.imageUrl) h += `<img class="shot" src="${esc(fileUrl(card))}" alt="Uploaded photo">`;
+        h += `<div class="ocr-head"><span class="conf">${pct}% confidence</span><span class="script">${esc(script)}</span></div>`;
+        h += `<div class="confbar"><div style="width:${pct}%"></div></div>`;
+        h += `<pre class="ocr-text">${esc(card.ocrText || "")}</pre>`;
+        break;
+      }
+      case "handwriting": {
+        const m = card.metrics || {};
+        if (card.imageUrl) h += `<img class="shot" src="${esc(fileUrl(card))}" alt="Uploaded photo">`;
+        const rows = [
+          ["Slant", (m.slantDeg ?? 0) + "°"],
+          ["Stroke width", (m.strokeMedian ?? 0) + " px (σ " + (m.strokeStd ?? 0) + ")"],
+          ["Letter height", (m.heightMean ?? 0) + " px (σ " + (m.heightStd ?? 0) + ")"],
+          ["Spacing ratio", (m.spacingRatio ?? 0) + "×"],
+          ["Baseline drift", (m.baselineDrift ?? 0) + "°"],
+          ["Ink density", ((m.inkDensity ?? 0) * 100).toFixed(1) + "%"],
+          ["Measured", `${m.chars ?? 0} chars · ${m.words ?? 0} words · ${m.lines ?? 0} lines`],
+        ];
+        h += `<div class="metrics">` + rows.map((r) =>
+          `<div class="mrow"><span>${esc(r[0])}</span><b>${esc(String(r[1]))}</b></div>`).join("") + `</div>`;
+        h += `<ul class="notes">` + (card.notes || []).map((n) => `<li>${esc(n)}</li>`).join("") + `</ul>`;
+        break;
+      }
     }
     return h + `</div>`;
   }
@@ -87,7 +121,8 @@
   function addMsg(role, reply) {
     const div = document.createElement("div");
     div.className = "msg " + role;
-    div.innerHTML = md(reply.text || "");
+    (reply.photos || []).forEach((p) => { div.insertAdjacentHTML("beforeend", `<img class="thumb" src="${esc(p)}" alt="Uploaded photo">`); });
+    div.innerHTML += md(reply.text || "");
     (reply.cards || []).forEach((c) => { div.insertAdjacentHTML("beforeend", cardHTML(c)); });
     chat.appendChild(div);
     scroll();
@@ -114,24 +149,116 @@
     }
   });
 
+  // ---- camera uploads ------------------------------------------------------------
+  function renderTray() {
+    tray.hidden = !tray.querySelector(".tray-item");
+  }
+
+  function addTrayItem(file) {
+    const item = document.createElement("div");
+    item.className = "tray-item";
+    const objUrl = URL.createObjectURL(file);
+    item.innerHTML =
+      `<img src="${esc(objUrl)}" alt="Photo to send">` +
+      `<div class="prog"><div class="bar"></div></div>` +
+      `<button type="button" class="rm" aria-label="Remove photo">×</button>`;
+    const bar = item.querySelector(".bar");
+    const rm = item.querySelector(".rm");
+    const entry = { id: null, url: null, objUrl, item };
+    rm.addEventListener("click", () => {
+      const i = pending.indexOf(entry);
+      if (i >= 0) pending.splice(i, 1);
+      URL.revokeObjectURL(objUrl);
+      item.remove();
+      renderTray();
+    });
+    tray.appendChild(item);
+    renderTray();
+    uploadPhoto(file,
+      (frac) => { bar.style.width = Math.round(frac * 100) + "%"; },
+    ).then(({ id, url }) => {
+      entry.id = id; entry.url = url;
+      pending.push(entry);
+      item.classList.add("done");
+      bar.parentElement.hidden = true;
+    }).catch((err) => {
+      item.classList.add("failed");
+      bar.parentElement.hidden = true;
+      const e = document.createElement("span");
+      e.className = "err"; e.textContent = err.message || "Upload failed";
+      item.appendChild(e);
+    });
+  }
+
+  function uploadPhoto(file, onProgress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/upload?session=" + encodeURIComponent(sid));
+      xhr.upload.addEventListener("progress", (e) => {
+        if (e.lengthComputable) onProgress(e.loaded / e.total);
+      });
+      xhr.addEventListener("load", () => {
+        if (xhr.status === 200) {
+          try { resolve(JSON.parse(xhr.responseText)); }
+          catch { reject(new Error("Bad server response")); }
+        } else {
+          let msg = "Upload failed";
+          try { msg = JSON.parse(xhr.responseText).error || msg; } catch { /* keep default */ }
+          reject(new Error(msg));
+        }
+      });
+      xhr.addEventListener("error", () => reject(new Error("Network error")));
+      xhr.addEventListener("abort", () => reject(new Error("Upload cancelled")));
+      const fd = new FormData();
+      fd.append("photo", file, file.name || "photo.jpg");
+      xhr.send(fd);
+    });
+  }
+
+  camBtn.addEventListener("click", () => photoInput.click());
+  photoInput.addEventListener("change", () => {
+    Array.from(photoInput.files || []).slice(0, 4).forEach((f) => {
+      if (f.size > 10 * 1024 * 1024) {
+        addMsg("milton", { text: `"${f.name}" is over the 10 MB limit — pick a smaller photo.` });
+        return;
+      }
+      addTrayItem(f);
+    });
+    photoInput.value = "";
+  });
+
+  function clearTray() {
+    pending.length = 0;
+    tray.querySelectorAll(".tray-item").forEach((el) => {
+      const img = el.querySelector("img");
+      if (img && img.src.startsWith("blob:")) URL.revokeObjectURL(img.src);
+      el.remove();
+    });
+    renderTray();
+  }
+
   async function send(text) {
     text = (text || "").trim();
-    if (!text) return;
+    const atts = pending.filter((p) => p.id);
+    if (!text && !atts.length) return;
     input.value = "";
-    addMsg("user", { text });
+    const photos = atts.map((a) => a.url + "?session=" + encodeURIComponent(sid));
+    addMsg("user", { text, photos });
     setChips([]);
+    // keep the tray until the send succeeds so a failed send doesn't lose uploads
     const typing = document.createElement("div");
-    typing.className = "msg milton typing"; typing.textContent = "Milton is thinking…";
+    typing.className = "msg milton typing";
+    typing.textContent = atts.length ? "Milton is reading your photo…" : "Milton is thinking…";
     chat.appendChild(typing); scroll();
     try {
       const res = await fetch("/api/chat", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session: sid, message: text }),
+        body: JSON.stringify({ session: sid, message: text, attachments: atts.map((a) => a.id) }),
       });
       const reply = await res.json();
       typing.remove();
       if (reply.error) addMsg("milton", { text: "Hmm, that didn't go through: " + reply.error });
-      else { addMsg("milton", reply); setChips(reply.chips); }
+      else { addMsg("milton", reply); setChips(reply.chips); clearTray(); }
     } catch (err) {
       typing.remove();
       addMsg("milton", { text: "I couldn't reach the Milton server. Is it running?" });
@@ -153,7 +280,7 @@
       (hist.messages || []).forEach((m) => addMsg(m.role === "user" ? "user" : "milton", { text: m.text }));
     } catch { /* fresh start */ }
     if (!chat.children.length) {
-      addMsg("milton", { text: "Hey, I'm **Milton** — your copilot inside exec-crm. Ask for a **morning brief**, check the **pipeline**, or tell me to move a deal. What are we working on?" });
+      addMsg("milton", { text: "Hey, I'm **Milton** — your copilot inside exec-crm. Ask for a **morning brief**, check the **pipeline**, move a deal — or tap 📷 to snap a photo of text and I'll read it. What are we working on?" });
       setChips(["Morning brief", "Show pipeline", "My tasks", "Help"]);
     }
     input.focus();

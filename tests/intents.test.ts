@@ -28,6 +28,19 @@ describe("parseIntent reads", () => {
     ["incoming hooks", "hooks"],
     ["delivery log", "deliveries"],
     ["recent activity", "activities"],
+    ["read this", "ocr_read"],
+    ["read the photo", "ocr_read"],
+    ["what does this say", "ocr_read"],
+    ["what's in this photo", "ocr_read"],
+    ["transcribe this", "ocr_read"],
+    ["transcribe it", "ocr_read"],
+    ["analyze the handwriting", "handwriting"], ["analyze handwriting", "handwriting"],
+    ["analyze this handwriting", "handwriting"],
+    ["handwriting analysis", "handwriting"],
+    ["describe the handwriting", "handwriting"],
+    ["save note to a deal", "save_note"],
+    ["my notes", "notes"],
+    ["list notes", "notes"],
   ];
   for (const [input, name, slots] of cases) {
     test(`"${input}" -> ${name}`, () => {

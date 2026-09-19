@@ -3,14 +3,26 @@
 
 import * as crm from "./crm";
 import { parseIntent, helpText, HELP_CHIPS, parseStage, parseMoney, parseDate, type Intent } from "./intents";
+import { ocrUpload, type HandMetrics } from "./ocr";
 
 export interface Card {
-  kind: "deals" | "pipeline" | "kpis" | "tasks" | "contacts" | "companies" | "activities" | "webhooks" | "choices" | "confirm" | "findings";
+  kind: "deals" | "pipeline" | "kpis" | "tasks" | "contacts" | "companies" | "activities" | "webhooks" | "choices" | "confirm" | "findings" | "transcription" | "handwriting";
   title?: string;
   items?: any[];
   rows?: any[];
   options?: { n: number; label: string; sub?: string }[];
   stats?: { label: string; value: string }[];
+  // transcription card
+  ocrText?: string;
+  confidence?: number;
+  script?: string;
+  lines?: { text: string; confidence: number }[];
+  // handwriting card
+  metrics?: HandMetrics;
+  notes?: string[];
+  // photo cards
+  uploadId?: string;
+  imageUrl?: string;
 }
 export interface Reply { text: string; cards?: Card[]; chips?: string[] }
 
@@ -20,12 +32,19 @@ export interface ChoiceState {
   options: { id: number; label: string; sub?: string }[];
   then: { action: string; payload: any };
 }
+export interface SavedNote { dealId: number; dealTitle: string; text: string; uploadId?: string; at: string }
 export interface Session {
   id: string;
   pending?: PendingAction;
   choice?: ChoiceState;
   history: { role: "user" | "milton"; text: string }[];
+  lastOcr?: { text: string; uploadId: string };
+  notes?: SavedNote[];
 }
+
+// A photo uploaded through /api/upload, resolved session-side.
+export interface UploadRef { id: string; mime: string; size: number; path: string }
+export interface MessageOpts { attachments?: UploadRef[]; latestUpload?: UploadRef | null }
 
 // ---- formatting helpers -------------------------------------------------------
 export function fmtMoney(n: number): string {
@@ -88,12 +107,31 @@ async function needOne<T extends { id: number }>(
 }
 
 // ---- LLM hook (optional, off by default) -----------------------------------------
-const LLM_URL = process.env.MILTON_LLM_URL || "";
-const LLM_KEY = process.env.MILTON_LLM_KEY || "";
-const LLM_MODEL = process.env.MILTON_LLM_MODEL || "local-model";
+// Env is read at call time (not module load) so tests can reconfigure per case.
+type LlmResult = { ok: true; text: string } | { ok: false; error: string };
 
-async function llmReply(question: string, history: Session["history"]): Promise<string | null> {
-  if (!LLM_URL) return null;
+function llmBase(): string {
+  return (process.env.MILTON_LLM_URL || "").replace(/\/$/, "");
+}
+
+/** Pull the provider's own error text out of a failed chat-completions response.
+ *  Ollama: {"error": "..."} — OpenAI: {"error": {"message": "..."}}.
+ *  Never includes request headers, so no API key material can leak through here. */
+async function llmProviderError(res: Response): Promise<string> {
+  try {
+    const j: any = await res.json();
+    if (typeof j?.error === "string") return j.error;
+    if (typeof j?.error?.message === "string") return j.error.message;
+  } catch { /* non-JSON error body */ }
+  return res.statusText || "";
+}
+
+async function llmReply(question: string, history: Session["history"]): Promise<LlmResult> {
+  const base = llmBase();
+  if (!base) return { ok: false, error: "LLM not configured (set MILTON_LLM_URL)" };
+  const endpoint = base + "/chat/completions";
+  const key = process.env.MILTON_LLM_KEY || "";
+  const model = process.env.MILTON_LLM_MODEL || "local-model";
   try {
     const [deals, tasks, contacts] = await Promise.all([crm.getDeals(), crm.getTasks(), crm.getContacts()]);
     const open = deals.filter((d) => !d.stage.startsWith("closed_"));
@@ -102,11 +140,11 @@ async function llmReply(question: string, history: Session["history"]): Promise<
       "Open deals: " + open.slice(0, 15).map((d) => `${d.title} (${stageLabel(d.stage)}, ${fmtMoney(d.value)})`).join("; "),
       "Stages: prospecting, qualification, proposal, negotiation, closed_won, closed_lost.",
     ].join("\n");
-    const res = await fetch(LLM_URL.replace(/\/$/, "") + "/chat/completions", {
+    const res = await fetch(endpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(LLM_KEY ? { Authorization: `Bearer ${LLM_KEY}` } : {}) },
+      headers: { "Content-Type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) },
       body: JSON.stringify({
-        model: LLM_MODEL,
+        model,
         messages: [
           { role: "system", content: `You are Milton, a concise CRM assistant inside exec-crm. Answer in 2-4 sentences, plain text, no markdown headers. You can read CRM data but cannot change it in this mode — suggest the exact command the user can type (e.g. "move Acme deal to negotiation").\n${ctx}` },
           ...history.slice(-8).map((h) => ({ role: h.role === "user" ? "user" : "assistant", content: h.text })),
@@ -117,14 +155,34 @@ async function llmReply(question: string, history: Session["history"]): Promise<
       }),
       signal: AbortSignal.timeout(30000),
     });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      const providerMsg = await llmProviderError(res);
+      return { ok: false, error: `${res.status} from ${endpoint}${providerMsg ? `: ${providerMsg}` : ""}` };
+    }
     const j: any = await res.json();
-    return j.choices?.[0]?.message?.content?.trim() || null;
-  } catch { return null; }
+    const text = j.choices?.[0]?.message?.content?.trim();
+    if (!text) return { ok: false, error: `empty response from ${endpoint}` };
+    return { ok: true, text };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `request to ${endpoint} failed: ${msg}` };
+  }
 }
 
 // ---- main entry ------------------------------------------------------------------
-export async function handleMessage(session: Session, raw: string): Promise<Reply> {
+export async function handleMessage(session: Session, raw: string, opts: MessageOpts = {}): Promise<Reply> {
+  const atts = opts.attachments || [];
+
+  // captionless photo -> run OCR automatically
+  if (!raw.trim() && atts.length) {
+    session.history.push({ role: "user", text: "[photo]" });
+    const reply = await ocrPhotoReply(atts[0], { auto: true });
+    session.history.push({ role: "milton", text: reply.text });
+    session.history = session.history.slice(-40);
+    if (reply.cards?.[0]?.ocrText) session.lastOcr = { text: reply.cards[0].ocrText!, uploadId: atts[0].id };
+    return reply;
+  }
+
   const intent = parseIntent(raw);
 
   // 1) resolve an outstanding disambiguation choice
@@ -135,7 +193,12 @@ export async function handleMessage(session: Session, raw: string): Promise<Repl
     const ch = session.choice; session.choice = undefined;
     return dispatchChoice(session, ch, opt.id);
   }
-  // 2) resolve a pending confirmation
+  // 2a) resolve a pending save-note: the reply names the deal
+  if (session.pending?.type === "save_note" && intent.name !== "confirm_yes" && intent.name !== "confirm_no") {
+    const p = session.pending; session.pending = undefined;
+    return dealByName(session, raw, "save_note", { text: p.payload.text, uploadId: p.payload.uploadId });
+  }
+  // 2b) resolve a pending confirmation
   if (session.pending) {
     if (intent.name === "confirm_yes") {
       const p = session.pending; session.pending = undefined;
@@ -152,7 +215,7 @@ export async function handleMessage(session: Session, raw: string): Promise<Repl
   session.history.push({ role: "user", text: raw });
   let reply: Reply;
   try {
-    reply = await dispatch(session, intent);
+    reply = await dispatch(session, intent, opts);
   } catch (e: any) {
     const msg = String(e?.message || e);
     if (/fetch failed|ECONNREFUSED|ENOTFOUND|timeout/i.test(msg)) {
@@ -163,6 +226,9 @@ export async function handleMessage(session: Session, raw: string): Promise<Repl
   }
   session.history.push({ role: "milton", text: reply.text });
   session.history = session.history.slice(-40);
+  if (reply.cards?.[0]?.kind === "transcription" && reply.cards[0].ocrText) {
+    session.lastOcr = { text: reply.cards[0].ocrText, uploadId: reply.cards[0].uploadId || "" };
+  }
   return reply;
 }
 
@@ -200,8 +266,9 @@ async function runPending(p: PendingAction): Promise<Reply> {
 }
 
 // ---- dispatch ----------------------------------------------------------------------
-async function dispatch(session: Session, intent: Intent): Promise<Reply> {
+async function dispatch(session: Session, intent: Intent, opts: MessageOpts): Promise<Reply> {
   const s = intent.slots;
+  const photo = (opts.attachments && opts.attachments[0]) || opts.latestUpload || null;
   switch (intent.name) {
     case "help": return { text: helpText(), chips: HELP_CHIPS };
     case "pipeline": return pipelineReply();
@@ -217,6 +284,15 @@ async function dispatch(session: Session, intent: Intent): Promise<Reply> {
     case "webhooks": return webhooksReply();
     case "hooks": return hooksReply();
     case "deliveries": return deliveriesReply();
+    case "notes": return notesReply(session);
+
+    case "ocr_read":
+      if (!photo) return { text: "I don't see a photo yet — tap the camera button to take or upload one, then ask me to read it.", chips: ["Morning brief", "Show pipeline"] };
+      return ocrPhotoReply(photo, { auto: false });
+    case "handwriting":
+      if (!photo) return { text: "I don't see a photo yet — tap the camera button to take or upload one, then ask me to analyze the handwriting.", chips: ["Morning brief", "Show pipeline"] };
+      return handwritingReply(photo);
+    case "save_note": return saveNoteReply(session);
 
     case "add_deal": return addDealReply(s);
     case "move_deal": return dealByName(session, s.query, "move_deal", { stage: s.stage });
@@ -247,13 +323,143 @@ async function dispatch(session: Session, intent: Intent): Promise<Reply> {
 
     case "unknown": {
       const llm = await llmReply(intent.raw, session.history);
-      if (llm) return { text: llm, chips: ["Show pipeline", "Morning brief", "Help"] };
+      if (llm.ok) return { text: llm.text, chips: ["Show pipeline", "Morning brief", "Help"] };
+      if (llmBase()) {
+        // LLM is configured but the call failed — say so plainly instead of
+        // pretending the question was just unrecognized.
+        return {
+          text: `I couldn't reach the language model (${llm.error}) — check MILTON_LLM_MODEL against \`ollama list\` if the model name looks wrong.`,
+          chips: ["Show pipeline", "Morning brief", "Help"],
+        };
+      }
       return {
         text: `I'm not sure what you mean by "${intent.raw}". I work best with direct commands — try one of these, or type "help" for the full list.`,
         chips: ["Show pipeline", "Morning brief", "My tasks", "Help"],
       };
     }
   }
+}
+
+// ---- photo OCR + handwriting executors ---------------------------------------------
+async function ocrPhotoReply(up: UploadRef, opts: { auto: boolean }): Promise<Reply> {
+  let result = await ocrUpload(up.path, up.mime);
+  if (result.error === "webp") {
+    return {
+      text: "I can keep WebP photos, but my little OCR engine can't read them yet — a PNG or JPEG works best.",
+      chips: ["Morning brief", "Show pipeline"],
+    };
+  }
+  // optional vision fallback: low-confidence handwriting -> OpenAI-compatible vision
+  if (!result.error && result.confidence < 0.5 && result.script !== "print") {
+    const v = await tryVisionOcr(up.path, up.mime);
+    if (v) {
+      result = {
+        ...result,
+        text: v,
+        lines: v.split("\n").map((t) => ({ text: t.trim(), confidence: 0.5 })).filter((l) => l.text),
+        confidence: 0.5,
+      };
+    }
+  }
+  if (result.error === "decode" || !result.text.trim()) {
+    return {
+      text: "I couldn't pull any text out of that photo. A straight-on, well-lit shot of printed text works best.",
+      chips: ["Morning brief", "Show pipeline"],
+    };
+  }
+  const pct = Math.round(result.confidence * 100);
+  const hwNote = result.script !== "print" ? " Looks like handwriting, so take it with a grain of salt." : "";
+  return {
+    text: `${opts.auto ? "Photo received — " : ""}here's what I read (${pct}% confidence).${hwNote}`,
+    cards: [{
+      kind: "transcription", title: "Photo transcription",
+      ocrText: result.text, confidence: result.confidence, script: result.script,
+      lines: result.lines, uploadId: up.id, imageUrl: `/api/file/${up.id}`,
+    }],
+    chips: ["Analyze handwriting", "Save note to a deal", "Morning brief"],
+  };
+}
+
+function handwritingReply(up: UploadRef): Promise<Reply> {
+  return ocrUpload(up.path, up.mime).then((result) => {
+    if (result.error === "webp") {
+      return { text: "I can keep WebP photos, but my little analysis engine can't read them yet — a PNG or JPEG works best.", chips: ["Morning brief"] } as Reply;
+    }
+    if (result.error === "decode" || result.metrics.chars < 3) {
+      return { text: "I couldn't find enough writing in that photo to analyze. A clear, straight-on shot of a few handwritten lines works best.", chips: ["Morning brief"] } as Reply;
+    }
+    const m = result.metrics;
+    const notes: string[] = [];
+    const deg = (n: number) => `${Math.abs(n).toFixed(1)}°`;
+    notes.push(m.slantDeg > 5 ? `Slant: leans right by ${deg(m.slantDeg)}.` : m.slantDeg < -5 ? `Slant: leans left by ${deg(m.slantDeg)}.` : "Slant: upright (within 5° of vertical).");
+    const pressure = m.strokeMedian > 0 ? m.strokeStd / m.strokeMedian : 0;
+    notes.push(`Stroke width: median ${m.strokeMedian.toFixed(1)}px${pressure > 0.6 ? ", varying a lot across strokes (pressure proxy: uneven)" : " (pressure proxy: fairly even)"}.`);
+    notes.push(`Letter height: average ${m.heightMean.toFixed(1)}px${m.heightMean > 0 && m.heightStd / m.heightMean > 0.25 ? ", varying noticeably line to line" : ", fairly consistent"}.`);
+    notes.push(m.spacingRatio >= 2.5 ? `Word spacing is generous (words ~${m.spacingRatio.toFixed(1)}× the letter gaps).` : m.spacingRatio > 0 && m.spacingRatio < 1.5 ? `Word spacing is tight (words ~${m.spacingRatio.toFixed(1)}× the letter gaps).` : `Word spacing is moderate (words ~${m.spacingRatio.toFixed(1)}× the letter gaps).`);
+    notes.push(Math.abs(m.baselineDrift) > 1 ? `Baselines drift ${m.baselineDrift > 0 ? "downward" : "upward"} by about ${deg(m.baselineDrift)} across lines.` : "Baselines sit roughly level across lines.");
+    notes.push(`Ink density: ${(m.inkDensity * 100).toFixed(1)}% of the text area is ink.`);
+    notes.push(`Measured over ${m.chars} characters in ${m.words} words across ${m.lines} line${m.lines === 1 ? "" : "s"}.`);
+    notes.push("This is geometric stroke analysis, not personality science — it measures shapes on the page, nothing about the writer.");
+    return {
+      text: "Here's what the strokes themselves look like, measured — no mind-reading attached:",
+      cards: [{ kind: "handwriting", title: "Handwriting analysis", metrics: m, notes, uploadId: up.id, imageUrl: `/api/file/${up.id}` }],
+      chips: ["Read text", "Save note to a deal", "Morning brief"],
+    } as Reply;
+  });
+}
+
+function saveNoteReply(session: Session): Reply {
+  const ocr = session.lastOcr;
+  if (!ocr?.text) {
+    return { text: "There's no transcription to save yet — send me a photo of the text first.", chips: ["Morning brief", "Show pipeline"] };
+  }
+  session.pending = { type: "save_note", label: "note", payload: { text: ocr.text, uploadId: ocr.uploadId } };
+  return { text: "Which deal should I file this note under?", chips: ["Morning brief"] };
+}
+
+function notesReply(session: Session): Reply {
+  const notes = session.notes || [];
+  if (!notes.length) return { text: "No saved notes yet — transcribe a photo, then tap “Save note to a deal”.", chips: ["Morning brief"] };
+  return {
+    text: `**${notes.length} saved note${notes.length === 1 ? "" : "s"}:**`,
+    cards: [{
+      kind: "findings", title: "Saved notes",
+      items: notes.slice().reverse().map((n) => ({
+        icon: "📝",
+        text: `${n.dealTitle} — ${n.text.length > 120 ? n.text.slice(0, 120) + "…" : n.text} (${new Date(n.at).toLocaleString()})`,
+      })),
+    }],
+    chips: ["Morning brief", "Show pipeline"],
+  };
+}
+
+/** Optional vision fallback via any OpenAI-compatible chat-completions endpoint.
+ *  Set MILTON_LLM_URL (e.g. http://localhost:8080/v1); fails softly to null. */
+async function tryVisionOcr(path: string, mime: string): Promise<string | null> {
+  const base = process.env.MILTON_LLM_URL;
+  if (!base) return null;
+  try {
+    const bytes = await Bun.file(path).arrayBuffer();
+    const b64 = Buffer.from(bytes).toString("base64");
+    const res = await fetch(`${base.replace(/\/$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: process.env.MILTON_LLM_MODEL || "llama3.2-vision",
+        messages: [{
+          role: "user",
+          content: [
+            { type: "text", text: "Transcribe all text visible in this image. Return only the transcription, no commentary." },
+            { type: "image_url", image_url: { url: `data:${mime};base64,${b64}` } },
+          ],
+        }],
+        max_tokens: 1000,
+      }),
+    });
+    if (!res.ok) return null;
+    const j: any = await res.json();
+    return j.choices?.[0]?.message?.content?.trim() || null;
+  } catch { return null; }
 }
 
 // ---- read executors ------------------------------------------------------------------
@@ -534,6 +740,18 @@ async function dealAction(session: Session, action: string, deal: crm.Deal, payl
     }
     const d = await crm.patchDeal(deal.id, patch);
     return { text: `Updated "${d.title}".`, cards: [dealCard(d)], chips: ["Show pipeline"] };
+  }
+  if (action === "save_note") {
+    const note: SavedNote = {
+      dealId: deal.id, dealTitle: deal.title,
+      text: String(payload.text || "").slice(0, 2000),
+      uploadId: payload.uploadId, at: new Date().toISOString(),
+    };
+    session.notes = [...(session.notes || []), note].slice(-20);
+    return {
+      text: `Saved to **"${deal.title}"** — ${(session.notes || []).length} note${(session.notes || []).length === 1 ? "" : "s"} filed this session.`,
+      cards: [dealCard(deal)], chips: ["My notes", "Morning brief", "Show pipeline"],
+    };
   }
   if (action === "deal_detail") {
     return { text: `"${deal.title}" at a glance:`, cards: [dealCard(deal)] };

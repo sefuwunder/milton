@@ -24,6 +24,9 @@ const stubTasks = [
 
 function stubFetch(input: any, init: any = {}): Promise<Response> {
   const url = String(input);
+  // pass through anything that isn't the stubbed exec-crm (lets other test
+  // files, e.g. upload.test.ts, reach their own live servers)
+  if (!url.startsWith("http://localhost:3001")) return realFetch(input, init);
   const method = (init.method || "GET").toUpperCase();
   const path = url.replace("http://localhost:3001", "");
   let body: any;
@@ -58,6 +61,7 @@ function stubFetch(input: any, init: any = {}): Promise<Response> {
   return Promise.resolve(new Response("not found", { status: 404 }));
 }
 
+const realFetch = globalThis.fetch.bind(globalThis);
 (globalThis as any).fetch = stubFetch;
 
 function freshSession(): Session { return { id: "test", history: [] }; }
@@ -177,5 +181,41 @@ describe("people writes", () => {
     const post = calls.find((c) => c.method === "POST" && c.path === "/api/contacts");
     expect(post?.body.company_id).toBe(1);
     expect(post?.body.email).toBe("john@acme.com");
+  });
+});
+
+describe("photo notes", () => {
+  test("save note with no transcription asks for a photo first", async () => {
+    const r = await handleMessage(freshSession(), "save note to a deal");
+    expect(r.text).toMatch(/no transcription/i);
+  });
+
+  test("save note flow: ask deal, then file under the named deal", async () => {
+    const s = freshSession();
+    s.lastOcr = { text: "HELLO 123", uploadId: "u1" };
+    const ask = await handleMessage(s, "save note to a deal");
+    expect(ask.text).toMatch(/which deal/i);
+    expect(s.pending?.type).toBe("save_note");
+    const done = await handleMessage(s, "acme website");
+    expect(done.text).toMatch(/Saved to.*Acme Website/);
+    expect(s.notes?.length).toBe(1);
+    expect(s.notes?.[0].text).toBe("HELLO 123");
+    expect(s.notes?.[0].dealTitle).toBe("Acme Website");
+  });
+
+  test("my notes lists saved notes", async () => {
+    const s = freshSession();
+    s.notes = [{ dealId: 1, dealTitle: "Acme Website", text: "HELLO 123", at: new Date().toISOString() }];
+    const r = await handleMessage(s, "my notes");
+    expect(r.text).toMatch(/1 saved note/);
+    expect(r.cards?.[0]?.kind).toBe("findings");
+  });
+
+  test("ocr_read / handwriting with no photo point at the camera button", async () => {
+    const s = freshSession();
+    const r1 = await handleMessage(s, "read this", {});
+    expect(r1.text).toMatch(/camera button/);
+    const r2 = await handleMessage(s, "analyze the handwriting", {});
+    expect(r2.text).toMatch(/camera button/);
   });
 });

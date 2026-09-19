@@ -4,10 +4,11 @@
 export type IntentName =
   | "help" | "pipeline" | "deals" | "deal_detail" | "kpis" | "tasks"
   | "contacts" | "companies" | "brief" | "hygiene" | "webhooks" | "hooks"
-  | "deliveries" | "activities"
+  | "deliveries" | "activities" | "notes"
   | "add_deal" | "move_deal" | "set_deal_field" | "close_deal" | "delete_deal"
   | "add_contact" | "add_company" | "add_task" | "complete_task" | "reopen_task"
   | "delete_task" | "remind"
+  | "ocr_read" | "handwriting" | "save_note"
   | "confirm_yes" | "confirm_no" | "choose_number"
   | "unknown";
 
@@ -160,6 +161,12 @@ export function parseIntent(raw: string): Intent {
   else if ((m = text.match(/^(?:show|get|find) company (.+)$/))) set("companies", { search: m[1] });
   else if ((m = text.match(/^(?:show|get|list) tasks?(?: for| about| on)? (.+)$/))) set("tasks", { search: m[1] });
 
+  // ---- camera / OCR -------------------------------------------------------------
+  else if (/^(read this|read the photo|read it|what does this say|what'?s in (this|the) (photo|picture|image)|transcribe (this|it|the photo|the image))$/.test(text)) set("ocr_read");
+  else if (/^(analyze (this |the |my )?handwriting|handwriting analysis|what does the handwriting (say|show)|describe (this |the |my )?handwriting)$/.test(text)) set("handwriting");
+  else if (/^(save note to a deal|save this note|file this note)$/.test(text)) set("save_note");
+  else if (/^(my notes|notes|list notes|show notes|saved notes)$/.test(text)) set("notes");
+
   // ---- deal writes --------------------------------------------------------------
   else if ((m = text.match(new RegExp(`^(?:mark |set )?${DEAL_WORD} (.+?) as (?:closed[ -]?)?(won|lost)$`)))) set("close_deal", { query: m[1], result: m[2] });
   else if ((m = text.match(/^(?:mark|close) (.+?) (?:as )?(won|lost)$/))) set("close_deal", { query: stripDealWord(m[1]), result: m[2] });
@@ -238,6 +245,7 @@ export function helpText(): string {
     "**People & companies** — `add contact Jane Doe at Acme jane@acme.com`, `add company Globex`.",
     "**Tasks** — `add task Call Acme tomorrow`, `remind me to send the proposal Friday`, `complete task 3`.",
     "**Routines** — `morning brief` for today's digest, `pipeline hygiene` for stale deals and gaps.",
+    "**Camera** — tap the 📷 button to snap a photo of text; I'll transcribe it. Then `read this`, `analyze handwriting`, or save the transcription as a note on a deal.",
     "",
     "I'll ask before anything destructive, and if a name matches more than one record I'll let you pick.",
   ].join("\n");
