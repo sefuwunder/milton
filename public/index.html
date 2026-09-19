@@ -29,12 +29,15 @@
   <main id="chat" class="chat" aria-live="polite"></main>
 
   <section id="auto-view" class="auto-view" hidden>
-    <nav class="tabs" id="auto-tabs">
-      <button class="tab active" data-tab="routines">Routines</button>
-      <button class="tab" data-tab="schedules">Schedules</button>
-      <button class="tab" data-tab="triggers">Triggers</button>
-      <button class="tab" data-tab="runs">Runs</button>
-    </nav>
+    <div class="auto-head">
+      <nav class="tabs" id="auto-tabs">
+        <button class="tab active" data-tab="routines">Routines</button>
+        <button class="tab" data-tab="schedules">Schedules</button>
+        <button class="tab" data-tab="triggers">Triggers</button>
+        <button class="tab" data-tab="runs">Runs</button>
+      </nav>
+      <button id="auto-close" class="ghost auto-close" title="Close (Esc)" aria-label="Close automations panel">×</button>
+    </div>
     <div id="auto-body" class="auto-body"></div>
   </section>
 

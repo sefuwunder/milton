@@ -16,6 +16,7 @@
   const autoView = document.getElementById("auto-view");
   const autoTabs = document.getElementById("auto-tabs");
   const autoBody = document.getElementById("auto-body");
+  const autoClose = document.getElementById("auto-close");
   const toastEl = document.getElementById("toast");
   const wsSelect = document.getElementById("ws-select");
   let wsList = []; // cached exec-crm workspaces: {id, name, color}
@@ -314,6 +315,10 @@
   }
 
   autoBtn.addEventListener("click", () => (autoView.hidden ? showAuto() : hideAuto()));
+  autoClose.addEventListener("click", hideAuto);
+  document.addEventListener("keydown", (e) => {
+    if (e && e.key === "Escape" && !autoView.hidden) hideAuto();
+  });
   autoTabs.addEventListener("click", (e) => {
     const t = e.target.closest("[data-tab]");
     if (t) showAuto(t.getAttribute("data-tab"));
@@ -392,6 +397,7 @@
     text = (text || "").trim();
     const atts = pending.filter((p) => p.id);
     if (!text && !atts.length) return;
+    if (!autoView.hidden) hideAuto(); // typing a message means you're done with the panel
     input.value = "";
     const photos = atts.map((a) => a.url + "?session=" + encodeURIComponent(sid));
     addMsg("user", { text, photos });
