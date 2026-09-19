@@ -31,6 +31,8 @@ If the model endpoint is misconfigured (wrong model name, unreachable host), Mil
 
 ## What Milton can do
 
+**Look & feel** — Tokyo day/night theme: follows your OS automatically, or tap 🌓 in the topbar to cycle Auto → Light → Dark.
+
 **Look things up** — `show pipeline` · `kpis` · `show deal Acme` · `list deals in negotiation` · `find contacts named jane` · `my tasks` · `recent activity` · `webhooks` · `delivery log`
 
 **Work the pipeline** — `add deal Website redesign for Acme worth 50k close friday` · `move Acme deal to negotiation` · `mark Acme deal as won` · `set Acme deal value to 75k` · `delete deal Old Opp` (asks first)
@@ -121,7 +123,7 @@ Natural dates (`tomorrow`, `friday`, `in 3 days`, `2026-10-02`) and money (`50k`
 ## Tests
 
 ```bash
-bun test tests/   # 295 tests: intent parser, help/parser sync, brain vs stubbed CRM, OCR engine, uploads, LLM error paths, DOM-stubbed UI, routines/schedules/triggers, webhook + scheduler, Meridian read + run-request intents, automations panel dismiss behavior
+bun test tests/   # 311 tests: intent parser, help/parser sync, brain vs stubbed CRM, OCR engine, uploads, LLM error paths, DOM-stubbed UI, routines/schedules/triggers, webhook + scheduler, Meridian read + run-request intents, automations panel dismiss behavior, auto light/dark theme
 ```
 
 ## Layout

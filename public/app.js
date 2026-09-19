@@ -29,6 +29,47 @@
   let sid = localStorage.getItem("milton_sid");
   if (!sid) { sid = "s-" + Math.random().toString(36).slice(2, 10); localStorage.setItem("milton_sid", sid); }
 
+  // ---- theme: auto (follows OS) / light / dark ----------------------------------
+  // Auto = no data-theme on <html>; CSS picks the palette from prefers-color-scheme.
+  // Explicit light/dark set data-theme and are stored in localStorage ("milton_theme").
+  const THEME_KEY = "milton_theme";
+  const THEME_ORDER = ["auto", "light", "dark"];
+  const THEME_ICON = { auto: "🌓", light: "☀️", dark: "🌙" };
+  const THEME_LABEL = { auto: "Auto (follows system)", light: "Light", dark: "Dark" };
+  const themeBtn = document.getElementById("theme-btn");
+  const rootEl = document.documentElement || null;
+  const themeMq = (typeof matchMedia === "function") ? matchMedia("(prefers-color-scheme: dark)") : null;
+  function getTheme() {
+    const v = localStorage.getItem(THEME_KEY);
+    return (v === "light" || v === "dark") ? v : "auto";
+  }
+  function applyTheme(mode) {
+    if (rootEl) {
+      if (mode === "auto") rootEl.removeAttribute("data-theme");
+      else rootEl.setAttribute("data-theme", mode);
+    }
+    if (themeBtn) {
+      themeBtn.textContent = THEME_ICON[mode];
+      themeBtn.title = "Theme: " + THEME_LABEL[mode] + " — click to change";
+      themeBtn.setAttribute("aria-label", "Theme: " + THEME_LABEL[mode]);
+    }
+  }
+  function setTheme(mode) {
+    if (mode === "auto") localStorage.removeItem(THEME_KEY);
+    else localStorage.setItem(THEME_KEY, mode);
+    applyTheme(mode);
+  }
+  if (themeBtn) {
+    themeBtn.addEventListener("click", () => {
+      const cur = getTheme();
+      setTheme(THEME_ORDER[(THEME_ORDER.indexOf(cur) + 1) % THEME_ORDER.length]);
+    });
+  }
+  if (themeMq && themeMq.addEventListener) {
+    themeMq.addEventListener("change", () => { if (getTheme() === "auto") applyTheme("auto"); });
+  }
+  applyTheme(getTheme());
+
   function esc(s) {
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }

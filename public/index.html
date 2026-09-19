@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Milton — exec-crm copilot</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
+<script>
+// Apply the stored theme before first paint (no flash). Absence = auto: CSS
+// follows the OS prefers-color-scheme via :root:not([data-theme]).
+try {
+  var t = localStorage.getItem("milton_theme");
+  if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+} catch (e) {}
+</script>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -22,6 +30,7 @@
       <select id="ws-select" class="ws-select" title="Workspace" hidden></select>
       <button id="bell-btn" class="ghost bell" title="Automation runs">🔔<span id="bell-badge" class="badge" hidden></span></button>
       <button id="auto-btn" class="ghost" title="Automations">⚙️</button>
+      <button id="theme-btn" class="ghost" title="Theme: Auto (follows system)">🌓</button>
       <button id="help-btn" class="ghost" title="What can Milton do?">?</button>
     </div>
   </header>
