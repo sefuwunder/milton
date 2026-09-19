@@ -1,0 +1,10 @@
+{
+  "name": "milton",
+  "version": "1.0.0",
+  "description": "Milton — a self-hosted chat bot that orchestrates and automates inside exec-crm",
+  "private": true,
+  "scripts": {
+    "start": "bun src/server.ts",
+    "test": "bun test tests/"
+  }
+}

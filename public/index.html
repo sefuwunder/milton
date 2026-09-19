@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Milton — exec-crm copilot</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="bg" aria-hidden="true"></div>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <div class="avatar">M</div>
+      <div>
+        <div class="name">Milton</div>
+        <div class="sub"><span id="status-dot" class="dot"></span><span id="status-text">connecting…</span></div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button id="help-btn" class="ghost" title="What can Milton do?">?</button>
+    </div>
+  </header>
+
+  <main id="chat" class="chat" aria-live="polite"></main>
+
+  <div id="chips" class="chips"></div>
+
+  <form id="composer" class="composer" autocomplete="off">
+    <input id="input" type="text" placeholder="Ask Milton… e.g. &quot;morning brief&quot; or &quot;move Acme deal to negotiation&quot;" maxlength="2000" aria-label="Message Milton">
+    <button type="submit" class="send" aria-label="Send">↑</button>
+  </form>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,77 @@
+// ui.test.ts — DOM-stubbed smoke test for public/app.js (zero-dependency UI).
+import { describe, test, expect, beforeAll } from "bun:test";
+import { readFileSync } from "fs";
+
+function mkEl(tag: string): any {
+  return {
+    tag, children: [] as any[], innerHTML: "", textContent: "", value: "", className: "",
+    appendChild(c: any) { this.children.push(c); return c; },
+    insertAdjacentHTML(_p: string, h: string) { this.innerHTML += h; },
+    addEventListener() {}, remove() {}, focus() {}, scrollTop: 0, scrollHeight: 100,
+    closest() { return null; }, getAttribute() { return null; },
+  };
+}
+
+let T: any;
+let els: Record<string, any>;
+
+beforeAll(async () => {
+  els = {};
+  ["chat", "chips", "composer", "input", "status-dot", "status-text", "help-btn"].forEach((id) => (els[id] = mkEl("div")));
+  (globalThis as any).document = {
+    getElementById: (id: string) => els[id] || null,
+    createElement: (t: string) => mkEl(t),
+    addEventListener() {},
+  };
+  (globalThis as any).localStorage = { _s: {}, getItem(k: string) { return this._s[k] || null; }, setItem(k: string, v: string) { this._s[k] = v; } };
+  (globalThis as any).fetch = async (url: string) => {
+    const ok = (d: any) => ({ json: async () => d });
+    if (String(url).includes("/api/health")) return ok({ crm: true, llm: false });
+    if (String(url).includes("/api/history")) return ok({ messages: [{ role: "milton", text: "**hi** there" }] });
+    return ok({});
+  };
+  let src = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+  src = src.replace("})();", ";globalThis.__t={cardHTML,md,money,esc};})();");
+  eval(src);
+  await new Promise((r) => setTimeout(r, 50));
+  T = (globalThis as any).__t;
+});
+
+describe("init", () => {
+  test("restores history and renders markdown", () => {
+    const html = els["chat"].children.map((c: any) => c.innerHTML).join("\n");
+    expect(html).toContain("hi");
+    expect(html).toContain("<b>hi</b>");
+  });
+  test("status dot reflects CRM health", () => {
+    expect(els["status-dot"].className).toContain("ok");
+  });
+});
+
+describe("cards", () => {
+  test("every card kind renders without throwing", () => {
+    const cards = [
+      { kind: "pipeline", title: "P", rows: [{ stage: "proposal", label: "Proposal", count: 2, value: 70000 }, { stage: "closed_won", label: "Won", count: 1, value: 20000 }] },
+      { kind: "deals", items: [{ title: "Acme", company_name: "Acme", stage: "negotiation", value: 1500, sub: "x" }] },
+      { kind: "kpis", stats: [{ label: "Win rate", value: "42%" }] },
+      { kind: "tasks", items: [{ title: "Call", done: 0, due_date: "2026-09-19" }] },
+      { kind: "contacts", items: [{ name: "Jane", email: "j@a.com" }] },
+      { kind: "companies", items: [{ name: "Acme", sub: "2 open deals" }] },
+      { kind: "activities", items: [{ text: "Deal updated", kind: "deal" }] },
+      { kind: "choices", options: [{ n: 1, label: "One", sub: "sub" }] },
+      { kind: "confirm", options: [{ n: 1, label: "Yes, delete" }] },
+      { kind: "findings", items: [{ icon: "📅", text: "gap" }] },
+    ];
+    for (const c of cards) expect(() => T.cardHTML(c)).not.toThrow();
+  });
+  test("escapes HTML in entity names (XSS)", () => {
+    const h = T.cardHTML({ kind: "deals", items: [{ title: "<img src=x onerror=y>", stage: "proposal", value: 1 }] });
+    expect(h).not.toContain("<img");
+    expect(h).toContain("&lt;img");
+  });
+  test("money formatting", () => {
+    expect(T.money(2500000)).toBe("$2.5M");
+    expect(T.money(50000)).toBe("$50k");
+    expect(T.money(0)).toBe("—");
+  });
+});
