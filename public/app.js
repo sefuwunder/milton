@@ -268,7 +268,8 @@
   }
   function runRow(r) {
     const when = new Date((r.ran_at || "").replace(" ", "T") + "Z").toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-    return `<div class="arow"><span>${statusIcon(r.status)} <b>${esc(r.routine_name)}</b> <small style="color:var(--muted)">[${esc(r.kind)}]</small><br><small style="color:var(--muted)">${esc(r.summary || "")} · ${esc(when)}</small></span></div>`;
+    const link = r.detail && r.detail.result_url ? ` · <a href="${esc(r.detail.result_url)}" target="_blank" rel="noopener">Meridian result ↗</a>` : "";
+    return `<div class="arow"><span>${statusIcon(r.status)} <b>${esc(r.routine_name)}</b> <small style="color:var(--muted)">[${esc(r.kind)}]</small><br><small style="color:var(--muted)">${esc(r.summary || "")}${link} · ${esc(when)}</small></span></div>`;
   }
 
   async function refreshAutoTab() {

@@ -19,10 +19,17 @@ export interface ReconDetail {
 }
 
 export const MERIDIAN_DEFAULT = "http://localhost:3005";
+export const MILTON_DEFAULT = "http://localhost:3009";
 
 /** Meridian base URL (MERIDIAN_URL env, default http://localhost:3005). */
 export function meridianBase(): string {
   return process.env.MERIDIAN_URL || MERIDIAN_DEFAULT;
+}
+
+/** Milton's own base URL (MILTON_BASE_URL env, default http://localhost:3009).
+ *  Meridian must be able to reach this for run-completion callbacks. */
+export function miltonBase(): string {
+  return (process.env.MILTON_BASE_URL || MILTON_DEFAULT).replace(/\/+$/, "");
 }
 
 // Short timeout: a recon read must never hang the chat.
@@ -84,6 +91,46 @@ export async function getRecon(id: string): Promise<ReconDetail | null> {
 /** Test helper: drop the in-memory recon list cache. */
 export function clearReconCache(): void {
   cache = null;
+}
+
+// ---- run requests (the one write: Meridian's run-request router) ----------------------
+// Everything above is read-only. This is the call that asks Meridian to do new
+// work: POST /api/runs -> 202 { run_id, status }.
+
+export type RunRequestResult =
+  | { ok: true; run_id: string; status: string }
+  | { ok: false; error: string; unreachable: boolean };
+
+/**
+ * Ask Meridian's run-request router for a new recon sprint.
+ * callbackUrl/callbackHeaders are sent through so Meridian can POST the
+ * completion payload back; omit them and the run is fire-and-forget.
+ */
+export async function requestReconRun(
+  city: string,
+  opts: { callbackUrl?: string; callbackHeaders?: Record<string, string> } = {}
+): Promise<RunRequestResult> {
+  const body: Record<string, any> = { city };
+  if (opts.callbackUrl) body.callback_url = opts.callbackUrl;
+  if (opts.callbackHeaders) body.callback_headers = opts.callbackHeaders;
+  try {
+    const res = await fetch(meridianBase() + "/api/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (res.status !== 202) {
+      let detail = res.statusText;
+      try { detail = JSON.stringify(await res.json()); } catch { /* keep statusText */ }
+      return { ok: false, error: `status ${res.status}: ${String(detail).slice(0, 200)}`, unreachable: false };
+    }
+    const j: any = await res.json();
+    if (!j?.run_id) return { ok: false, error: "bad response: no run_id", unreachable: false };
+    return { ok: true, run_id: String(j.run_id), status: String(j.status || "?") };
+  } catch (e) {
+    return { ok: false, error: String(e instanceof Error ? e.message : e), unreachable: true };
+  }
 }
 
 // ---- fuzzy matching (same scoring as crm.ts matchByName / workspace.ts) --------------

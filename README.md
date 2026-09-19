@@ -56,6 +56,35 @@ Save your own multi-step routines, run them on a schedule, or fire them from exe
 
 **Wiring exec-crm**: point an outgoing webhook at `POST /api/hooks/exec-crm` with header `X-Milton-Secret` set to your `MILTON_HOOK_SECRET`. Payload shape: `{ event, sent_at, data }`. exec-crm's webhook sender supports custom headers (Automations → Add webhook → Custom headers), so direct wiring works with no proxy.
 
+### Meridian recon
+
+Milton reads Meridian's recon sprints (`MERIDIAN_URL`, default `http://localhost:3005`) and can also ask Meridian for **new** runs through its run-request router (`POST /api/runs`):
+
+- `meridian recons` — list recon sprints, newest first
+- `meridian dossier Austin` — analyst summary of one sprint
+- `meridian entities Austin` — its companies and orgs (`meridian entities austin company` filters by type)
+- `meridian recon Austin` (or `meridian run Austin`) — request a **new** recon run from Meridian
+
+**Request flow.** Milton POSTs `{ city, callback_url, callback_headers }` to `MERIDIAN_URL/api/runs` and answers immediately with the run id and its status (`running`/`queued` — router runs execute one at a time, FIFO). The request is pinned to your chat session's workspace and saved in SQLite until Meridian reports back.
+
+**Completion callbacks.** Set `MILTON_HOOK_SECRET` and tell Meridian where Milton lives:
+
+- `MILTON_BASE_URL` (default `http://localhost:3009`) — Meridian must be able to reach this address; the same-machine default just works.
+- `MILTON_HOOK_SECRET` — sent as `X-Milton-Secret` on the run request and verified (constant-time) on `POST /api/hooks/meridian`, the same pattern as the exec-crm webhook ingress: 503 when unset, 401 on a bad secret.
+
+When Meridian finishes, it POSTs `{ run_id, city, label, status, nodes, edges, result_url, export_url }` to `/api/hooks/meridian`. Milton records it as an automation run (kind `meridian`): it appears in the Runs tab with city, status, node/edge counts and a link to the Meridian result, and it fires the 🔔 bell and the live SSE toast. A callback for an unknown `run_id` is still recorded (marked unknown) — never dropped.
+
+Without `MILTON_HOOK_SECRET` Milton requests the run with no callback and tells you to check back with `meridian recons`.
+
+Example:
+
+```
+you:    meridian recon Austin
+Milton: Run requested: recon of **Austin** is now `running` (run `a3f9c21b`). I'll report back here when it finishes.
+   … Meridian finishes, callbacks land …
+🔔      ⚡ Recon: Austin (meridian): ready — 214 nodes · 318 edges
+```
+
 ### Workspaces
 
 Milton can work inside any exec-crm workspace, not just the default one. Every exec-crm request carries the session's workspace via exec-crm's `?workspace=<id>` scoping (which wins over the `X-Workspace` header).
@@ -87,11 +116,12 @@ Natural dates (`tomorrow`, `friday`, `in 3 days`, `2026-10-02`) and money (`50k`
 - `GET /api/automation-runs?limit=50`
 - `GET /api/events` → SSE stream of automation runs
 - `POST /api/hooks/exec-crm` → exec-crm webhook ingress (requires `X-Milton-Secret: $MILTON_HOOK_SECRET`)
+- `POST /api/hooks/meridian` → Meridian run-completion ingress (requires `X-Milton-Secret: $MILTON_HOOK_SECRET`)
 
 ## Tests
 
 ```bash
-bun test tests/   # 171 tests: intent parser, brain vs stubbed CRM, OCR engine, uploads, LLM error paths, DOM-stubbed UI, routines/schedules/triggers, webhook + scheduler
+bun test tests/   # 248 tests: intent parser, brain vs stubbed CRM, OCR engine, uploads, LLM error paths, DOM-stubbed UI, routines/schedules/triggers, webhook + scheduler, Meridian read + run-request intents
 ```
 
 ## Layout
@@ -99,6 +129,9 @@ bun test tests/   # 171 tests: intent parser, brain vs stubbed CRM, OCR engine, 
 - `src/server.ts` — Bun server, sessions + chat history in SQLite, static UI, automation REST + SSE + webhook ingress, 30s scheduler
 - `src/brain.ts` — intent dispatch, reply cards, confirmations, routines, photo/OCR replies, unattended routine runs
 - `src/automation.ts` — routines/schedules/triggers storage, schedule parser + next-run math, webhook event matching, run history, SSE fan-out
+- `src/meridian.ts` — Meridian HTTP client: recon reads + run-request router calls
+- `src/recon_runs.ts` — pending Meridian run-request store (workspace-pinned)
+- `src/hookauth.ts` — shared `X-Milton-Secret` verification for webhook ingress
 - `src/intents.ts` — deterministic NL parser (dates, money, stages, commands)
 - `src/crm.ts` — exec-crm HTTP client + fuzzy entity resolution
 - `src/ocr.ts` — zero-dependency OCR: PNG/JPEG decoders, binarization, segmentation, template matching, handwriting metrics

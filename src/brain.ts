@@ -7,6 +7,8 @@ import { parseIntent, helpText, HELP_CHIPS, parseStage, parseMoney, parseDate, t
 import { ocrUpload, type HandMetrics } from "./ocr";
 import * as auto from "./automation";
 import * as wss from "./workspace";
+import * as reconRuns from "./recon_runs";
+import { hookSecret } from "./hookauth";
 
 export interface Card {
   kind: "deals" | "pipeline" | "kpis" | "tasks" | "contacts" | "companies" | "activities" | "webhooks" | "choices" | "confirm" | "findings" | "transcription" | "handwriting";
@@ -861,11 +863,90 @@ async function meridianEntitiesReply(session: Session, slots: Record<string, str
   return "text" in res ? res : entitiesReplyFor(res, etype);
 }
 
+// ---- meridian run requests -----------------------------------------------------------
+// "meridian recon Austin" asks Meridian's run-request router for a NEW sprint.
+// This is the one write Milton makes toward Meridian; the read intents above
+// stay read-only. The run is persisted (pinned to this session's workspace)
+// until Meridian's completion callback arrives at POST /api/hooks/meridian.
+
+async function meridianRequestReply(session: Session, city: string): Promise<Reply> {
+  city = city.trim();
+  if (!city) {
+    return { text: "Which city should I recon? Try `meridian recon Austin`.", chips: ["Meridian recons"] };
+  }
+  // Completion callbacks only work when Meridian can authenticate back to us.
+  const secret = hookSecret();
+  const res = await mer.requestReconRun(city, {
+    callbackUrl: secret ? `${mer.miltonBase()}/api/hooks/meridian` : undefined,
+    callbackHeaders: secret ? { "X-Milton-Secret": secret } : undefined,
+  });
+  if (!res.ok) {
+    if (res.unreachable) return meridianDown();
+    return { text: `Meridian wouldn't take the run: ${res.error}`, chips: ["Meridian recons"] };
+  }
+  reconRuns.saveRunRequest({
+    runId: res.run_id,
+    workspaceId: session.workspaceId ?? null,
+    city,
+    status: res.status,
+  });
+  const short = res.run_id.length > 8 ? res.run_id.slice(0, 8) : res.run_id;
+  const cbNote = secret
+    ? "I'll report back here when it finishes."
+    : "⚠️ Completion callbacks aren't configured (set MILTON_HOOK_SECRET) — check back with `meridian recons` once it should be done.";
+  return {
+    text: `Run requested: recon of **${city}** is now \`${res.status}\` (run \`${short}\`). ${cbNote}`,
+    chips: ["Meridian recons", "Morning brief"],
+  };
+}
+
+// ---- incoming Meridian completion callback -----------------------------------------
+// POST /api/hooks/meridian receives Meridian's run-completion POST
+// { run_id, city, label, status, nodes, edges, result_url, export_url }.
+// Recorded in automation_runs so it surfaces in the Runs tab, the 🔔 badge, and
+// the SSE stream — the same path schedule/trigger runs take. A callback for an
+// unknown run_id is still recorded (marked unknown) so nothing is silently dropped.
+
+export interface MeridianHookResult { known: boolean; run: auto.AutomationRun }
+
+export function handleMeridianCallback(p: any): MeridianHookResult {
+  const runId = String(p?.run_id || "");
+  const city = String(p?.city || "");
+  const label = String(p?.label || "");
+  const status = String(p?.status || "");
+  const nodes = Number(p?.nodes || 0);
+  const edges = Number(p?.edges || 0);
+  const resultUrl = String(p?.result_url || "");
+  const exportUrl = String(p?.export_url || "");
+  const pending = runId ? reconRuns.getRunRequest(runId) : null;
+  if (pending) {
+    reconRuns.completeRunRequest(runId, { status, nodes, edges, resultUrl, exportUrl });
+  }
+  const autoStatus = status === "ready" ? "ok" : status === "partial" ? "partial" : "failed";
+  const name = label || city || (pending ? pending.city : "") || runId || "unknown";
+  const run = auto.recordRun({
+    kind: "meridian",
+    ref: runId,
+    routine_name: `Recon: ${name}`,
+    status: autoStatus,
+    summary: pending
+      ? `${status} — ${nodes} nodes · ${edges} edges`
+      : `${status || "finished"} — ${nodes} nodes · ${edges} edges (run ${runId || "?"}, not requested from here)`,
+    detail: {
+      run_id: runId, city: city || (pending ? pending.city : ""), label,
+      status, nodes, edges, result_url: resultUrl, export_url: exportUrl,
+      known: Boolean(pending), workspace_id: pending ? pending.workspace_id : null,
+    },
+  });
+  return { known: Boolean(pending), run };
+}
+
 async function dispatchMeridian(session: Session, slots: Record<string, string>, name: string, raw: string): Promise<Reply> {
   switch (name) {
     case "list_recons": return listReconsReply();
     case "meridian_dossier": return meridianDossierReply(session, raw);
     case "meridian_entities": return meridianEntitiesReply(session, slots, raw);
+    case "meridian_request": return meridianRequestReply(session, slots.city || "");
   }
   return { text: "Nothing to do." };
 }
@@ -942,6 +1023,7 @@ async function dispatch(session: Session, intent: Intent, opts: MessageOpts): Pr
     case "list_recons":
     case "meridian_dossier":
     case "meridian_entities":
+    case "meridian_request":
       try {
         return await dispatchMeridian(session, s, intent.name, opts.raw || "");
       } catch (e: any) {

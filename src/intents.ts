@@ -15,7 +15,7 @@ export type IntentName =
   | "schedule_add" | "list_schedules" | "unschedule" | "pause_schedule" | "resume_schedule"
   | "trigger_add" | "list_triggers" | "delete_trigger" | "trigger_help" | "list_runs"
   | "list_workspaces" | "switch_workspace" | "current_workspace"
-  | "list_recons" | "meridian_dossier" | "meridian_entities"
+  | "list_recons" | "meridian_dossier" | "meridian_entities" | "meridian_request"
   | "list_stages" | "add_stage" | "rename_stage" | "delete_stage" | "move_stage"
   | "confirm_yes" | "confirm_no" | "choose_number"
   | "unknown";
@@ -171,9 +171,11 @@ export function parseIntent(raw: string): Intent {
   else if (/^current workspace$/.test(text)) set("current_workspace");
   else if ((m = text.match(/^(?:switch to|use workspace|switch workspace to) (.+)$/))) set("switch_workspace", { name: m[1].trim() });
 
-  // ---- meridian (read-only recon access) ----------------------------------------------
+  // ---- meridian -----------------------------------------------------------------------
   // Prefixed with "meridian" so nothing collides with exec-crm intents.
+  // "meridian recon Austin" requests a NEW run; "meridian recon(s)" lists sprints.
   else if (/^meridian recons?$/.test(text)) set("list_recons");
+  else if ((m = cased.match(/^meridian (?:recon|run) (.+)$/i))) set("meridian_request", { city: m[1].trim() });
   else if ((m = text.match(/^meridian dossier (.+)$/))) set("meridian_dossier", { query: m[1].trim() });
   else if ((m = text.match(/^meridian entities (.+)$/))) {
     // Optional trailing type filter: "meridian entities austin company".
@@ -310,7 +312,7 @@ export function helpText(): string {
     "**Automations** — `save routine EOD: my tasks; pipeline hygiene` then `run EOD`. `schedule EOD daily at 6pm`, `list schedules`, `unschedule 3`. `when deal won run celebrate`, `list triggers`, `trigger help` for the event list.",
     "**Workspaces** — `workspaces` lists exec-crm's workspaces, `switch to Acme` works inside one, `current workspace` shows where you are. Schedules and triggers pin the workspace they were created in.",
     "**Pipeline schema** — `stages` lists the pipeline stages, `add stage Discovery before proposal`, `rename stage Proposal to Scoping`, `move stage Negotiation after Proposal`, `delete stage Discovery` (I'll ask first, and move its deals somewhere safe).",
-    "**Meridian recon** — read-only: `meridian recons` lists recon sprints, `meridian dossier Austin` summarizes one, `meridian entities Austin` shows its companies and orgs (add a type like `company` to filter).",
+    "**Meridian recon** — read: `meridian recons` lists recon sprints, `meridian dossier Austin` summarizes one, `meridian entities Austin` shows its companies and orgs (add a type like `company` to filter). Request a new run: `meridian recon Austin` (or `meridian run Austin`) — I'll ask Meridian's router for it and report back when it finishes, as long as `MILTON_HOOK_SECRET` is set so Meridian can call me back.",
     "**Camera** — tap the 📷 button to snap a photo of text; I'll transcribe it. Then `read this`, `analyze handwriting`, or save the transcription as a note on a deal.",
     "",
     "I'll ask before anything destructive, and if a name matches more than one record I'll let you pick.",

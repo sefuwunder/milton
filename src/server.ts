@@ -2,12 +2,14 @@
 // Bun + zero dependencies + SQLite. Everything stays on your machine.
 
 import { Database } from "bun:sqlite";
-import { handleMessage, tickAutomation, handleWebhookEvent, type Session, type Reply, type UploadRef } from "./brain";
+import { handleMessage, tickAutomation, handleWebhookEvent, handleMeridianCallback, type Session, type Reply, type UploadRef } from "./brain";
 import { ping, crmBase } from "./crm";
 import { helpText } from "./intents";
 import { detectKind } from "./ocr";
 import * as auto from "./automation";
 import { initWorkspaceDb, listWorkspaces, getSessionWorkspace, setSessionWorkspace } from "./workspace";
+import { initReconRunsDb } from "./recon_runs";
+import { hookSecret, verifyHookSecret } from "./hookauth";
 
 const PORT = Number(process.env.PORT || 3009);
 const DATA_DIR = process.env.MILTON_DATA || "./data";
@@ -40,6 +42,15 @@ db.exec(`
 `);
 auto.initAutomationDb(db);
 initWorkspaceDb(db);
+initReconRunsDb(db);
+
+// Incoming webhooks share one auth pattern: 503 when MILTON_HOOK_SECRET isn't
+// configured, 401 on a bad X-Milton-Secret (constant-time comparison).
+function hookAuth(req: Request): Response | null {
+  if (!hookSecret()) return json({ error: "hook secret not configured (set MILTON_HOOK_SECRET)" }, 503);
+  if (!verifyHookSecret(req.headers.get("x-milton-secret") || "")) return json({ error: "bad secret" }, 401);
+  return null;
+}
 
 function loadSession(id: string): Session {
   const row = db.query("SELECT state FROM sessions WHERE id = ?").get(id) as any;
@@ -265,20 +276,28 @@ const server = Bun.serve({
 
     // ---- incoming exec-crm webhook -> triggers -----------------------------------
     if (path === "/api/hooks/exec-crm" && method === "POST") {
-      const secret = process.env.MILTON_HOOK_SECRET || "";
-      if (!secret) return json({ error: "hook secret not configured (set MILTON_HOOK_SECRET)" }, 503);
-      const given = req.headers.get("x-milton-secret") || "";
-      // constant-time-ish compare to avoid leaking via timing
-      const a = new TextEncoder().encode(given), b = new TextEncoder().encode(secret);
-      let diff = a.length === b.length ? 0 : 1;
-      for (let i = 0; i < Math.max(a.length, b.length); i++) diff |= (a[i] || 0) ^ (b[i] || 0);
-      if (diff !== 0) return json({ error: "bad secret" }, 401);
+      const auth = hookAuth(req);
+      if (auth) return auth;
       let body: any = {};
       try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
       const event = String(body.event || req.headers.get("x-crm-event") || "");
       if (!event) return json({ error: "missing event" }, 400);
       const { matched, runs } = await handleWebhookEvent(event, body.data || {});
       return json({ ok: true, event, matched, runs: runs.map((r) => r.id) });
+    }
+
+    // ---- incoming Meridian completion callback -> automation runs ------------------
+    // Meridian POSTs { run_id, city, label, status, nodes, edges, result_url,
+    // export_url } when a requested run finishes. Recorded as an automation run
+    // (kind "meridian") so it shows in the Runs tab, the bell badge, and the
+    // SSE stream — the same path schedule/trigger runs take.
+    if (path === "/api/hooks/meridian" && method === "POST") {
+      const auth = hookAuth(req);
+      if (auth) return auth;
+      let body: any = {};
+      try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const { known, run } = handleMeridianCallback(body);
+      return json({ ok: true, known, run_id: run.id });
     }
 
     if (path === "/api/upload" && method === "POST") {
