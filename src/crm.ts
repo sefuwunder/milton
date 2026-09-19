@@ -21,10 +21,16 @@ export interface Activity { id: number; kind: string; text: string; ref_type: st
 export interface Webhook { id: number; name: string; url: string; events: string; active: number }
 export interface IncomingHook { id: number; name: string; key: string; created_at: string }
 
-const BASE = process.env.MILTON_CRM_URL || "http://localhost:3001";
+import { currentWorkspaceId } from "./workspace";
+
+const BASE = process.env.EXEC_CRM_URL || process.env.MILTON_CRM_URL || "http://localhost:3001";
 
 async function req(path: string, method = "GET", body?: any): Promise<any> {
-  const res = await fetch(BASE + path, {
+  // Session workspace scoping: ?workspace=<id> wins in exec-crm's needWs
+  // (over the X-Workspace header). null = default workspace: send nothing.
+  const ws = currentWorkspaceId();
+  const scoped = ws == null ? path : `${path}${path.includes("?") ? "&" : "?"}workspace=${encodeURIComponent(String(ws))}`;
+  const res = await fetch(BASE + scoped, {
     method,
     headers: { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),

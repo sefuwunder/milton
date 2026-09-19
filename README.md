@@ -13,11 +13,11 @@ Talk to your CRM in plain English: check the pipeline, move deals, add contacts 
 
 ```bash
 bun install   # no-op: there are no dependencies
-MILTON_CRM_URL=http://localhost:3001 bun src/server.ts
+EXEC_CRM_URL=http://localhost:3001 bun src/server.ts
 # open http://localhost:3009
 ```
 
-`exec-crm` must be running and reachable at `MILTON_CRM_URL` (default `http://localhost:3001`).
+`exec-crm` must be running and reachable at `EXEC_CRM_URL` (falls back to `MILTON_CRM_URL`, then `http://localhost:3001`).
 
 Optional freeform chat via any OpenAI-compatible endpoint (local Ollama, vLLM, etc.):
 
@@ -55,6 +55,18 @@ Save your own multi-step routines, run them on a schedule, or fire them from exe
 **Runs** — `automation runs` (or the Runs tab) shows the last 50 runs with per-step detail; every run is also pushed live over `GET /api/events` (SSE).
 
 **Wiring exec-crm**: point an outgoing webhook at `POST /api/hooks/exec-crm` with header `X-Milton-Secret` set to your `MILTON_HOOK_SECRET`. Payload shape: `{ event, sent_at, data }`. exec-crm's webhook sender supports custom headers (Automations → Add webhook → Custom headers), so direct wiring works with no proxy.
+
+### Workspaces
+
+Milton can work inside any exec-crm workspace, not just the default one. Every exec-crm request carries the session's workspace via exec-crm's `?workspace=<id>` scoping (which wins over the `X-Workspace` header).
+
+- `workspaces` — list exec-crm's workspaces with ids
+- `switch to Acme` / `use workspace Acme` — fuzzy name match; ambiguous names get a numbered pick-list, a bare id works too, `switch to default` goes back
+- `current workspace` — where this chat session is working
+- The topbar has a workspace switcher dropdown showing the current workspace; it stays in sync when you switch from chat.
+- The choice is per chat session and persists across restarts (stored server-side, `session_workspaces` table).
+- **Schedules and triggers pin the workspace they were created in**: `schedule EOD daily at 6pm` while in Acme runs in Acme forever, even if you later switch the chat elsewhere. `list schedules` / `list triggers` show the pinned workspace; unattended runs skip destructive steps as before.
+- If exec-crm is unreachable, Milton says so and keeps the current (or default) workspace rather than guessing.
 
 **Camera & OCR** — tap the 📷 button to snap a photo of printed text (whiteboard, business card, document); Milton transcribes it automatically. Then `read this`, `analyze handwriting` (geometric analysis: slant, stroke pressure, size consistency, spacing, baseline drift — with raw numbers, not mysticism), or save the transcription as a note on a deal.
 

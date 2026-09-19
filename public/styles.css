@@ -47,6 +47,12 @@ body {
   background: var(--glass); color: var(--text); font-size: 16px; cursor: pointer;
 }
 .ghost:hover { background: rgba(255,255,255,.12); }
+.ws-select {
+  height: 34px; max-width: 150px; border-radius: 17px; border: 1px solid var(--glass-border);
+  background: var(--glass); color: var(--text); font-size: 13px; padding: 0 10px; cursor: pointer;
+}
+.ws-select:hover { background: rgba(255,255,255,.12); }
+.ws-select option { color: #111; }
 
 .chat { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 12px; }
 .msg { max-width: 82%; padding: 11px 14px; border-radius: var(--radius); line-height: 1.5; font-size: 15px; }

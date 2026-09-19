@@ -17,6 +17,8 @@
   const autoTabs = document.getElementById("auto-tabs");
   const autoBody = document.getElementById("auto-body");
   const toastEl = document.getElementById("toast");
+  const wsSelect = document.getElementById("ws-select");
+  let wsList = []; // cached exec-crm workspaces: {id, name, color}
 
   // photos uploaded and waiting to be sent with the next message
   const pending = []; // { id, url, objUrl }
@@ -255,13 +257,13 @@
   }
   function scheduleRow(s) {
     const next = new Date(s.next_run).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-    return `<div class="arow"><span><b>#${s.id} ${esc(s.routine_name)}</b><br><small style="color:var(--muted)">${esc(s.spec_text)} · next ${esc(next)}${s.active ? "" : " · paused"}</small></span>` +
+    return `<div class="arow"><span><b>#${s.id} ${esc(s.routine_name)}</b><br><small style="color:var(--muted)">${esc(s.spec_text)}${wsTag(s.workspace_id)} · next ${esc(next)}${s.active ? "" : " · paused"}</small></span>` +
       `<span class="ops"><button class="mini" data-spause="${s.id}" data-active="${s.active ? 0 : 1}">${s.active ? "Pause" : "Resume"}</button>` +
       `<button class="mini danger" data-sdel="${s.id}">Delete</button></span></div>`;
   }
   function triggerRow(t) {
     const f = Object.entries(t.filter || {}).map(([k, v]) => `${k}=${v}`).join(", ");
-    return `<div class="arow"><span><b>#${t.id} ${esc(t.event)}</b>${f ? ` <small>(${esc(f)})</small>` : ""}<br><small style="color:var(--muted)">→ ${esc(t.routine_name)}</small></span>` +
+    return `<div class="arow"><span><b>#${t.id} ${esc(t.event)}</b>${f ? ` <small>(${esc(f)})</small>` : ""}<br><small style="color:var(--muted)">→ ${esc(t.routine_name)}${wsTag(t.workspace_id)}</small></span>` +
       `<span class="ops"><button class="mini danger" data-tdel="${t.id}">Delete</button></span></div>`;
   }
   function runRow(r) {
@@ -406,7 +408,7 @@
       const reply = await res.json();
       typing.remove();
       if (reply.error) addMsg("milton", { text: "Hmm, that didn't go through: " + reply.error });
-      else { addMsg("milton", reply); setChips(reply.chips); clearTray(); }
+      else { addMsg("milton", reply); setChips(reply.chips); clearTray(); syncWsSelect(reply); }
     } catch (err) {
       typing.remove();
       addMsg("milton", { text: "I couldn't reach the Milton server. Is it running?" });
@@ -415,6 +417,49 @@
 
   form.addEventListener("submit", (e) => { e.preventDefault(); send(input.value); });
   document.getElementById("help-btn").addEventListener("click", () => send("help"));
+
+  // ---- exec-crm workspaces -------------------------------------------------------
+  function wsOptionsHtml(list, currentId) {
+    return list.map((w) => `<option value="${w.id}"${w.id === currentId ? " selected" : ""}>${esc(w.name)}</option>`).join("");
+  }
+  function wsTag(id) {
+    if (id == null) return "";
+    const w = wsList.find((x) => x.id === id);
+    return " · " + esc(w ? w.name : "#" + id);
+  }
+  function syncWsSelect(reply) {
+    if (reply && reply.workspace_id !== undefined && !wsSelect.hidden) {
+      wsSelect.value = reply.workspace_id == null ? "" : String(reply.workspace_id);
+    }
+  }
+  async function loadWorkspaces() {
+    try {
+      const j = await fetch("/api/workspaces").then((r) => r.json());
+      wsList = j.workspaces || [];
+      if (!wsList.length) { wsSelect.hidden = true; return; }
+      let currentId = null;
+      try {
+        const cur = await fetch("/api/session/workspace?session=" + encodeURIComponent(sid)).then((r) => r.json());
+        currentId = cur.workspace_id ?? null;
+      } catch { /* stay on default */ }
+      wsSelect.innerHTML = `<option value="">Default workspace</option>` + wsOptionsHtml(wsList, currentId);
+      wsSelect.hidden = false;
+    } catch { wsSelect.hidden = true; }
+  }
+  wsSelect.addEventListener("change", async () => {
+    const id = wsSelect.value === "" ? null : Number(wsSelect.value);
+    try {
+      const j = await fetch("/api/session/workspace", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session: sid, workspace_id: id }),
+      }).then((r) => r.json());
+      if (j.error) throw new Error(j.error);
+      toast("Workspace: " + (j.workspace_name || "default"));
+    } catch (err) {
+      toast("Couldn't switch workspace.");
+      loadWorkspaces();
+    }
+  });
 
   // status + history restore
   (async function init() {
@@ -432,6 +477,7 @@
       setChips(["Morning brief", "Show pipeline", "My tasks", "Help"]);
     }
     refreshBadge();
+    loadWorkspaces();
     input.focus();
   })();
 })();

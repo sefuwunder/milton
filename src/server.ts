@@ -7,6 +7,7 @@ import { ping, crmBase } from "./crm";
 import { helpText } from "./intents";
 import { detectKind } from "./ocr";
 import * as auto from "./automation";
+import { initWorkspaceDb, listWorkspaces, getSessionWorkspace, setSessionWorkspace } from "./workspace";
 
 const PORT = Number(process.env.PORT || 3009);
 const DATA_DIR = process.env.MILTON_DATA || "./data";
@@ -38,18 +39,27 @@ db.exec(`
   );
 `);
 auto.initAutomationDb(db);
+initWorkspaceDb(db);
 
 function loadSession(id: string): Session {
   const row = db.query("SELECT state FROM sessions WHERE id = ?").get(id) as any;
+  let s: Session;
   if (row) {
     try {
-      const s = JSON.parse(row.state);
-      return { id, pending: s.pending, choice: s.choice, history: s.history || [], lastOcr: s.lastOcr, notes: s.notes || [] };
-    } catch { /* fall through to fresh */ }
+      const st = JSON.parse(row.state);
+      s = { id, pending: st.pending, choice: st.choice, history: st.history || [], lastOcr: st.lastOcr, notes: st.notes || [] };
+    } catch {
+      s = { id, history: [], notes: [] };
+      db.query("INSERT INTO sessions (id, state) VALUES (?, ?)").run(id, JSON.stringify({ history: [], notes: [] }));
+    }
+  } else {
+    s = { id, history: [], notes: [] };
+    db.query("INSERT INTO sessions (id, state) VALUES (?, ?)").run(id, JSON.stringify({ history: [], notes: [] }));
   }
-  const fresh: Session = { id, history: [], notes: [] };
-  db.query("INSERT INTO sessions (id, state) VALUES (?, ?)").run(id, JSON.stringify({ history: [], notes: [] }));
-  return fresh;
+  const w = getSessionWorkspace(id);
+  s.workspaceId = w.id;
+  s.workspaceName = w.name;
+  return s;
 }
 
 function saveSession(s: Session) {
@@ -198,7 +208,9 @@ const server = Bun.serve({
       if (!r) return json({ error: `no routine named "${body.routine}"` }, 400);
       const spec = auto.parseScheduleSpec(String(body.when || ""));
       if (!spec) return json({ error: `couldn't parse schedule "${body.when}"` }, 400);
-      return json({ schedule: auto.createSchedule(r.name, spec, Date.now()) }, 201);
+      const wsId = body.workspace_id == null || body.workspace_id === "" ? null : Number(body.workspace_id);
+      if (wsId !== null && (!Number.isInteger(wsId) || wsId <= 0)) return json({ error: "bad workspace_id" }, 400);
+      return json({ schedule: auto.createSchedule(r.name, spec, Date.now(), wsId) }, 201);
     }
     if (path.startsWith("/api/schedules/") && (method === "PATCH" || method === "DELETE")) {
       const id = Number(path.slice("/api/schedules/".length).split("/")[0]);
@@ -219,6 +231,36 @@ const server = Bun.serve({
     if (path === "/api/automation-runs" && method === "GET") {
       const limit = Math.min(Math.max(Number(url.searchParams.get("limit") || 50), 1), 200);
       return json({ runs: auto.listRuns(limit) });
+    }
+
+    // ---- workspaces: proxy exec-crm's list, per-session selection ------------------
+    if (path === "/api/workspaces" && method === "GET") {
+      const list = await listWorkspaces();
+      if (!list) return json({ workspaces: [], error: `exec-crm unreachable at ${crmBase()}` });
+      return json({ workspaces: list.map((w) => ({ id: w.id, name: w.name, color: w.color })) });
+    }
+    if (path === "/api/session/workspace" && method === "GET") {
+      const sid = String(url.searchParams.get("session") || "").slice(0, 64);
+      const w = getSessionWorkspace(sid);
+      return json({ workspace_id: w.id, workspace_name: w.name });
+    }
+    if (path === "/api/session/workspace" && method === "POST") {
+      let body: any = {};
+      try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const sid = String(body.session || "").slice(0, 64);
+      if (!sid) return json({ error: "missing session" }, 400);
+      if (body.workspace_id == null || body.workspace_id === "") {
+        setSessionWorkspace(sid, null, "");
+        return json({ ok: true, workspace_id: null, workspace_name: "" });
+      }
+      const id = Number(body.workspace_id);
+      if (!Number.isInteger(id) || id <= 0) return json({ error: "bad workspace_id" }, 400);
+      const list = await listWorkspaces();
+      const w = list?.find((x) => x.id === id);
+      if (list && !w) return json({ error: `unknown workspace ${id}` }, 400);
+      // exec-crm unreachable: accept the id on trust, name unknown
+      setSessionWorkspace(sid, id, w ? w.name : "");
+      return json({ ok: true, workspace_id: id, workspace_name: w ? w.name : "" });
     }
 
     // ---- incoming exec-crm webhook -> triggers -----------------------------------
@@ -295,12 +337,14 @@ const server = Bun.serve({
       const session = loadSession(sid);
       const latest = db.query("SELECT id, filename, mime, size FROM uploads WHERE session = ? ORDER BY rowid DESC LIMIT 1").get(sid);
       const t0 = Date.now();
+      // handleMessage scopes every exec-crm call to session.workspaceId
+      // (null = default: no workspace parameter is sent).
       const reply: Reply = await handleMessage(session, text, { attachments, latestUpload: uploadRef(sid, latest) });
       saveSession(session);
       logMessage(sid, "user", text || `[photo${attachments.length > 1 ? "s" : ""}]`);
       logMessage(sid, "milton", reply.text);
 
-      return json({ ...reply, ms: Date.now() - t0 });
+      return json({ ...reply, ms: Date.now() - t0, workspace_id: session.workspaceId ?? null, workspace_name: session.workspaceName || "" });
     }
 
     return json({ error: "not found" }, 404);
@@ -311,7 +355,7 @@ console.log(`milton listening on http://localhost:${server.port}`);
 console.log(`exec-crm: ${crmBase()} (${crmOk ? "reachable" : "UNREACHABLE"})`);
 console.log(`LLM mode: ${process.env.MILTON_LLM_URL ? "enabled" : "local-only (set MILTON_LLM_URL for freeform chat)"}`);
 console.log(`automation scheduler: every 30s${process.env.MILTON_HOOK_SECRET ? "" : " (incoming webhooks disabled: set MILTON_HOOK_SECRET)"}`);
-if (!crmOk) console.log("Hint: start exec-crm first, or set MILTON_CRM_URL to its address.");
+if (!crmOk) console.log("Hint: start exec-crm first, or set EXEC_CRM_URL (or MILTON_CRM_URL) to its address.");
 
 // scheduler: run due schedules every 30s (plus one sweep shortly after boot)
 let ticking = false;

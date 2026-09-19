@@ -22,7 +22,7 @@ beforeAll(async () => {
   els = {};
   ["chat", "chips", "composer", "input", "status-dot", "status-text", "help-btn",
    "cam-btn", "photo-input", "tray", "bell-btn", "bell-badge", "auto-btn",
-   "auto-view", "auto-tabs", "auto-body", "toast"].forEach((id) => (els[id] = mkEl("div")));
+   "auto-view", "auto-tabs", "auto-body", "toast", "ws-select"].forEach((id) => (els[id] = mkEl("div")));
   (globalThis as any).document = {
     getElementById: (id: string) => els[id] || null,
     createElement: (t: string) => mkEl(t),

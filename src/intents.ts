@@ -12,6 +12,7 @@ export type IntentName =
   | "save_routine" | "run_routine" | "list_routines" | "delete_routine" | "show_routine"
   | "schedule_add" | "list_schedules" | "unschedule" | "pause_schedule" | "resume_schedule"
   | "trigger_add" | "list_triggers" | "delete_trigger" | "trigger_help" | "list_runs"
+  | "list_workspaces" | "switch_workspace" | "current_workspace"
   | "confirm_yes" | "confirm_no" | "choose_number"
   | "unknown";
 
@@ -158,6 +159,13 @@ export function parseIntent(raw: string): Intent {
   else if (/^(automation runs|list runs|run history|recent runs)$/.test(text)) set("list_runs");
   else if ((m = text.match(/^run (.+)$/))) set("run_routine", { name: m[1].trim() });
 
+  // ---- workspaces -------------------------------------------------------------------
+  // After automations (so "run …" doesn't swallow anything), before the read
+  // matchers below.
+  else if (/^(list |show )?workspaces$/.test(text)) set("list_workspaces");
+  else if (/^current workspace$/.test(text)) set("current_workspace");
+  else if ((m = text.match(/^(?:switch to|use workspace|switch workspace to) (.+)$/))) set("switch_workspace", { name: m[1].trim() });
+
   // ---- routines ---------------------------------------------------------------
   else if (/\b(morning brief|daily brief|brief me|briefing)\b/.test(text)) set("brief");
   else if (/\b(pipeline hygiene|hygiene|health check|cleanup|stale deals)\b/.test(text)) set("hygiene");
@@ -268,6 +276,7 @@ export function helpText(): string {
     "**Tasks** — `add task Call Acme tomorrow`, `remind me to send the proposal Friday`, `complete task 3`.",
     "**Routines** — `morning brief` for today's digest, `pipeline hygiene` for stale deals and gaps.",
     "**Automations** — `save routine EOD: my tasks; pipeline hygiene` then `run EOD`. `schedule EOD daily at 6pm`, `list schedules`, `unschedule 3`. `when deal won run celebrate`, `list triggers`, `trigger help` for the event list.",
+    "**Workspaces** — `workspaces` lists exec-crm's workspaces, `switch to Acme` works inside one, `current workspace` shows where you are. Schedules and triggers pin the workspace they were created in.",
     "**Camera** — tap the 📷 button to snap a photo of text; I'll transcribe it. Then `read this`, `analyze handwriting`, or save the transcription as a note on a deal.",
     "",
     "I'll ask before anything destructive, and if a name matches more than one record I'll let you pick.",

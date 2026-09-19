@@ -5,6 +5,7 @@ import * as crm from "./crm";
 import { parseIntent, helpText, HELP_CHIPS, parseStage, parseMoney, parseDate, type Intent } from "./intents";
 import { ocrUpload, type HandMetrics } from "./ocr";
 import * as auto from "./automation";
+import * as wss from "./workspace";
 
 export interface Card {
   kind: "deals" | "pipeline" | "kpis" | "tasks" | "contacts" | "companies" | "activities" | "webhooks" | "choices" | "confirm" | "findings" | "transcription" | "handwriting";
@@ -29,7 +30,7 @@ export interface Reply { text: string; cards?: Card[]; chips?: string[] }
 
 export interface PendingAction { type: string; label: string; payload: any }
 export interface ChoiceState {
-  kind: "deal" | "contact" | "company" | "task";
+  kind: "deal" | "contact" | "company" | "task" | "workspace";
   options: { id: number; label: string; sub?: string }[];
   then: { action: string; payload: any };
 }
@@ -41,6 +42,9 @@ export interface Session {
   history: { role: "user" | "milton"; text: string }[];
   lastOcr?: { text: string; uploadId: string };
   notes?: SavedNote[];
+  // exec-crm workspace this session works inside; null = default (nothing sent)
+  workspaceId?: number | null;
+  workspaceName?: string;
 }
 
 // A photo uploaded through /api/upload, resolved session-side.
@@ -171,6 +175,8 @@ async function llmReply(question: string, history: Session["history"]): Promise<
 }
 
 // ---- main entry ------------------------------------------------------------------
+// Every handleMessage call runs inside the session's workspace (exec-crm's
+// ?workspace=<id> scoping) so callers never scope CRM calls by hand.
 export async function handleMessage(session: Session, raw: string, opts: MessageOpts = {}): Promise<Reply> {
   const atts = opts.attachments || [];
 
@@ -184,6 +190,10 @@ export async function handleMessage(session: Session, raw: string, opts: Message
     return reply;
   }
 
+  return wss.runWithWorkspace(session.workspaceId ?? null, () => handleMessageScoped(session, raw, opts));
+}
+
+async function handleMessageScoped(session: Session, raw: string, opts: MessageOpts = {}): Promise<Reply> {
   const intent = parseIntent(raw);
 
   // 1) resolve an outstanding disambiguation choice
@@ -220,7 +230,7 @@ export async function handleMessage(session: Session, raw: string, opts: Message
   } catch (e: any) {
     const msg = String(e?.message || e);
     if (/fetch failed|ECONNREFUSED|ENOTFOUND|timeout/i.test(msg)) {
-      reply = { text: `I can't reach exec-crm at ${crm.crmBase()}. Is it running? Start it with \`bun src/server.ts\` in the exec-crm folder, or point me elsewhere with MILTON_CRM_URL.` };
+      reply = { text: `I can't reach exec-crm at ${crm.crmBase()}. Is it running? Start it with \`bun src/server.ts\` in the exec-crm folder, or point me elsewhere with EXEC_CRM_URL.` };
     } else {
       reply = { text: `Something went wrong: ${msg}` };
     }
@@ -246,6 +256,11 @@ async function dispatchChoice(session: Session, ch: ChoiceState, id: number): Pr
     const task = tasks.find((t) => t.id === id);
     if (!task) return { text: "That task seems to be gone — try again." };
     return taskAction(session, action, task, payload);
+  }
+  if (ch.kind === "workspace") {
+    const w = (await wss.listWorkspaces())?.find((x) => x.id === id);
+    if (!w) return { text: "That workspace seems to be gone — say `workspaces` to see the current list." };
+    return applyWorkspace(session, w);
   }
   return { text: "I lost track of that choice — try the command again." };
 }
@@ -347,13 +362,15 @@ async function runRoutineSteps(
   return { text, cards: cards.length ? cards : undefined, results };
 }
 
-/** Run a routine with no user present: destructive steps are skipped, never confirmed. */
-export async function runRoutineUnattended(name: string, kind: "schedule" | "trigger" | "manual", ref: string): Promise<auto.AutomationRun> {
+/** Run a routine with no user present: destructive steps are skipped, never confirmed.
+ *  Runs inside the pinned workspace (null = exec-crm's default). */
+export async function runRoutineUnattended(name: string, kind: "schedule" | "trigger" | "manual", ref: string, workspaceId: number | null = null): Promise<auto.AutomationRun> {
   const r = auto.getRoutine(name);
   if (!r) {
     return auto.recordRun({ kind, ref, routine_name: name, status: "failed", summary: `routine "${name}" not found (renamed or deleted?)`, detail: {} });
   }
-  const sess: Session = { id: `auto:${kind}:${ref}:${Date.now()}`, history: [], notes: [] };
+  // workspace rides on the session; handleMessage scopes every step to it (null = exec-crm's default).
+  const sess: Session = { id: `auto:${kind}:${ref}:${Date.now()}`, history: [], notes: [], workspaceId: workspaceId ?? undefined, workspaceName: "" };
   const out = await runRoutineSteps(sess, r.steps, { unattended: true });
   const okCount = out.results.filter((x) => x.ok).length;
   const status = okCount === r.steps.length ? "ok" : okCount === 0 ? "failed" : "partial";
@@ -365,11 +382,11 @@ export async function runRoutineUnattended(name: string, kind: "schedule" | "tri
   });
 }
 
-/** Scheduler tick: run due schedules, then advance their next_run past now. */
+/** Scheduler tick: run due schedules (each in its pinned workspace), then advance their next_run past now. */
 export async function tickAutomation(nowMs: number): Promise<void> {
   for (const s of auto.dueSchedules(nowMs)) {
     try {
-      await runRoutineUnattended(s.routine_name, "schedule", `schedule:${s.id}`);
+      await runRoutineUnattended(s.routine_name, "schedule", `schedule:${s.id}`, s.workspace_id);
     } catch (e: any) {
       auto.recordRun({ kind: "schedule", ref: `schedule:${s.id}`, routine_name: s.routine_name, status: "failed", summary: `scheduler error: ${String(e?.message || e)}` });
     }
@@ -378,12 +395,12 @@ export async function tickAutomation(nowMs: number): Promise<void> {
   }
 }
 
-/** Incoming exec-crm webhook: match triggers, run their routines unattended. */
+/** Incoming exec-crm webhook: match triggers, run their routines unattended in their pinned workspaces. */
 export async function handleWebhookEvent(event: string, data: Record<string, any>): Promise<{ matched: number; runs: auto.AutomationRun[] }> {
   const matched = auto.matchTriggers(event, data || {});
   const runs: auto.AutomationRun[] = [];
   for (const t of matched) {
-    runs.push(await runRoutineUnattended(t.routine_name, "trigger", `trigger:${t.id}:${event}`));
+    runs.push(await runRoutineUnattended(t.routine_name, "trigger", `trigger:${t.id}:${event}`, t.workspace_id));
   }
   return { matched: matched.length, runs };
 }
@@ -460,7 +477,7 @@ function deleteRoutineReply(name: string): Reply {
   return { text: `Deleted routine **${r.name}**${extra}.`, chips: ["List routines", "Morning brief"] };
 }
 
-async function scheduleAddReply(slots: Record<string, string>): Promise<Reply> {
+async function scheduleAddReply(session: Session, slots: Record<string, string>): Promise<Reply> {
   const r = auto.getRoutine(slots.routine);
   if (!r) {
     return {
@@ -475,9 +492,11 @@ async function scheduleAddReply(slots: Record<string, string>): Promise<Reply> {
       chips: ["List schedules"],
     };
   }
-  const sch = auto.createSchedule(r.name, spec, Date.now());
+  const wsId = session.workspaceId ?? null;
+  const sch = auto.createSchedule(r.name, spec, Date.now(), wsId);
+  const where = wsId == null ? "" : ` in workspace **${session.workspaceName || `#${wsId}`}**`;
   return {
-    text: `⏰ Scheduled **${r.name}** ${sch.spec_text} — next run ${new Date(sch.next_run).toLocaleString()}.`,
+    text: `⏰ Scheduled **${r.name}**${where} ${sch.spec_text} — next run ${new Date(sch.next_run).toLocaleString()}.`,
     chips: ["List schedules", "List routines"],
   };
 }
@@ -491,7 +510,7 @@ function fmtNext(ms: number): string {
   return `${when} ${d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
 }
 
-function listSchedulesReply(): Reply {
+async function listSchedulesReply(): Promise<Reply> {
   const ss = auto.listSchedules();
   if (!ss.length) {
     return {
@@ -499,10 +518,11 @@ function listSchedulesReply(): Reply {
       chips: ["List routines", "Help"],
     };
   }
-  const list = ss.map((x) =>
-    `• #${x.id} **${x.routine_name}** — ${x.spec_text}, next ${fmtNext(x.next_run)}${x.active ? "" : " (paused)"}`
-  ).join("\n");
-  return { text: `**${ss.length} schedule${ss.length === 1 ? "" : "s"}:**\n${list}`, chips: ["List routines"] };
+  const list = await Promise.all(ss.map(async (x) => {
+    const where = x.workspace_id == null ? "" : ` in **${await wss.workspaceLabel(x.workspace_id)}**`;
+    return `• #${x.id} **${x.routine_name}** — ${x.spec_text}${where}, next ${fmtNext(x.next_run)}${x.active ? "" : " (paused)"}`;
+  }));
+  return { text: `**${ss.length} schedule${ss.length === 1 ? "" : "s"}:**\n${list.join("\n")}`, chips: ["List routines"] };
 }
 
 function findSchedule(ref: string): auto.Schedule | null {
@@ -524,7 +544,7 @@ function pauseScheduleReply(ref: string, active: boolean): Reply {
   return { text: `${active ? "▶️ Resumed" : "⏸️ Paused"} schedule #${s.id} (**${s.routine_name}**).`, chips: ["List schedules"] };
 }
 
-async function triggerAddReply(slots: Record<string, string>): Promise<Reply> {
+async function triggerAddReply(session: Session, slots: Record<string, string>): Promise<Reply> {
   const r = auto.getRoutine(slots.routine);
   if (!r) {
     return {
@@ -536,15 +556,17 @@ async function triggerAddReply(slots: Record<string, string>): Promise<Reply> {
   if (!resolved) {
     return { text: `I don't know the event "${slots.event}". Say \`trigger help\` for the full list.`, chips: ["Trigger help"] };
   }
-  const t = auto.createTrigger(resolved.event, resolved.filter, r.name);
+  const wsId = session.workspaceId ?? null;
+  const t = auto.createTrigger(resolved.event, resolved.filter, r.name, wsId);
   const f = Object.entries(resolved.filter).map(([k, v]) => `${k}=${v}`).join(", ");
+  const where = wsId == null ? "" : ` in workspace **${session.workspaceName || `#${wsId}`}**`;
   return {
-    text: `⚡ Trigger #${t.id}: when **${t.event}**${f ? ` (${f})` : ""}, run **${r.name}**.\n\nTo fire it, add an outgoing webhook in exec-crm → Automations pointed at \`POST /api/hooks/exec-crm\` on this server, with the secret from MILTON_HOOK_SECRET.`,
+    text: `⚡ Trigger #${t.id}: when **${t.event}**${f ? ` (${f})` : ""}, run **${r.name}**${where}.\n\nTo fire it, add an outgoing webhook in exec-crm → Automations pointed at \`POST /api/hooks/exec-crm\` on this server, with the secret from MILTON_HOOK_SECRET.`,
     chips: ["List triggers", "Trigger help"],
   };
 }
 
-function listTriggersReply(): Reply {
+async function listTriggersReply(): Promise<Reply> {
   const ts = auto.listTriggers();
   if (!ts.length) {
     return {
@@ -552,11 +574,12 @@ function listTriggersReply(): Reply {
       chips: ["Trigger help", "List routines"],
     };
   }
-  const list = ts.map((t) => {
+  const list = await Promise.all(ts.map(async (t) => {
     const f = Object.entries(t.filter).map(([k, v]) => `${k}=${v}`).join(", ");
-    return `• #${t.id} **${t.event}**${f ? ` (${f})` : ""} → **${t.routine_name}**${t.active ? "" : " (paused)"}`;
-  }).join("\n");
-  return { text: `**${ts.length} trigger${ts.length === 1 ? "" : "s"}:**\n${list}`, chips: ["Trigger help"] };
+    const where = t.workspace_id == null ? "" : ` in **${await wss.workspaceLabel(t.workspace_id)}**`;
+    return `• #${t.id} **${t.event}**${f ? ` (${f})` : ""} → **${t.routine_name}**${where}${t.active ? "" : " (paused)"}`;
+  }));
+  return { text: `**${ts.length} trigger${ts.length === 1 ? "" : "s"}:**\n${list.join("\n")}`, chips: ["Trigger help"] };
 }
 
 function deleteTriggerReply(id: string): Reply {
@@ -588,6 +611,87 @@ function listRunsReply(): Reply {
   return { text: `**Recent automation runs:**\n${list}`, chips: ["List schedules", "List triggers"] };
 }
 
+// ---- workspaces ------------------------------------------------------------------------
+// Parse from the RAW message so names keep their original casing.
+function applyWorkspace(session: Session, w: { id: number; name: string }): Reply {
+  wss.setSessionWorkspace(session.id, w.id, w.name);
+  session.workspaceId = w.id;
+  session.workspaceName = w.name;
+  return {
+    text: `Switched to workspace **${w.name}**. Everything I do now — deals, tasks, routines — happens in there.`,
+    chips: ["Show pipeline", "Current workspace", "Morning brief"],
+  };
+}
+
+async function listWorkspacesReply(): Promise<Reply> {
+  const list = await wss.listWorkspaces();
+  if (!list) {
+    return {
+      text: `I can't reach exec-crm at ${crm.crmBase()} right now, so I can't list workspaces.`,
+      chips: ["Show pipeline", "Help"],
+    };
+  }
+  if (!list.length) return { text: "exec-crm has no workspaces yet.", chips: ["Help"] };
+  return {
+    text: `**${list.length} workspace${list.length === 1 ? "" : "s"}:**\n` +
+      list.map((w) => `• **${w.name}** (id ${w.id})`).join("\n") +
+      `\n\nSay \`switch to <name>\` to work inside one.`,
+    chips: ["Current workspace", "Show pipeline"],
+  };
+}
+
+function currentWorkspaceReply(session: Session): Reply {
+  const id = session.workspaceId ?? null;
+  if (id == null) {
+    return {
+      text: "You're in exec-crm's **default workspace**. Say `workspaces` to see the others, or `switch to <name>`.",
+      chips: ["Workspaces", "Show pipeline"],
+    };
+  }
+  const name = session.workspaceName || `#${id}`;
+  return {
+    text: `Current workspace: **${name}** (id ${id}). Say \`switch to default\` to go back.`,
+    chips: ["Workspaces", "Show pipeline", "Morning brief"],
+  };
+}
+
+async function switchWorkspaceReply(session: Session, raw: string): Promise<Reply> {
+  const m = raw.trim().match(/^(?:switch to|use workspace|switch workspace to) (.+)$/i);
+  const query = (m?.[1] || "").trim();
+  if (!query) return { text: "Switch to which workspace? Say `workspaces` to list them.", chips: ["Workspaces"] };
+  if (/^default$/i.test(query)) {
+    wss.setSessionWorkspace(session.id, null, "");
+    session.workspaceId = null;
+    session.workspaceName = "";
+    return {
+      text: "Back in exec-crm's **default workspace**.",
+      chips: ["Show pipeline", "Workspaces", "Morning brief"],
+    };
+  }
+  const matches = await wss.findWorkspace(query);
+  if (matches === null) {
+    return {
+      text: `I can't reach exec-crm at ${crm.crmBase()} right now — staying where you are.`,
+      chips: ["Current workspace", "Show pipeline"],
+    };
+  }
+  if (!matches.length) {
+    return { text: `No workspace matching "${query}". Say \`workspaces\` to see them all.`, chips: ["Workspaces"] };
+  }
+  const [top, second] = [matches[0], matches[1]];
+  if (top.score >= 70 && (!second || top.score - second.score >= 20)) {
+    return applyWorkspace(session, top.ws);
+  }
+  // ambiguous: numbered disambiguation, following the existing choice pattern
+  const options = matches.slice(0, 5).map((mm, i) => ({ id: mm.ws.id, n: i + 1, label: mm.ws.name, sub: `id ${mm.ws.id}` }));
+  session.choice = { kind: "workspace", options, then: { action: "switch_workspace", payload: {} } };
+  return {
+    text: "A few workspaces match — which one did you mean?",
+    cards: [{ kind: "choices", options }],
+    chips: options.map((o) => String(o.n)),
+  };
+}
+
 async function dispatchAutomation(session: Session, slots: Record<string, string>, name: string, raw: string): Promise<Reply> {
   switch (name) {
     case "save_routine": return saveRoutineReply(raw);
@@ -595,16 +699,19 @@ async function dispatchAutomation(session: Session, slots: Record<string, string
     case "list_routines": return listRoutinesReply();
     case "delete_routine": return deleteRoutineReply(slots.name);
     case "show_routine": return showRoutineReply(slots.name);
-    case "schedule_add": return scheduleAddReply(slots);
+    case "schedule_add": return scheduleAddReply(session, slots);
     case "list_schedules": return listSchedulesReply();
     case "unschedule": return unscheduleReply(slots.ref);
     case "pause_schedule": return pauseScheduleReply(slots.ref, false);
     case "resume_schedule": return pauseScheduleReply(slots.ref, true);
-    case "trigger_add": return triggerAddReply(slots);
+    case "trigger_add": return triggerAddReply(session, slots);
     case "list_triggers": return listTriggersReply();
     case "delete_trigger": return deleteTriggerReply(slots.id);
     case "trigger_help": return { text: triggerHelpText(), chips: ["List triggers", "List routines"] };
     case "list_runs": return listRunsReply();
+    case "list_workspaces": return listWorkspacesReply();
+    case "current_workspace": return currentWorkspaceReply(session);
+    case "switch_workspace": return switchWorkspaceReply(session, raw);
   }
   return { text: "Nothing to do." };
 }
@@ -645,6 +752,9 @@ async function dispatch(session: Session, intent: Intent, opts: MessageOpts): Pr
     case "delete_trigger":
     case "trigger_help":
     case "list_runs":
+    case "list_workspaces":
+    case "current_workspace":
+    case "switch_workspace":
       try {
         return await dispatchAutomation(session, s, intent.name, opts.raw || "");
       } catch (e: any) {

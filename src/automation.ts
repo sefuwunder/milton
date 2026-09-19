@@ -46,6 +46,14 @@ export function initAutomationDb(database: Database) {
       ran_at TEXT DEFAULT (datetime('now'))
     );
   `);
+  // workspace pinning for unattended runs (nullable = default workspace).
+  // Idempotent: ALTER TABLE on pre-existing DBs that lack the column.
+  for (const t of ["schedules", "triggers"]) {
+    const cols = db.query(`PRAGMA table_info(${t})`).all() as any[];
+    if (!cols.some((c) => c.name === "workspace_id")) {
+      db.exec(`ALTER TABLE ${t} ADD COLUMN workspace_id INTEGER`);
+    }
+  }
 }
 
 function needDb(): Database {
@@ -195,16 +203,16 @@ export function nextRunAfter(spec: ScheduleSpec, fromMs: number): number {
 }
 
 // ---- schedules -------------------------------------------------------------------
-export interface Schedule { id: number; routine_name: string; spec: ScheduleSpec; spec_text: string; tz: string; next_run: number; active: number; created_at: string }
+export interface Schedule { id: number; routine_name: string; spec: ScheduleSpec; spec_text: string; tz: string; next_run: number; active: number; workspace_id: number | null; created_at: string }
 
 function rowToSchedule(r: any): Schedule {
-  return { id: r.id, routine_name: r.routine_name, spec: JSON.parse(r.spec), spec_text: r.spec_text, tz: r.tz, next_run: r.next_run, active: r.active, created_at: r.created_at };
+  return { id: r.id, routine_name: r.routine_name, spec: JSON.parse(r.spec), spec_text: r.spec_text, tz: r.tz, next_run: r.next_run, active: r.active, workspace_id: r.workspace_id == null ? null : Number(r.workspace_id), created_at: r.created_at };
 }
 
-export function createSchedule(routineName: string, spec: ScheduleSpec, nowMs: number): Schedule {
+export function createSchedule(routineName: string, spec: ScheduleSpec, nowMs: number, workspaceId: number | null = null): Schedule {
   const d = needDb();
-  const r = d.query("INSERT INTO schedules (routine_name, spec, spec_text, next_run) VALUES (?, ?, ?, ?)")
-    .run(routineName, JSON.stringify(spec), specText(spec), nextRunAfter(spec, nowMs));
+  const r = d.query("INSERT INTO schedules (routine_name, spec, spec_text, next_run, workspace_id) VALUES (?, ?, ?, ?, ?)")
+    .run(routineName, JSON.stringify(spec), specText(spec), nextRunAfter(spec, nowMs), workspaceId);
   return getSchedule(Number(r.lastInsertRowid))!;
 }
 
@@ -241,7 +249,7 @@ export function advanceSchedule(id: number, nowMs: number): number {
 }
 
 // ---- triggers ----------------------------------------------------------------------
-export interface Trigger { id: number; event: string; filter: Record<string, string>; routine_name: string; active: number; created_at: string }
+export interface Trigger { id: number; event: string; filter: Record<string, string>; routine_name: string; active: number; workspace_id: number | null; created_at: string }
 
 // Event names exec-crm fires on its outgoing webhooks (from exec-crm/src/server.ts).
 export const CRM_EVENTS = [
@@ -287,21 +295,21 @@ export function resolveTriggerEvent(phrase: string): { event: string; filter: Re
   return null;
 }
 
-export function createTrigger(event: string, filter: Record<string, string>, routineName: string): Trigger {
+export function createTrigger(event: string, filter: Record<string, string>, routineName: string, workspaceId: number | null = null): Trigger {
   const d = needDb();
-  const r = d.query("INSERT INTO triggers (event, filter, routine_name) VALUES (?, ?, ?)")
-    .run(event, JSON.stringify(filter), routineName);
+  const r = d.query("INSERT INTO triggers (event, filter, routine_name, workspace_id) VALUES (?, ?, ?, ?)")
+    .run(event, JSON.stringify(filter), routineName, workspaceId);
   return getTrigger(Number(r.lastInsertRowid))!;
 }
 
 export function getTrigger(id: number): Trigger | null {
   const r = needDb().query("SELECT * FROM triggers WHERE id = ?").get(id) as any;
-  return r ? { id: r.id, event: r.event, filter: JSON.parse(r.filter || "{}"), routine_name: r.routine_name, active: r.active, created_at: r.created_at } : null;
+  return r ? { id: r.id, event: r.event, filter: JSON.parse(r.filter || "{}"), routine_name: r.routine_name, active: r.active, workspace_id: r.workspace_id == null ? null : Number(r.workspace_id), created_at: r.created_at } : null;
 }
 
 export function listTriggers(): Trigger[] {
   return (needDb().query("SELECT * FROM triggers ORDER BY id").all() as any[]).map((r) => ({
-    id: r.id, event: r.event, filter: JSON.parse(r.filter || "{}"), routine_name: r.routine_name, active: r.active, created_at: r.created_at,
+    id: r.id, event: r.event, filter: JSON.parse(r.filter || "{}"), routine_name: r.routine_name, active: r.active, workspace_id: r.workspace_id == null ? null : Number(r.workspace_id), created_at: r.created_at,
   }));
 }
 
