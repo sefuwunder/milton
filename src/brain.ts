@@ -2,6 +2,7 @@
 // Replies are structured (text + cards + chips) so the chat UI can render richly.
 
 import * as crm from "./crm";
+import * as mer from "./meridian";
 import { parseIntent, helpText, HELP_CHIPS, parseStage, parseMoney, parseDate, type Intent } from "./intents";
 import { ocrUpload, type HandMetrics } from "./ocr";
 import * as auto from "./automation";
@@ -30,8 +31,8 @@ export interface Reply { text: string; cards?: Card[]; chips?: string[] }
 
 export interface PendingAction { type: string; label: string; payload: any }
 export interface ChoiceState {
-  kind: "deal" | "contact" | "company" | "task" | "workspace" | "stage";
-  options: { id: number; label: string; sub?: string }[];
+  kind: "deal" | "contact" | "company" | "task" | "workspace" | "stage" | "recon";
+  options: { id: number | string; n?: number; label: string; sub?: string }[];
   then: { action: string; payload: any };
 }
 export interface SavedNote { dealId: number; dealTitle: string; text: string; uploadId?: string; at: string }
@@ -265,7 +266,7 @@ async function handleMessageScoped(session: Session, raw: string, opts: MessageO
   return reply;
 }
 
-async function dispatchChoice(session: Session, ch: ChoiceState, id: number): Promise<Reply> {
+async function dispatchChoice(session: Session, ch: ChoiceState, id: number | string): Promise<Reply> {
   const { action, payload } = ch.then;
   if (ch.kind === "deal") {
     const deals = await crm.getDeals();
@@ -289,6 +290,12 @@ async function dispatchChoice(session: Session, ch: ChoiceState, id: number): Pr
     const st = (await crm.getStages()).find((x) => x.slug === slug);
     if (!st) return { text: "That stage seems to be gone — say `stages` to see the current list." };
     return stageAction(session, action, st, payload);
+  }
+  if (ch.kind === "recon") {
+    const r = await mer.getRecon(String(id));
+    if (!r) return { text: "That recon seems to be gone — say `meridian recons` to see the current list." };
+    if (action === "meridian_entities") return entitiesReplyFor(r, payload.etype);
+    return dossierReplyFor(r);
   }
   return { text: "I lost track of that choice — try the command again." };
 }
@@ -725,6 +732,144 @@ async function switchWorkspaceReply(session: Session, raw: string): Promise<Repl
   };
 }
 
+// ---- meridian (read-only recon access) ------------------------------------------------
+// Meridian is a separate app; every call below is GET. Never launches recons,
+// never mutates anything.
+function meridianDown(): Reply {
+  return {
+    text: `I can't reach Meridian at ${mer.meridianBase()} right now — is it running? Start it with \`bun src/server.ts\` in the meridian folder, or point me elsewhere with MERIDIAN_URL.`,
+    chips: ["Help"],
+  };
+}
+
+async function listReconsReply(): Promise<Reply> {
+  const list = await mer.listRecons();
+  if (!list) return meridianDown();
+  if (!list.length) return { text: "Meridian has no recon sprints yet.", chips: ["Help"] };
+  const fmt = (r: mer.ReconSummary) =>
+    `• **${r.city}**${r.country ? `, ${r.country}` : ""} — ${r.status}, ${r.nodes} nodes · ${r.edges} edges (id \`${r.id}\`)`;
+  return {
+    text: `**${list.length} recon sprint${list.length === 1 ? "" : "s"}** (newest first):\n` +
+      list.slice(0, 10).map(fmt).join("\n") +
+      `\n\nSay \`meridian dossier <city>\` for the analyst summary, or \`meridian entities <city>\` for its companies and orgs.`,
+    chips: ["Meridian recons", "Help"],
+  };
+}
+
+// Shared fuzzy resolution for dossier/entities. Returns a Reply when the query
+// doesn't resolve cleanly (unreachable / no match / ambiguous), else the recon.
+async function resolveRecon(
+  session: Session, query: string,
+  action: "meridian_dossier" | "meridian_entities", payload: any,
+): Promise<mer.ReconDetail | Reply> {
+  const matches = await mer.findRecon(query);
+  if (matches === null) return meridianDown();
+  if (!matches.length) {
+    return { text: `No recon matching "${query}". Say \`meridian recons\` to see them all.`, chips: ["Meridian recons"] };
+  }
+  const [top, second] = [matches[0], matches[1]];
+  if (top.score >= 70 && (!second || top.score - second.score >= 20)) {
+    const r = await mer.getRecon(top.recon.id);
+    return r || { text: "That recon seems to be gone — say `meridian recons` to see the current list." };
+  }
+  // ambiguous: numbered disambiguation, following the existing choice pattern
+  const options = matches.slice(0, 5).map((m, i) => ({
+    id: m.recon.id, n: i + 1,
+    label: `${m.recon.city}${m.recon.country ? ", " + m.recon.country : ""}`,
+    sub: `${m.recon.status} · ${m.recon.nodes} nodes`,
+  }));
+  session.choice = { kind: "recon", options, then: { action, payload } };
+  return {
+    text: "A few recons match — which one did you mean?",
+    cards: [{ kind: "choices", options }],
+    chips: options.map((o) => String(o.n)),
+  };
+}
+
+function fmtReconDate(iso: string): string {
+  if (!iso) return "";
+  const s = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(iso) ? iso + "Z" : iso;
+  const d = new Date(/^\d+$/.test(s) ? Number(s) : s);
+  return isNaN(d.getTime()) ? "" : d.toLocaleDateString();
+}
+
+function dossierReplyFor(r: mer.ReconDetail): Reply {
+  const byType = new Map<string, number>();
+  for (const n of r.nodes) byType.set(n.type, (byType.get(n.type) || 0) + 1);
+  const types = [...byType.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10)
+    .map(([t, c]) => `${t} ${c}`).join(", ") || "—";
+  const factEntries = Object.entries(r.facts).slice(0, 8).map(([k, v]) => {
+    const s = typeof v === "string" ? v : JSON.stringify(v);
+    return `• **${k}**: ${(s || "").slice(0, 140)}`;
+  });
+  const notable = r.nodes.filter((n) => mer.ENTITY_TYPES.includes(n.type)).slice(0, 5)
+    .map((n) => `• **${n.label}** (${n.type}${n.subtype ? "/" + n.subtype : ""}, via ${n.source})`);
+  const when = fmtReconDate(r.updated_at);
+  const lines = [
+    `**Recon: ${r.city}${r.country ? ", " + r.country : ""}** — ${r.status}, ${r.nodes.length} nodes · ${r.edges.length} edges${when ? `, updated ${when}` : ""}.`,
+    `**By type:** ${types}.`,
+  ];
+  if (factEntries.length) lines.push(`**Key facts:**\n${factEntries.join("\n")}`);
+  if (notable.length) lines.push(`**Notable entities:**\n${notable.join("\n")}\n\nSay \`meridian entities ${r.city}\` for the full list.`);
+  return { text: lines.join("\n\n"), chips: [`Meridian entities ${r.city}`, "Meridian recons"] };
+}
+
+function entitiesReplyFor(r: mer.ReconDetail, etype?: string): Reply {
+  const types = etype ? [etype] : mer.ENTITY_TYPES;
+  const list = r.nodes.filter((n) => types.includes(n.type));
+  if (!list.length) {
+    return {
+      text: `**${r.city}** has no ${etype ? `**${etype}** ` : ""}nodes on record. Try \`meridian dossier ${r.city}\` for what's there.`,
+      chips: ["Meridian recons"],
+    };
+  }
+  const items = list.slice(0, 20).map((n) => {
+    const head = `• **${n.label}** — ${n.type}${n.subtype ? "/" + n.subtype : ""} · via ${n.source}`;
+    const bits = [n.detail ? n.detail.slice(0, 200) : "", n.url || ""].filter(Boolean);
+    return bits.length ? `${head}\n  ${bits.join(" ")}` : head;
+  });
+  const more = list.length > 20 ? `\n\n…and ${list.length - 20} more.` : "";
+  return {
+    text: `**${etype ? etype[0].toUpperCase() + etype.slice(1) : "Business entities"} in ${r.city}** (${list.length}):\n${items.join("\n")}${more}`,
+    chips: [`Meridian dossier ${r.city}`, "Meridian recons"],
+  };
+}
+
+async function meridianDossierReply(session: Session, raw: string): Promise<Reply> {
+  const m = raw.trim().match(/^meridian dossier (.+)$/i);
+  const query = (m?.[1] || "").trim();
+  if (!query) return { text: "Dossier for which recon? Say `meridian recons` to see them.", chips: ["Meridian recons"] };
+  const res = await resolveRecon(session, query, "meridian_dossier", {});
+  return "text" in res ? res : dossierReplyFor(res);
+}
+
+async function meridianEntitiesReply(session: Session, slots: Record<string, string>, raw: string): Promise<Reply> {
+  let query = (slots.query || "").trim();
+  let etype = slots.etype || undefined;
+  if (!query) {
+    const m = raw.trim().match(/^meridian entities (.+)$/i);
+    query = (m?.[1] || "").trim();
+  }
+  if (!query) return { text: "Entities from which recon? Say `meridian recons` to see them.", chips: ["Meridian recons"] };
+  // Strip a trailing type filter the same way the parser does.
+  if (!etype) {
+    const parts = query.split(/\s+/);
+    const maybe = parts[parts.length - 1].toLowerCase();
+    if (parts.length > 1 && mer.NODE_TYPES.includes(maybe)) { etype = maybe; query = parts.slice(0, -1).join(" "); }
+  }
+  const res = await resolveRecon(session, query, "meridian_entities", { etype });
+  return "text" in res ? res : entitiesReplyFor(res, etype);
+}
+
+async function dispatchMeridian(session: Session, slots: Record<string, string>, name: string, raw: string): Promise<Reply> {
+  switch (name) {
+    case "list_recons": return listReconsReply();
+    case "meridian_dossier": return meridianDossierReply(session, raw);
+    case "meridian_entities": return meridianEntitiesReply(session, slots, raw);
+  }
+  return { text: "Nothing to do." };
+}
+
 async function dispatchAutomation(session: Session, slots: Record<string, string>, name: string, raw: string): Promise<Reply> {
   switch (name) {
     case "save_routine": return saveRoutineReply(raw);
@@ -792,6 +937,15 @@ async function dispatch(session: Session, intent: Intent, opts: MessageOpts): Pr
         return await dispatchAutomation(session, s, intent.name, opts.raw || "");
       } catch (e: any) {
         return { text: `Automations aren't available right now: ${String(e?.message || e)}`, chips: HELP_CHIPS.slice(0, 3) };
+      }
+
+    case "list_recons":
+    case "meridian_dossier":
+    case "meridian_entities":
+      try {
+        return await dispatchMeridian(session, s, intent.name, opts.raw || "");
+      } catch (e: any) {
+        return { text: `Meridian isn't available right now: ${String(e?.message || e)}`, chips: HELP_CHIPS.slice(0, 3) };
       }
 
     case "ocr_read":
