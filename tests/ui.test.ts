@@ -40,7 +40,7 @@ beforeAll(async () => {
   };
   afterAll(() => { (globalThis as any).fetch = prevFetch; });
   let src = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
-  src = src.replace("})();", ";globalThis.__t={cardHTML,md,money,esc,routineRow,scheduleRow,triggerRow,runRow,updateBadge,showAuto,hideAuto};})();");
+  src = src.replace("})();", ";globalThis.__t={cardHTML,md,money,esc,routineRow,scheduleRow,triggerRow,runRow,updateBadge,showAuto,hideAuto,addTrayItem,addMsg};})();");
   eval(src);
   await new Promise((r) => setTimeout(r, 50));
   T = (globalThis as any).__t;
@@ -155,5 +155,53 @@ describe("automations UI", () => {
     T.hideAuto();
     expect(els["auto-view"].hidden).toBe(true);
     expect(els["chat"].hidden).toBe(false);
+  });
+});
+
+describe("vCard attachments", () => {
+  beforeAll(() => {
+    // addTrayItem fires uploadPhoto -> XMLHttpRequest; fake it so the tray
+    // item HTML can be asserted without a network round-trip.
+    (globalThis as any).XMLHttpRequest = class {
+      upload = { addEventListener() {} };
+      open() {}
+      addEventListener() {}
+      send() {}
+    };
+    const doc = (globalThis as any).document;
+    const realCreate = doc.createElement;
+    doc.createElement = (t: string) => {
+      const el = realCreate(t);
+      const q = el.querySelector;
+      el.querySelector = (sel: string) =>
+        sel === ".bar" ? { style: {}, parentElement: { hidden: false } } : sel === ".rm" ? { addEventListener() {} } : q(sel);
+      return el;
+    };
+  });
+
+  test("vcf file renders a file chip, not a broken image", () => {
+    els["tray"].children.length = 0;
+    T.addTrayItem({ name: "contacts.vcf", type: "text/vcard", size: 100 });
+    const item = els["tray"].children[els["tray"].children.length - 1];
+    expect(item.innerHTML).toContain("file-chip");
+    expect(item.innerHTML).toContain("📇");
+    expect(item.innerHTML).toContain("contacts.vcf");
+    expect(item.innerHTML).not.toContain("<img");
+  });
+
+  test("image file still renders an <img> thumbnail", () => {
+    (globalThis as any).URL.createObjectURL = () => "blob:fake";
+    els["tray"].children.length = 0;
+    T.addTrayItem({ name: "photo.png", type: "image/png", size: 100 });
+    const item = els["tray"].children[els["tray"].children.length - 1];
+    expect(item.innerHTML).toContain("<img");
+    expect(item.innerHTML).not.toContain("file-chip");
+  });
+
+  test("user message echoes vcf attachments as chips", () => {
+    const div = T.addMsg("user", { text: "", photos: [], files: ["contacts.vcf"] });
+    expect(div.innerHTML).toContain("file-chip");
+    expect(div.innerHTML).toContain("📇");
+    expect(div.innerHTML).not.toContain("<img");
   });
 });

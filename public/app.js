@@ -173,6 +173,7 @@
     const div = document.createElement("div");
     div.className = "msg " + role;
     (reply.photos || []).forEach((p) => { div.insertAdjacentHTML("beforeend", `<img class="thumb" src="${esc(p)}" alt="Uploaded photo">`); });
+    (reply.files || []).forEach((n) => { div.insertAdjacentHTML("beforeend", `<span class="file-chip">📇 ${esc(n)}</span>`); });
     div.innerHTML += md(reply.text || "");
     (reply.cards || []).forEach((c) => { div.insertAdjacentHTML("beforeend", cardHTML(c)); });
     chat.appendChild(div);
@@ -208,18 +209,21 @@
   function addTrayItem(file) {
     const item = document.createElement("div");
     item.className = "tray-item";
-    const objUrl = URL.createObjectURL(file);
+    const isVcf = /\.vcf$/i.test(file.name || "") || /vcard/i.test(file.type || "");
+    const objUrl = isVcf ? null : URL.createObjectURL(file);
     item.innerHTML =
-      `<img src="${esc(objUrl)}" alt="Photo to send">` +
+      (isVcf
+        ? `<span class="file-chip">📇 ${esc(file.name || "contacts.vcf")}</span>`
+        : `<img src="${esc(objUrl)}" alt="Photo to send">`) +
       `<div class="prog"><div class="bar"></div></div>` +
-      `<button type="button" class="rm" aria-label="Remove photo">×</button>`;
+      `<button type="button" class="rm" aria-label="Remove attachment">×</button>`;
     const bar = item.querySelector(".bar");
     const rm = item.querySelector(".rm");
-    const entry = { id: null, url: null, objUrl, item };
+    const entry = { id: null, url: null, objUrl, item, isVcf, name: file.name || "contacts.vcf" };
     rm.addEventListener("click", () => {
       const i = pending.indexOf(entry);
       if (i >= 0) pending.splice(i, 1);
-      URL.revokeObjectURL(objUrl);
+      if (objUrl) URL.revokeObjectURL(objUrl);
       item.remove();
       renderTray();
     });
@@ -427,7 +431,7 @@
     es.addEventListener("automation-run", (ev) => {
       try {
         const run = JSON.parse(ev.data);
-        toast(`⚡ ${run.routine_name} (${run.kind}): ${run.summary}`);
+        toast(run.kind === "reminder" ? `⏰ Reminder: ${run.summary}` : `⚡ ${run.routine_name} (${run.kind}): ${run.summary}`);
         refreshBadge();
         if (!autoView.hidden && autoTab === "runs") refreshAutoTab();
       } catch { /* ignore malformed */ }
@@ -440,13 +444,14 @@
     if (!text && !atts.length) return;
     if (!autoView.hidden) hideAuto(); // typing a message means you're done with the panel
     input.value = "";
-    const photos = atts.map((a) => a.url + "?session=" + encodeURIComponent(sid));
-    addMsg("user", { text, photos });
+    const photos = atts.filter((a) => !a.isVcf).map((a) => a.url + "?session=" + encodeURIComponent(sid));
+    const files = atts.filter((a) => a.isVcf).map((a) => a.name);
+    addMsg("user", { text, photos, files });
     setChips([]);
     // keep the tray until the send succeeds so a failed send doesn't lose uploads
     const typing = document.createElement("div");
     typing.className = "msg milton typing";
-    typing.textContent = atts.length ? "Milton is reading your photo…" : "Milton is thinking…";
+    typing.textContent = atts.length ? "Milton is reading your attachment…" : "Milton is thinking…";
     chat.appendChild(typing); scroll();
     try {
       const res = await fetch("/api/chat", {

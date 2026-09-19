@@ -115,11 +115,10 @@ describe("parseIntent writes", () => {
     expect(i.slots.title).toBe("call acme");
     expect(i.slots.due).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
-  test("remind me", () => {
+  test("remind me routes to remind_add", () => {
     const i = parseIntent("remind me to send the proposal friday");
-    expect(i.name).toBe("remind");
-    expect(i.slots.title).toContain("send the proposal");
-    expect(i.slots.due).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(i.name).toBe("remind_add");
+    expect(i.slots.rest).toContain("send the proposal");
   });
   test("complete task", () => {
     expect(parseIntent("complete task 3").slots.query).toBe("3");

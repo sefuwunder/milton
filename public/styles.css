@@ -213,6 +213,13 @@ body {
   border: 1px solid var(--glass-border); background: var(--glass); flex: 0 0 auto;
 }
 .tray-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tray-item .file-chip, .msg .file-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 10px; border-radius: 10px; font-size: 13px;
+  background: var(--glass); border: 1px solid var(--glass-border);
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tray-item .file-chip { width: 100%; height: 100%; box-sizing: border-box; justify-content: center; }
 .tray-item.done { border-color: var(--accent2); }
 .tray-item.done::after {
   content: "✓"; position: absolute; right: 4px; bottom: 2px;

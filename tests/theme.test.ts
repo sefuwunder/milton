@@ -2,8 +2,13 @@
 // Follows the Bun quirks in ~/AGENTS.md: stubs ride in on custom __stub* globals and
 // are (re)installed in beforeEach, because Bun resets well-known globals between
 // beforeAll and the first beforeEach.
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterAll } from "bun:test";
 import { readFileSync } from "fs";
+
+// theme.test.ts installs a fetch stub in beforeEach and never leaks it: restore
+// the previous fetch when done so later test files get the real fetch back.
+const prevThemeFetch = (globalThis as any).fetch;
+afterAll(() => { (globalThis as any).fetch = prevThemeFetch; });
 
 function mkEl(tag: string): any {
   const attrs: Record<string, string> = {};

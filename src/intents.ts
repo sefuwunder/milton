@@ -9,7 +9,8 @@ export type IntentName =
   | "deliveries" | "activities" | "notes"
   | "add_deal" | "move_deal" | "set_deal_field" | "close_deal" | "delete_deal"
   | "add_contact" | "add_company" | "add_task" | "complete_task" | "reopen_task"
-  | "delete_task" | "remind"
+  | "delete_task" | "remind_add" | "remind_list" | "remind_cancel" | "import_contacts"
+  | "capture"
   | "ocr_read" | "handwriting" | "save_note"
   | "prep_brief"
   | "save_routine" | "run_routine" | "list_routines" | "delete_routine" | "show_routine"
@@ -102,6 +103,95 @@ export function extractDate(s: string): { date: string; rest: string } | null {
     }
   }
   return null;
+}
+
+/** One-shot reminder time parsing. Returns the fire time (epoch ms) and the
+ *  reminder text with the time expression stripped, or null when no usable
+ *  time expression is present. Relative ("in 20 minutes") and absolute
+ *  ("tomorrow at 9am", "friday at 2:30pm", "at 9am") forms are supported;
+ *  a bare date with no time defaults to 9:00 AM local. */
+export function parseReminderTime(s: string, nowMs: number): { fireAt: number; text: string } | null {
+  // relative: "in 20 minutes"
+  const rel = s.match(/\bin (\d+)\s*(minutes?|hours?|days?|weeks?)\b/);
+  if (rel) {
+    const n = parseInt(rel[1], 10);
+    const unit = /^minute/.test(rel[2]) ? 60000 : /^hour/.test(rel[2]) ? 3600000 : /^day/.test(rel[2]) ? 86400000 : 604800000;
+    const rest = (s.slice(0, rel.index) + " " + s.slice((rel.index || 0) + rel[0].length)).replace(/\s+/g, " ").trim();
+    return { fireAt: nowMs + n * unit, text: rest.replace(/^to /, "").trim() };
+  }
+  // absolute day + optional clock time (time is matched after the day is cut)
+  const dt = extractDate(s);
+  const base = dt ? dt.rest : s;
+  const tm = base.match(/\bat (\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/);
+  if (!dt && !tm) return null;
+  let rest = base;
+  let hh = 9, mm = 0; // default: 9:00 AM
+  if (tm) {
+    hh = parseInt(tm[1], 10);
+    mm = tm[2] ? parseInt(tm[2], 10) : 0;
+    if (hh > 23 || mm > 59) return null;
+    if (tm[3]) {
+      if (hh > 12) return null;
+      if (/pm/.test(tm[3]) && hh < 12) hh += 12;
+      if (/am/.test(tm[3]) && hh === 12) hh = 0;
+    }
+    rest = (base.slice(0, tm.index) + " " + base.slice((tm.index || 0) + tm[0].length)).replace(/\s+/g, " ").trim();
+  }
+  const day = dt ? dt.date : toLocalDate(new Date(nowMs));
+  const parts = day.split("-").map(Number);
+  let fireAt = new Date(parts[0], parts[1] - 1, parts[2], hh, mm, 0, 0).getTime();
+  if (!dt && fireAt <= nowMs) fireAt += 86400000; // "at 9am" already past today -> tomorrow
+  return { fireAt, text: rest.replace(/^to /, "").trim() };
+}
+
+function toLocalDate(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** "today at 3:00 PM", "tomorrow at 9:00 AM", "Fri, Sep 25 at 2:30 PM". */
+export function formatWhen(ms: number, nowMs: number = Date.now()): string {
+  const d = new Date(ms), n = new Date(nowMs);
+  const sameDay = d.toDateString() === n.toDateString();
+  const tom = new Date(n); tom.setDate(n.getDate() + 1);
+  const isTom = d.toDateString() === tom.toDateString();
+  let h = d.getHours();
+  const ap = h >= 12 ? "PM" : "AM";
+  h = h % 12 || 12;
+  const time = `${h}:${String(d.getMinutes()).padStart(2, "0")} ${ap}`;
+  if (sameDay) return `today at ${time}`;
+  if (isTom) return `tomorrow at ${time}`;
+  return `${d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} at ${time}`;
+}
+
+/** Conversational capture: "just met James from Vertex, he's evaluating the pilot".
+ *  Deterministic heuristics — person name, company after "from"/a capitalized
+ *  "at", trailing clause as the note. Never invents fields: anything missing
+ *  stays empty for the confirmation card. */
+export interface CaptureParse { name: string; company: string; note: string }
+export function parseCapture(rest: string): CaptureParse {
+  const s = rest.trim();
+  let company = "";
+  const fromM = s.match(/\bfrom ((?:[A-Z0-9][\w&.'-]* ?){1,3})/);
+  const atM = s.match(/\bat ([A-Z][\w&.'-]*(?: +[A-Z][\w&.'-]+){0,2})/);
+  const cm = fromM || atM;
+  if (cm) company = cm[1].trim();
+  // name: leading segment before the company marker / first comma, minus
+  // trailing "at <place>" phrases that aren't companies ("at the conference")
+  let head = cm && cm.index !== undefined ? s.slice(0, cm.index).trim() : s;
+  head = head.split(",")[0].trim();
+  head = head.replace(/\s+at\s+.+$/i, "").replace(/\s+from\s+.+$/i, "").replace(/\s+from\s*$/i, "").trim();
+  let name = "";
+  if (/^[A-Z][\w.'-]*( [A-Z][\w.'-]*){0,3}$/.test(head)) name = head;
+  else if (/^[a-z][\w.'-]*( [a-z][\w.'-]*){0,3}$/.test(head)) {
+    name = head.replace(/\w+/g, (w) => w[0].toUpperCase() + w.slice(1)); // "james" -> "James"
+  }
+  // note: trailing clause after the first comma, else whatever follows the company
+  let note = "";
+  const ci = s.indexOf(",");
+  if (ci >= 0) note = s.slice(ci + 1).trim();
+  else if (cm && cm.index !== undefined) note = s.slice(cm.index + cm[0].length).replace(/^[,. ]+/, "").trim();
+  return { name, company, note };
 }
 
 // Finds a money expression; returns {value, rest}.
@@ -277,14 +367,20 @@ export function parseIntent(raw: string): Intent {
     set("add_contact", { name: rest.replace(/\s+/g, " ").trim(), company, email, phone });
   }
   else if ((m = text.match(/^(?:add|create|new)(?: a| an)? company (.+)$/))) set("add_company", { name: m[1] });
+  else if (/^import (?:these |the |my )?contacts?$/.test(text)) set("import_contacts");
+  else if (/^import (?:the )?vcf(?: file)?$/.test(text)) set("import_contacts");
+  else if (/^import vcard(?: file)?$/.test(text)) set("import_contacts");
+  else if ((m = cased.match(/^(?:i )?(?:just )?met (.+)$/i))) set("capture", { rest: m[1].trim() });
 
-  // ---- task writes -----------------------------------------------------------------
-  else if (/^(remind me to |remind me )(.+)$/.test(text)) {
-    const mm = text.match(/^(remind me to |remind me )(.+)$/)!;
-    let rest = mm[2];
-    const dt = extractDate(rest);
-    set("remind", { title: dt ? dt.rest : rest, due: dt ? dt.date : "" });
+  // ---- one-shot reminders ----------------------------------------------------------
+  // Placed before delete_task: "delete reminder 2" must not parse as deleting a task.
+  else if ((m = text.match(/^(?:cancel|delete|remove) reminder (\d+)$/))) set("remind_cancel", { id: m[1] });
+  else if (/^(reminders|remind me list|list reminders|my reminders|show reminders|what are my reminders)$/.test(text)) set("remind_list");
+  else if (/^remind me\b/.test(text)) {
+    const rest = text.replace(/^remind me\b/, "").trim().replace(/^to /, "");
+    set("remind_add", { rest });
   }
+  // ---- task writes -----------------------------------------------------------------
   else if ((m = text.match(/^(?:add|create|new)(?: a| an)? task (.+)$/))) {
     let rest = m[1];
     const dt = extractDate(rest);
@@ -326,6 +422,10 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["workspaces", "list_workspaces"], ["switch to Acme", "switch_workspace"]], note: "" },
       { cmds: [["meridian recons", "list_recons"], ["meridian dossier Austin", "meridian_dossier"]], note: "read Meridian recon" },
       { cmds: [["prep me for my call with Acme", "prep_brief"]], note: "meeting prep: who, open deals, tasks, talking points" },
+      { cmds: [["import these contacts", "import_contacts"]], note: "attach a .vcf file first — I list what's inside before importing" },
+      { cmds: [["remind me to call Sarah tomorrow at 9am", "remind_add"]], note: "one-shot reminder — I'll ping you here when it's due" },
+      { cmds: [["just met James from Vertex, he's evaluating the pilot", "capture"]], note: "log who you met — I show what I picked up before saving anything" },
+      { cmds: [["reminders", "remind_list"], ["cancel reminder 2", "remind_cancel"]], note: "" },
     ],
   },
   {

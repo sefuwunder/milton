@@ -3,8 +3,9 @@
 
 import * as crm from "./crm";
 import * as mer from "./meridian";
-import { parseIntent, helpText, HELP_CHIPS, parseStage, parseMoney, parseDate, type Intent } from "./intents";
+import { parseIntent, helpText, HELP_CHIPS, parseStage, parseMoney, parseDate, parseReminderTime, formatWhen, parseCapture, type Intent } from "./intents";
 import { ocrUpload, type HandMetrics } from "./ocr";
+import { parseVcards, preferredPhone, preferredEmail, type ParsedVCard } from "./vcard";
 import * as auto from "./automation";
 import * as wss from "./workspace";
 import * as reconRuns from "./recon_runs";
@@ -183,8 +184,16 @@ async function llmReply(question: string, history: Session["history"]): Promise<
 export async function handleMessage(session: Session, raw: string, opts: MessageOpts = {}): Promise<Reply> {
   const atts = opts.attachments || [];
 
-  // captionless photo -> run OCR automatically
+  // captionless upload -> vCard offer, or photo OCR automatically
   if (!raw.trim() && atts.length) {
+    const vcf = atts.find((a) => a.mime === "text/vcard");
+    if (vcf) {
+      session.history.push({ role: "user", text: "[vcard]" });
+      const reply = await vcardOfferReply(session, vcf);
+      session.history.push({ role: "milton", text: reply.text });
+      session.history = session.history.slice(-40);
+      return reply;
+    }
     session.history.push({ role: "user", text: "[photo]" });
     const reply = await ocrPhotoReply(atts[0], { auto: true });
     session.history.push({ role: "milton", text: reply.text });
@@ -234,7 +243,11 @@ async function handleMessageScoped(session: Session, raw: string, opts: MessageO
       chips: ["Yes", "No"],
     };
   }
-  // 2b) resolve a pending confirmation
+  // 2d) resolve a pending conversational capture: anything that isn't yes/no is
+  // treated as corrected details — reparse and show the card again.
+  if (session.pending?.type === "capture" && intent.name !== "confirm_yes" && intent.name !== "confirm_no") {
+    return captureCorrectReply(session, raw);
+  }
   if (session.pending) {
     if (intent.name === "confirm_yes") {
       const p = session.pending; session.pending = undefined;
@@ -326,6 +339,14 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
     await crm.deleteStage(p.payload.slug, p.payload.moveTo);
     const moved = p.payload.moveTo ? ` ${p.payload.deals} deal(s) moved to "${p.payload.moveToName}".` : "";
     return { text: `Deleted stage "${p.label}".${moved}`, chips: ["Stages", "Show pipeline"] };
+  }
+  if (p.type === "capture") return captureSave(session, p.payload as CapturePayload);
+  if (p.type === "vcard_import") {
+    return vcardImportRun(p.payload.cards as ParsedVCard[]);
+  }
+  if (p.type === "reminder_add") {
+    const r = auto.createReminder(session.id, String(p.payload.text), Number(p.payload.fireAt));
+    return { text: `⏰ I'll remind you to **${r.text}** ${formatWhen(r.fire_at)}.`, chips: ["Reminders"] };
   }
   if (p.type === "routine_run") {
     const out = await runRoutineSteps(session, p.payload.steps, { unattended: false, confirmed: true });
@@ -441,6 +462,10 @@ export async function tickAutomation(nowMs: number): Promise<void> {
     }
     // advance from now so downtime doesn't pile up missed fires
     auto.advanceSchedule(s.id, nowMs);
+  }
+  // one-shot reminders: claim (pending -> fired, atomically) then announce once
+  for (const r of auto.claimDueReminders(nowMs)) {
+    auto.recordRun({ kind: "reminder", ref: `reminder:${r.id}`, routine_name: "Reminder", status: "ok", summary: r.text });
   }
 }
 
@@ -1059,17 +1084,17 @@ async function dispatch(session: Session, intent: Intent, opts: MessageOpts): Pr
     case "move_stage": return stageByName(session, s.query, "move_stage", { pos: s.pos, ref: s.ref });
 
     case "add_contact": return addContactReply(s);
+    case "capture": return captureReply(session, s.rest || "");
+    case "import_contacts": return importContactsReply(session, opts);
     case "add_company": {
       if (!s.name) return { text: "What should the company be called?" };
       const c = await crm.createCompany({ name: s.name });
       return { text: `Added company "${c.name}".`, chips: ["List companies", `Add contact … at ${c.name}`] };
     }
     case "add_task": return addTaskReply(session, s);
-    case "remind": {
-      if (!s.title) return { text: "Remind you to do what?" };
-      const t = await crm.createTask({ title: s.title, due_date: s.due || "" });
-      return { text: `Got it — I'll remind you: "${t.title}"${t.due_date ? ` (${duePhrase(t.due_date)})` : ""}.`, chips: ["My tasks"] };
-    }
+    case "remind_add": return remindAddReply(session, s.rest || "");
+    case "remind_list": return remindListReply(session);
+    case "remind_cancel": return remindCancelReply(session, s.id || "");
     case "complete_task": return taskByName(session, s.query, "complete_task", {});
     case "reopen_task": return taskByName(session, s.query, "reopen_task", {});
     case "delete_task": return taskByName(session, s.query, "delete_task", {});
@@ -1820,6 +1845,181 @@ async function addContactReply(s: Record<string, string>): Promise<Reply> {
   return { text: `Added contact "${c.name}"${c.email ? ` (${c.email})` : ""}.`, chips: ["List contacts", "Show pipeline"] };
 }
 
+// ---- conversational capture -----------------------------------------------------------
+// "just met James from Vertex, he's evaluating the pilot" -> confirm card ->
+// on Yes: fuzzy-match-or-create company, create linked contact, open a deal
+// draft in the first pipeline stage. Never writes before confirmation.
+
+interface CapturePayload { name: string; company: string; note: string }
+
+function captureCard(p: CapturePayload): Reply {
+  const lines = [
+    `• Name: **${p.name}**`,
+    `• Company: ${p.company ? `**${p.company}**` : "—"}`,
+    `• Note: ${p.note || "—"}`,
+  ];
+  const plan = p.company
+    ? `On confirm I'll match or create **${p.company}**, add **${p.name}** as a contact there, and open a deal draft.`
+    : `On confirm I'll add **${p.name}** as a contact and open a deal draft.`;
+  return {
+    text: `Just met **${p.name}** — here's what I picked up:\n${lines.join("\n")}\n\n${plan}\nSay \`yes\` to save, \`no\` to drop it — or just reply with corrections.`,
+    cards: [{ kind: "confirm", options: [{ n: 1, label: "Yes, save it" }, { n: 2, label: "Cancel" }] }],
+    chips: ["Yes", "No"],
+  };
+}
+
+function captureReply(session: Session, rest: string): Reply {
+  const p = parseCapture(rest);
+  if (!p.name) {
+    return {
+      text: `Who did you meet? I couldn't pick out a name — try \`just met Jane from Acme, she's interested in the pilot\`.`,
+      chips: ["Help"],
+    };
+  }
+  session.pending = { type: "capture", label: p.name, payload: p };
+  return captureCard(p);
+}
+
+/** Non-Yes/No replies to a pending capture are treated as corrected details:
+ *  reparse, update whatever fields came through, and show the card again. */
+function captureCorrectReply(session: Session, raw: string): Reply {
+  const p = session.pending!.payload as CapturePayload;
+  const restated = raw.match(/^(?:i )?(?:just )?met (.+)$/i);
+  const fix = parseCapture(restated ? restated[1] : raw);
+  const nm = raw.match(/\bname is ([A-Z][\w.'-]*(?: +[A-Z][\w.'-]+){0,2})/);
+  const co = raw.match(/\bcompany is ([^,.]+)/i);
+  if (nm) p.name = nm[1].trim();
+  else if (fix.name) p.name = fix.name;
+  if (co) p.company = co[1].trim();
+  else if (fix.company) p.company = fix.company;
+  if (fix.note) p.note = fix.note;
+  else if (!nm && !co && !fix.name && !fix.company) p.note = raw.trim();
+  session.pending!.label = p.name;
+  return captureCard(p);
+}
+
+async function captureSave(session: Session, p: CapturePayload): Promise<Reply> {
+  let companyId: number | null = null;
+  let companyName = "";
+  if (p.company) {
+    const ms = await crm.resolveCompany(p.company);
+    if (ms.length) { companyId = ms[0].item.id; companyName = ms[0].item.name; }
+    else { const c = await crm.createCompany({ name: p.company }); companyId = c.id; companyName = c.name; }
+  }
+  const contactPatch: Record<string, any> = { name: p.name, notes: p.note || "" };
+  if (companyId) contactPatch.company_id = companyId;
+  const contact = await crm.createContact(contactPatch);
+  const stages = await crm.getStages();
+  const stage = stages[0]?.slug || "prospecting";
+  const noteShort = p.note
+    ? p.note.replace(/^(he|she|they|it)'s /i, "").split(/\s+/).slice(0, 6).join(" ")
+    : "";
+  const title = p.company
+    ? `${companyName || p.company} — ${noteShort || "new contact"}`
+    : `${p.name} — ${noteShort || "introduction"}`;
+  const dealPatch: Record<string, any> = {
+    title, stage, notes: p.note || `Met ${p.name}`, contact_id: contact.id,
+  };
+  if (companyId) dealPatch.company_id = companyId;
+  const deal = await crm.createDeal(dealPatch);
+  return {
+    text: `Saved ✅ **${p.name}**${companyName ? ` at **${companyName}**` : ""} — contact added and deal draft **"${deal.title}"** opened in ${stages[0]?.name || "the first stage"}.`,
+    chips: ["Show pipeline", "List contacts"],
+  };
+}
+
+// ---- vCard import ------------------------------------------------------------------
+// Parses an uploaded .vcf file, shows a confirmation card listing what's inside,
+// and only writes to exec-crm after the user confirms.
+
+async function vcardOfferReply(session: Session, att: UploadRef): Promise<Reply> {
+  let text: string;
+  try {
+    text = await Bun.file(att.path).text();
+  } catch {
+    return { text: "I couldn't read that file — try uploading it again.", chips: ["Help"] };
+  }
+  let cards: ParsedVCard[];
+  try {
+    cards = parseVcards(text);
+  } catch (e: any) {
+    return { text: `That file doesn't look like a valid vCard: ${String(e?.message || e)}`, chips: ["Help"] };
+  }
+  if (!cards.length) return { text: "That vCard file has no contacts in it.", chips: ["Help"] };
+  const named = cards.filter((c) => c.name.trim()).length;
+  session.pending = { type: "vcard_import", label: `${cards.length} contacts`, payload: { cards } };
+  const items = cards.map((c) => ({
+    name: c.name.trim() || "(no name — will be skipped)",
+    company_name: [c.org, c.title].filter(Boolean).join(" · "),
+    email: preferredEmail(c)?.email || "",
+    phone: preferredPhone(c)?.number || "",
+  }));
+  const skipNote = named < cards.length
+    ? ` ${cards.length - named} ${cards.length - named === 1 ? "entry" : "entries"} without a name will be skipped.`
+    : "";
+  return {
+    text: `This file has **${cards.length} contact${cards.length === 1 ? "" : "s"}**. Import them into exec-crm?${skipNote}`,
+    cards: [
+      { kind: "contacts", title: "Contacts in file", items },
+      { kind: "confirm", options: [{ n: 1, label: `Yes, import ${named || cards.length}` }, { n: 2, label: "Cancel" }] },
+    ],
+    chips: ["Yes", "No"],
+  };
+}
+
+async function importContactsReply(session: Session, opts: MessageOpts): Promise<Reply> {
+  const atts = opts.attachments || [];
+  const vcf = atts.find((a) => a.mime === "text/vcard")
+    || (opts.latestUpload?.mime === "text/vcard" ? opts.latestUpload : null);
+  if (!vcf) {
+    return { text: "Attach a `.vcf` contact file first, then say `import these contacts`.", chips: ["Help"] };
+  }
+  return vcardOfferReply(session, vcf);
+}
+
+/** Confirmed vCard import: dedupe by email against the session workspace, then
+ *  create each contact. Never throws the whole batch away on one failure. */
+async function vcardImportRun(cards: ParsedVCard[]): Promise<Reply> {
+  const existing = new Set(
+    (await crm.getContacts()).map((c) => (c.email || "").toLowerCase()).filter(Boolean)
+  );
+  let created = 0, skipped = 0, failed = 0;
+  const failures: string[] = [];
+  for (const vc of cards) {
+    const name = vc.name.trim();
+    const email = preferredEmail(vc)?.email?.trim() || "";
+    if (!name) { skipped++; continue; } // nameless entry
+    if (email && existing.has(email.toLowerCase())) { skipped++; continue; } // duplicate
+    try {
+      let company_id: number | undefined;
+      let unmatchedOrg = "";
+      if (vc.org) {
+        const ms = await crm.resolveCompany(vc.org);
+        if (ms.length && ms[0].score >= 70) company_id = ms[0].item.id;
+        else unmatchedOrg = `Company: ${vc.org}`; // never silently drop the ORG
+      }
+      const patch: any = { name };
+      if (email) patch.email = email;
+      const phone = preferredPhone(vc)?.number?.trim();
+      if (phone) patch.phone = phone;
+      if (vc.title) patch.title = vc.title;
+      if (company_id) patch.company_id = company_id;
+      const noteBits = [vc.note, unmatchedOrg, vc.url ? `Website: ${vc.url}` : ""].filter(Boolean);
+      if (noteBits.length) patch.notes = noteBits.join("\n");
+      const done = await crm.createContact(patch);
+      created++;
+      if (done.email) existing.add(done.email.toLowerCase());
+    } catch (e: any) {
+      failed++;
+      failures.push(name);
+    }
+  }
+  const bits = [`Imported **${created}** contact${created === 1 ? "" : "s"}`];
+  if (skipped) bits.push(`${skipped} skipped (no name or already in exec-crm)`);
+  if (failed) bits.push(`${failed} failed (${failures.slice(0, 3).join(", ")}${failures.length > 3 ? "…" : ""})`);
+  return { text: bits.join(" · ") + ".", chips: ["List contacts", "Morning brief"] };
+}
+
 async function addTaskReply(session: Session, s: Record<string, string>): Promise<Reply> {
   if (!s.title) return { text: "What's the task? Try `add task Call Acme tomorrow`." };
   const patch: any = { title: s.title };
@@ -1839,6 +2039,50 @@ async function addTaskReply(session: Session, s: Record<string, string>): Promis
   }
   const t = await crm.createTask(patch);
   return { text: `Added task "${t.title}"${t.due_date ? ` (${duePhrase(t.due_date)})` : ""}.`, chips: ["My tasks", "Morning brief"] };
+}
+
+// ---- one-shot reminders ------------------------------------------------------------
+function remindAddReply(session: Session, rest: string): Reply {
+  const now = Date.now();
+  const parsed = parseReminderTime(rest, now);
+  if (!parsed) {
+    return { text: "When should I remind you? Try `remind me to stretch in 20 minutes` or `remind me to call Sarah tomorrow at 9am`.", chips: ["Help"] };
+  }
+  if (!parsed.text) {
+    return { text: "Remind you to do what? Try `remind me to stretch in 20 minutes`.", chips: ["Help"] };
+  }
+  if (parsed.fireAt <= now) {
+    return { text: "That time's already past — give me a future time?", chips: ["Help"] };
+  }
+  session.pending = { type: "reminder_add", label: parsed.text, payload: { text: parsed.text, fireAt: parsed.fireAt } };
+  return {
+    text: `Remind you to **${parsed.text}** ${formatWhen(parsed.fireAt, now)}?`,
+    cards: [{ kind: "confirm", options: [{ n: 1, label: "Yes, set reminder" }, { n: 2, label: "Cancel" }] }],
+    chips: ["Yes", "No"],
+  };
+}
+
+function remindListReply(session: Session): Reply {
+  const rs = auto.listReminders(session.id);
+  if (!rs.length) {
+    return { text: "No pending reminders. Set one with `remind me to stretch in 20 minutes`.", chips: ["Help"] };
+  }
+  const lines = rs.map((r) => `${r.id}. **${r.text}** — ${formatWhen(r.fire_at)}`);
+  return {
+    text: `⏰ **Pending reminders:**\n${lines.join("\n")}\n\nCancel one with \`cancel reminder <n>\`.`,
+    chips: ["Help"],
+  };
+}
+
+function remindCancelReply(session: Session, idRaw: string): Reply {
+  const id = parseInt(idRaw, 10);
+  if (!Number.isInteger(id) || id <= 0) {
+    return { text: "Which reminder? Use `cancel reminder <n>` with the number from `reminders`.", chips: ["Reminders"] };
+  }
+  if (auto.cancelReminder(id, session.id)) {
+    return { text: `Cancelled reminder **${id}**.`, chips: ["Reminders"] };
+  }
+  return { text: `No pending reminder **${id}** in this chat.`, chips: ["Reminders"] };
 }
 
 async function taskByName(session: Session, query: string, action: string, payload: any): Promise<Reply> {

@@ -314,10 +314,16 @@ const server = Bun.serve({
       if (!file || !file.bytes.length) return json({ error: "no photo attached" }, 400);
       if (file.bytes.length > MAX_UPLOAD) return json({ error: "file too large (10 MB max)" }, 413);
       const kind = detectKind(file.bytes);
-      const mime = kind === "png" ? "image/png" : kind === "jpeg" ? "image/jpeg" : kind === "webp" ? "image/webp" : null;
-      if (!mime) return json({ error: "only JPEG, PNG, and WebP photos are accepted" }, 415);
+      let mime = kind === "png" ? "image/png" : kind === "jpeg" ? "image/jpeg" : kind === "webp" ? "image/webp" : null;
+      let ext = mime === "image/png" ? "png" : mime === "image/jpeg" ? "jpg" : "webp";
+      if (!mime && /\.vcf$/i.test(file.filename || "")) {
+        // vCard contact file: sniff the content for BEGIN:VCARD before accepting,
+        // so a renamed binary can't sneak through on the extension alone.
+        const head = new TextDecoder().decode(file.bytes.slice(0, 4096));
+        if (/BEGIN:VCARD/i.test(head)) { mime = "text/vcard"; ext = "vcf"; }
+      }
+      if (!mime) return json({ error: "only JPEG, PNG, and WebP photos and .vcf contact files are accepted" }, 415);
       const id = crypto.randomUUID();
-      const ext = mime === "image/png" ? "png" : mime === "image/jpeg" ? "jpg" : "webp";
       const dir = `${DATA_DIR}/uploads/${sid}`;
       await Bun.$`mkdir -p ${dir}`.quiet().catch(() => {});
       // stored under the random id: the client-supplied filename never touches the disk

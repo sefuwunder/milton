@@ -1,6 +1,10 @@
 // brain.test.ts — Milton behavior tests against a stubbed exec-crm.
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
+import { Database } from "bun:sqlite";
 import { handleMessage, type Session } from "../src/brain";
+import * as auto from "../src/automation";
+
+beforeAll(() => { auto.initAutomationDb(new Database(":memory:")); });
 
 // ---- stub exec-crm ------------------------------------------------------------
 const calls: { method: string; path: string; body?: any }[] = [];
@@ -190,11 +194,21 @@ describe("task writes", () => {
     await handleMessage(freshSession(), "complete task 1");
     expect(calls.some((c) => c.method === "PATCH" && c.path === "/api/tasks/1" && c.body.done === 1)).toBe(true);
   });
-  test("remind me creates a task", async () => {
-    await handleMessage(freshSession(), "remind me to send the proposal friday");
-    const post = calls.find((c) => c.method === "POST" && c.path === "/api/tasks");
-    expect(post?.body.title).toContain("send the proposal");
-    expect(post?.body.due_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  test("remind me asks for confirmation, then stores a one-shot reminder", async () => {
+    const s = freshSession();
+    const r1 = await handleMessage(s, "remind me in 20 minutes to send the proposal");
+    expect(r1.text).toMatch(/send the proposal/);
+    expect((r1.cards || []).some((c) => c.kind === "confirm")).toBe(true);
+    expect(s.pending?.type).toBe("reminder_add");
+    // nothing stored before confirmation, and no exec-crm task is created
+    expect(auto.listReminders(s.id)).toHaveLength(0);
+    expect(calls.some((c) => c.method === "POST" && c.path === "/api/tasks")).toBe(false);
+    const r2 = await handleMessage(s, "yes");
+    expect(r2.text).toMatch(/remind you to/);
+    const rs = auto.listReminders(s.id);
+    expect(rs).toHaveLength(1);
+    expect(rs[0].text).toBe("send the proposal");
+    expect(rs[0].fire_at).toBeGreaterThan(Date.now() + 19 * 60000);
   });
 });
 

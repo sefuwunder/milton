@@ -45,6 +45,16 @@ export function initAutomationDb(database: Database) {
       detail TEXT NOT NULL DEFAULT '{}',
       ran_at TEXT DEFAULT (datetime('now'))
     );
+    CREATE TABLE IF NOT EXISTS reminders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      text TEXT NOT NULL,
+      fire_at INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT DEFAULT (datetime('now')),
+      fired_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (status, fire_at);
   `);
   // workspace pinning for unattended runs (nullable = default workspace).
   // Idempotent: ALTER TABLE on pre-existing DBs that lack the column.
@@ -246,6 +256,54 @@ export function advanceSchedule(id: number, nowMs: number): number {
   const next = nextRunAfter(s.spec, nowMs);
   needDb().query("UPDATE schedules SET next_run = ? WHERE id = ?").run(next, id);
   return next;
+}
+
+// ---- reminders (one-shot) ------------------------------------------------------------
+export interface Reminder { id: number; session_id: string; text: string; fire_at: number; status: string; created_at: string; fired_at: string | null }
+
+function rowToReminder(r: any): Reminder {
+  return { id: r.id, session_id: r.session_id, text: r.text, fire_at: r.fire_at, status: r.status, created_at: r.created_at, fired_at: r.fired_at ?? null };
+}
+
+export function createReminder(sessionId: string, text: string, fireAtMs: number): Reminder {
+  const d = needDb();
+  const res = d.query("INSERT INTO reminders (session_id, text, fire_at) VALUES (?, ?, ?)").run(sessionId, text, Math.round(fireAtMs));
+  return rowToReminder(d.query("SELECT * FROM reminders WHERE id = ?").get(Number(res.lastInsertRowid)));
+}
+
+export function listReminders(sessionId: string): Reminder[] {
+  return (needDb().query("SELECT * FROM reminders WHERE session_id = ? AND status = 'pending' ORDER BY fire_at").all(sessionId) as any[]).map(rowToReminder);
+}
+
+export function getReminder(id: number, sessionId: string): Reminder | null {
+  const r = needDb().query("SELECT * FROM reminders WHERE id = ? AND session_id = ?").get(id, sessionId) as any;
+  return r ? rowToReminder(r) : null;
+}
+
+/** Cancel a pending reminder; returns false when there is no pending reminder with that id in this session. */
+export function cancelReminder(id: number, sessionId: string): boolean {
+  const d = needDb();
+  const res = d.query("UPDATE reminders SET status = 'cancelled' WHERE id = ? AND session_id = ? AND status = 'pending'").run(id, sessionId);
+  return (res.changes as number) > 0;
+}
+
+/** Atomically claim every due reminder (pending -> fired) so each fires exactly
+ *  once, even if the sweep ever ran concurrently. */
+export function claimDueReminders(nowMs: number): Reminder[] {
+  const d = needDb();
+  d.exec("BEGIN IMMEDIATE");
+  try {
+    const due = d.query("SELECT * FROM reminders WHERE status = 'pending' AND fire_at <= ? ORDER BY fire_at").all(nowMs) as any[];
+    if (due.length) {
+      const ids = due.map((r) => r.id);
+      d.query(`UPDATE reminders SET status = 'fired', fired_at = datetime('now') WHERE id IN (${ids.map(() => "?").join(",")})`).run(...ids);
+    }
+    d.exec("COMMIT");
+    return due.map(rowToReminder);
+  } catch (e) {
+    try { d.exec("ROLLBACK"); } catch { /* already rolled back */ }
+    throw e;
+  }
 }
 
 // ---- triggers ----------------------------------------------------------------------
