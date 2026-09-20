@@ -8,6 +8,7 @@ import { helpText } from "./intents";
 import { detectKind } from "./ocr";
 import * as auto from "./automation";
 import { initWorkspaceDb, listWorkspaces, getSessionWorkspace, setSessionWorkspace } from "./workspace";
+import { initChatSessionDb, listChatSessions, getChatSession, createChatSession, renameChatSession, deleteChatSession, ensureChatSession, touchChatSession } from "./chat_sessions";
 import { initReconRunsDb } from "./recon_runs";
 import { initDealNotesDb } from "./deal_notes";
 import { hookSecret, verifyHookSecret } from "./hookauth";
@@ -45,6 +46,7 @@ db.exec(`
 `);
 auto.initAutomationDb(db);
 initWorkspaceDb(db);
+initChatSessionDb(db, `${DATA_DIR}/uploads`);
 initReconRunsDb(db);
 initDealNotesDb(db);
 
@@ -57,6 +59,10 @@ function hookAuth(req: Request): Response | null {
 }
 
 function loadSession(id: string): Session {
+  // Named chat sessions: every id gets a row with a human name ("General"
+  // for legacy rows). This also runs the one-time legacy migration.
+  const info = ensureChatSession(id);
+  touchChatSession(id);
   const row = db.query("SELECT state FROM sessions WHERE id = ?").get(id) as any;
   let s: Session;
   if (row) {
@@ -65,15 +71,16 @@ function loadSession(id: string): Session {
       s = { id, pending: st.pending, choice: st.choice, history: st.history || [], lastOcr: st.lastOcr, notes: st.notes || [], lastWidgetable: st.lastWidgetable, tutorial: st.tutorial };
     } catch {
       s = { id, history: [], notes: [] };
-      db.query("INSERT INTO sessions (id, state) VALUES (?, ?)").run(id, JSON.stringify({ history: [], notes: [] }));
+      db.query("UPDATE sessions SET state = ? WHERE id = ?").run(JSON.stringify({ history: [], notes: [] }), id);
     }
   } else {
+    // unreachable: ensureChatSession above guarantees the row exists
     s = { id, history: [], notes: [] };
-    db.query("INSERT INTO sessions (id, state) VALUES (?, ?)").run(id, JSON.stringify({ history: [], notes: [] }));
   }
   const w = getSessionWorkspace(id);
   s.workspaceId = w.id;
   s.workspaceName = w.name;
+  s.chatName = info.name;
   return s;
 }
 
@@ -201,6 +208,31 @@ const server = Bun.serve({
       const sid = url.searchParams.get("session") || "";
       const rows = db.query("SELECT role, text, created_at FROM messages WHERE session_id = ? ORDER BY id ASC LIMIT 100").all(sid) as any[];
       return json({ messages: rows });
+    }
+
+    // ---- chat sessions: named conversations ---------------------------------------
+    if (path === "/api/chat-sessions" && method === "GET") {
+      return json({ sessions: listChatSessions() });
+    }
+    if (path === "/api/chat-sessions" && method === "POST") {
+      let body: any = {};
+      try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const id = "s-" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+      try {
+        return json({ session: createChatSession(id, String(body.name || "")) }, 201);
+      } catch (e: any) { return json({ error: String(e?.message || e) }, 400); }
+    }
+    if (path.startsWith("/api/chat-sessions/") && (method === "PATCH" || method === "DELETE")) {
+      const id = decodeURIComponent(path.slice("/api/chat-sessions/".length).split("/")[0]).slice(0, 64);
+      if (!getChatSession(id)) return json({ error: "not found" }, 404);
+      if (method === "DELETE") {
+        try { return json({ ok: true, ...deleteChatSession(id) }); }
+        catch (e: any) { return json({ error: String(e?.message || e) }, 400); }
+      }
+      let body: any = {};
+      try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      try { return json({ session: renameChatSession(id, String(body.name || "")) }); }
+      catch (e: any) { return json({ error: String(e?.message || e) }, 400); }
     }
 
     // ---- automations: SSE live events -------------------------------------------

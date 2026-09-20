@@ -841,6 +841,61 @@ const MORE: FuzzMatcher[] = [
       return "tutorial";
     },
   },
+  // ---- chat sessions ------------------------------------------------------------
+  {
+    intent: "chat_session", label: "new chat session", need: 4, pri: 79, remBonus: 0, noRemBonus: 0,
+    kw: [...K("new", 3, "create", "start", "open"), ...K("session", 3, "sessions", "conversation", "conversations")],
+    ph: [P("new session", 4)],
+    mustHave: ["new"],
+    build: (t) => {
+      const core = drop(t, ["new", "create", "start", "open", "session", "sessions", "conversation", "conversations", "chat", "called", "named", "for", ...ART]);
+      return core.length ? `new session ${core.join(" ")}` : "new session";
+    },
+  },
+  {
+    intent: "chat_session", label: "list chat sessions", need: 3.5, pri: 80, remBonus: 0, noRemBonus: 0,
+    kw: [...K("list", 3, "show", "display"), ...K("session", 3, "sessions", "conversation", "conversations")],
+    ph: [P("list sessions", 4), P("show sessions", 4), P("my sessions", 4)],
+    mustHave: ["session"],
+    build: () => "sessions",
+  },
+  {
+    intent: "chat_session", label: "switch chat session", need: 4, pri: 81, remBonus: 0, noRemBonus: 0,
+    kw: [...K("switch", 4, "go", "change", "jump"), ...K("session", 2.5, "sessions", "conversation")],
+    ph: [P("switch session", 4), P("go to session", 4)],
+    mustHave: ["switch"],
+    build: (t) => {
+      const core = drop(t, ["switch", "go", "change", "jump", "session", "sessions", "conversation", "to", ...ART]);
+      return core.length ? `switch session to ${core.join(" ")}` : null;
+    },
+  },
+  {
+    intent: "chat_session", label: "rename chat session", need: 4, pri: 82, remBonus: 0, noRemBonus: 0,
+    kw: [...K("rename", 4), ...K("session", 2.5, "sessions", "conversation")],
+    ph: [P("rename session", 4)],
+    mustHave: ["rename"],
+    build: (t) => {
+      const core = drop(t, ["rename", "session", "sessions", "conversation", "it", ...ART]);
+      return `rename session${core.length ? " " + core.join(" ") : ""}`;
+    },
+  },
+  {
+    intent: "chat_session", label: "delete chat session", need: 4, pri: 83, remBonus: 0, noRemBonus: 0,
+    kw: [...K("delete", 4, "remove", "erase"), ...K("session", 2.5, "sessions", "conversation")],
+    ph: [P("delete session", 4), P("remove session", 4)],
+    mustHave: ["delete"],
+    build: (t) => {
+      const core = drop(t, ["delete", "remove", "erase", "session", "sessions", "conversation", ...ART]);
+      return `delete session${core.length ? " " + core.join(" ") : ""}`;
+    },
+  },
+  {
+    intent: "chat_session", label: "current chat session", need: 3.5, pri: 84, remBonus: 0, noRemBonus: 0,
+    kw: [...K("current", 3, "active"), ...K("session", 3, "sessions", "conversation")],
+    ph: [P("current session", 4), P("which session", 4)],
+    mustHave: ["session"],
+    build: () => "current session",
+  },
 ];
 
 for (const m of MORE) MATCHERS.push(m);

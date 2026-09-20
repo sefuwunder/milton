@@ -21,6 +21,7 @@ export type IntentName =
   | "schedule_add" | "list_schedules" | "unschedule" | "pause_schedule" | "resume_schedule"
   | "trigger_add" | "list_triggers" | "delete_trigger" | "trigger_help" | "list_runs"
   | "list_workspaces" | "switch_workspace" | "current_workspace"
+  | "chat_session" // named chat sessions; slots.action = new|list|switch|rename|delete|current
   | "list_recons" | "meridian_dossier" | "meridian_entities" | "meridian_request"
   | "list_stages" | "add_stage" | "rename_stage" | "delete_stage" | "move_stage"
   | "confirm_yes" | "confirm_no" | "choose_number"
@@ -287,6 +288,17 @@ export function parseIntent(raw: string): Intent {
   else if (/^current workspace$/.test(text)) set("current_workspace");
   else if ((m = text.match(/^(?:switch to|use workspace|switch workspace to) (.+)$/))) set("switch_workspace", { name: m[1].trim() });
 
+  // ---- chat sessions --------------------------------------------------------------
+  // Named conversations. "switch to X" stays the workspace switcher at the
+  // exact level; brain gives chat sessions precedence when X is a session
+  // name or a session-list number.
+  else if ((m = text.match(/^new session(?: (.+))?$/))) set("chat_session", { action: "new", name: (m[1] || "").trim() });
+  else if (/^(sessions|list sessions|my sessions|show sessions|chat sessions)$/.test(text)) set("chat_session", { action: "list" });
+  else if ((m = text.match(/^switch session to (.+)$/))) set("chat_session", { action: "switch", target: m[1].trim() });
+  else if (/^current session$/.test(text)) set("chat_session", { action: "current" });
+  else if ((m = text.match(/^rename session(?: (.+))?$/))) set("chat_session", { action: "rename", target: (m[1] || "").trim() });
+  else if ((m = text.match(/^(?:delete|remove|erase) session(?: (.+))?$/))) set("chat_session", { action: "delete", target: (m[1] || "").trim() });
+
   // ---- meridian -----------------------------------------------------------------------
   // Prefixed with "meridian" so nothing collides with exec-crm intents.
   // "meridian recon Austin" requests a NEW run; "meridian recon(s)" lists sprints.
@@ -491,6 +503,8 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["add contact Jane Doe at Acme jane@acme.com", "add_contact"]], note: "" },
       { cmds: [["add task Call Acme tomorrow", "add_task"]], note: "" },
       { cmds: [["workspaces", "list_workspaces"], ["switch to Acme", "switch_workspace"]], note: "" },
+      { cmds: [["new session Pipeline review", "chat_session"], ["sessions", "chat_session"], ["switch session to Pipeline review", "chat_session"], ["current session", "chat_session"]], note: "named chat sessions — separate history, workspace, and tutorial each" },
+      { cmds: [["rename session to Q4 push", "chat_session"], ["delete session 2", "chat_session"]], note: "rename the current session; deleting asks first" },
       { cmds: [["meridian recons", "list_recons"], ["meridian dossier Austin", "meridian_dossier"]], note: "read Meridian recon" },
       { cmds: [["prep me for my call with Acme", "prep_brief"]], note: "meeting prep: who, open deals, tasks, talking points" },
       { cmds: [["import these contacts", "import_contacts"]], note: "attach a .vcf file first — I list what's inside before importing" },

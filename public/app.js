@@ -21,6 +21,8 @@
   const autoClose = document.getElementById("auto-close");
   const toastEl = document.getElementById("toast");
   const wsSelect = document.getElementById("ws-select");
+  const sessionSelect = document.getElementById("session-select");
+  const sessionNewBtn = document.getElementById("session-new");
   let wsList = []; // cached exec-crm workspaces: {id, name, color}
 
   // photos uploaded and waiting to be sent with the next message
@@ -473,7 +475,7 @@
       const reply = await res.json();
       typing.remove();
       if (reply.error) addMsg("milton", { text: "Hmm, that didn't go through: " + reply.error });
-      else { addMsg("milton", reply); setChips(reply.chips); clearTray(); syncWsSelect(reply); }
+      else { addMsg("milton", reply); setChips(reply.chips); clearTray(); syncWsSelect(reply); syncSession(reply); }
     } catch (err) {
       typing.remove();
       addMsg("milton", { text: "I couldn't reach the Milton server. Is it running?" });
@@ -526,13 +528,18 @@
     }
   });
 
-  // status + history restore
-  (async function init() {
-    try {
-      const h = await fetch("/api/health").then((r) => r.json());
-      if (h.crm) { statusDot.className = "dot ok"; statusText.textContent = "connected to exec-crm" + (h.llm ? " · AI on" : ""); }
-      else { statusDot.className = "dot bad"; statusText.textContent = "exec-crm unreachable"; }
-    } catch { statusDot.className = "dot bad"; statusText.textContent = "offline"; }
+  // ---- chat sessions: named conversations ----------------------------------------
+  function setSid(id) {
+    sid = id;
+    try { localStorage.setItem("milton_sid", sid); } catch (_) {}
+    if (pending.length) { clearTray(); toast("Staged attachments cleared — they belonged to the previous session."); }
+    loadHistory();
+    loadChatSessions();
+    loadWorkspaces();
+    refreshBadge();
+  }
+  async function loadHistory() {
+    chat.innerHTML = "";
     try {
       const hist = await fetch("/api/history?session=" + encodeURIComponent(sid)).then((r) => r.json());
       (hist.messages || []).forEach((m) => addMsg(m.role === "user" ? "user" : "milton", { text: m.text }));
@@ -541,7 +548,61 @@
       addMsg("milton", { text: "Hey, I'm **Milton** — your copilot inside exec-crm. Ask for a **morning brief**, check the **pipeline**, move a deal — or tap 📷 to snap a photo of text and I'll read it. What are we working on?" });
       setChips(["Morning brief", "Show pipeline", "My tasks", "Help"]);
     }
+    scroll();
+  }
+  async function loadChatSessions() {
+    if (!sessionSelect) return;
+    try {
+      const j = await fetch("/api/chat-sessions").then((r) => r.json());
+      const list = j.sessions || [];
+      sessionSelect.innerHTML = list.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("");
+      if (list.some((s) => s.id === sid)) {
+        sessionSelect.value = sid;
+      } else if (list.length) {
+        // current session vanished (deleted from another tab): follow the newest
+        setSid(list[0].id);
+      }
+    } catch { /* keep the old options */ }
+  }
+  // A chat reply can create/switch/rename/delete sessions; keep the switcher in sync.
+  function syncSession(reply) {
+    if (!reply) return;
+    if (reply.activeSession && reply.activeSession.id) {
+      if (reply.activeSession.id !== sid) setSid(reply.activeSession.id);
+      else loadChatSessions();
+    } else if (reply.sessionsChanged) {
+      loadChatSessions();
+    }
+  }
+  if (sessionSelect) {
+    sessionSelect.addEventListener("change", () => {
+      if (sessionSelect.value && sessionSelect.value !== sid) setSid(sessionSelect.value);
+      else sessionSelect.value = sid;
+    });
+  }
+  if (sessionNewBtn) {
+    sessionNewBtn.addEventListener("click", async () => {
+      try {
+        const j = await fetch("/api/chat-sessions", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+        }).then((r) => r.json());
+        if (j.error || !j.session) throw new Error(j.error || "no session");
+        setSid(j.session.id);
+        toast("New session: " + j.session.name);
+      } catch (_) { toast("Couldn't create a session."); }
+    });
+  }
+
+  // status + history restore
+  (async function init() {
+    try {
+      const h = await fetch("/api/health").then((r) => r.json());
+      if (h.crm) { statusDot.className = "dot ok"; statusText.textContent = "connected to exec-crm" + (h.llm ? " · AI on" : ""); }
+      else { statusDot.className = "dot bad"; statusText.textContent = "exec-crm unreachable"; }
+    } catch { statusDot.className = "dot bad"; statusText.textContent = "offline"; }
+    await loadHistory();
     refreshBadge();
+    loadChatSessions();
     loadWorkspaces();
     input.focus();
   })();

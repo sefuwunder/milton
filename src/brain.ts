@@ -10,6 +10,7 @@ import { parseVcards, preferredPhone, preferredEmail, type ParsedVCard } from ".
 import * as an from "./analyst";
 import * as auto from "./automation";
 import * as wss from "./workspace";
+import * as chats from "./chat_sessions";
 import * as reconRuns from "./recon_runs";
 import * as dealNotes from "./deal_notes";
 import { hookSecret } from "./hookauth";
@@ -34,17 +35,25 @@ export interface Card {
   uploadId?: string;
   imageUrl?: string;
 }
-export interface Reply { text: string; cards?: Card[]; chips?: string[]; widget?: crm.Widgetable }
+export interface Reply {
+  text: string; cards?: Card[]; chips?: string[]; widget?: crm.Widgetable;
+  // named chat sessions: when a command creates/switches/renames the active
+  // session, the UI picks this up and points subsequent chats at the new id.
+  activeSession?: { id: string; name: string };
+  // non-switching changes (delete/rename of another session): UI refetches list
+  sessionsChanged?: boolean;
+}
 
 export interface PendingAction { type: string; label: string; payload: any }
 export interface ChoiceState {
-  kind: "deal" | "contact" | "company" | "task" | "workspace" | "stage" | "recon" | "prep" | "intent";
+  kind: "deal" | "contact" | "company" | "task" | "workspace" | "session" | "stage" | "recon" | "prep" | "intent";
   options: { id: number | string; n?: number; label: string; sub?: string }[];
   then: { action: string; payload: any };
 }
 export interface SavedNote { dealId: number; dealTitle: string; text: string; uploadId?: string; at: string }
 export interface Session {
   id: string;
+  chatName?: string; // user-facing name of this chat session ("General", …)
   pending?: PendingAction;
   choice?: ChoiceState;
   history: { role: "user" | "milton"; text: string }[];
@@ -349,6 +358,12 @@ async function dispatchChoice(session: Session, ch: ChoiceState, id: number | st
     if (!w) return { text: "That workspace seems to be gone — say `workspaces` to see the current list." };
     return applyWorkspace(session, w);
   }
+  if (ch.kind === "session") {
+    const info = chats.getChatSession(String(id));
+    if (!info) return { text: "That session seems to be gone — say `sessions` to see the current list." };
+    if (ch.then.action === "delete_chat_session") return requestDeleteChatSession(session, info);
+    return applyChatSessionSwitch(info);
+  }
   if (ch.kind === "stage") {
     const slug = ch.then.payload?.slugs?.[id];
     const st = (await crm.getStages()).find((x) => x.slug === slug);
@@ -408,6 +423,18 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
   if (p.type === "vcard_import") {
     return vcardImportRun(p.payload.cards as ParsedVCard[]);
   }
+  if (p.type === "delete_chat_session") {
+    const { name, remaining } = chats.deleteChatSession(p.payload.id);
+    const wasCurrent = p.payload.id === session.id;
+    const next = wasCurrent ? remaining[0] : undefined;
+    return {
+      text: `Deleted chat session **${name}**.${wasCurrent && next ? ` You're now in **${next.name}**.` : ""}`,
+      chips: ["Sessions"],
+      ...(wasCurrent && next
+        ? { activeSession: { id: next.id, name: next.name } }
+        : { sessionsChanged: true }),
+    };
+  }
   if (p.type === "reminder_add") {
     const r = auto.createReminder(session.id, String(p.payload.text), Number(p.payload.fireAt));
     return { text: `⏰ I'll remind you to **${r.text}** ${formatWhen(r.fire_at)}.`, chips: ["Reminders"] };
@@ -426,11 +453,12 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
 // ---- automations: routines, schedules, triggers ------------------------------------
 // Intents that currently ask for confirmation before acting. Routine steps resolving
 // to these never auto-confirm: interactive runs ask once up front, unattended runs skip.
-const DESTRUCTIVE_PENDING = new Set(["delete_deal", "delete_task", "close_lost", "close_won", "delete_stage"]);
+const DESTRUCTIVE_PENDING = new Set(["delete_deal", "delete_task", "close_lost", "close_won", "delete_stage", "delete_chat_session"]);
 
 function isDestructiveIntent(intent: Intent): boolean {
   if (intent.name === "delete_deal" || intent.name === "delete_task" || intent.name === "delete_stage") return true;
   if (intent.name === "close_deal") return true; // won and lost both move money / pipeline state
+  if (intent.name === "chat_session" && intent.slots.action === "delete") return true; // never auto-run in routines
   return false;
 }
 
@@ -806,6 +834,11 @@ async function switchWorkspaceReply(session: Session, raw: string): Promise<Repl
       chips: ["Show pipeline", "Workspaces", "Morning brief"],
     };
   }
+  // Chat sessions take precedence: an exact session name or a session-list
+  // number ("switch to 2") wins over a workspace. Force the workspace path
+  // with "switch workspace to …"; fuzzy session names use "switch session to …".
+  const sessHit = resolveChatSessionExact(query);
+  if (sessHit) return applyChatSessionSwitch(sessHit);
   const matches = await wss.findWorkspace(query);
   if (matches === null) {
     return {
@@ -828,6 +861,158 @@ async function switchWorkspaceReply(session: Session, raw: string): Promise<Repl
     cards: [{ kind: "choices", options }],
     chips: options.map((o) => String(o.n)),
   };
+}
+
+// ---- chat sessions: named conversations -------------------------------------------
+function sessionIdGen(): string {
+  return "s-" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+}
+
+function applyChatSessionSwitch(info: chats.ChatSessionInfo): Reply {
+  const w = wss.getSessionWorkspace(info.id);
+  const wsBit = w.id == null ? "" : ` · workspace **${w.name || "default"}**`;
+  const msgs = info.messageCount === 1 ? "1 message" : `${info.messageCount} messages`;
+  return {
+    text: `Switched to **${info.name}**${wsBit} (${msgs}). History, workspace, and tutorial progress here are separate from your other sessions.`,
+    chips: ["Sessions", "Current session", "Morning brief"],
+    activeSession: { id: info.id, name: info.name },
+  };
+}
+
+function requestDeleteChatSession(session: Session, info: chats.ChatSessionInfo): Reply {
+  if (chats.listChatSessions().length <= 1) {
+    return { text: `Can't delete **${info.name}** — it's your only session.`, chips: ["Sessions"] };
+  }
+  session.pending = { type: "delete_chat_session", label: info.name, payload: { id: info.id } };
+  const msgs = info.messageCount === 1 ? "1 message" : `${info.messageCount} messages`;
+  return {
+    text: `Delete chat session **${info.name}**? Its ${msgs} will be gone for good.`,
+    cards: [{ kind: "confirm", options: [{ n: 1, label: "Yes, delete" }, { n: 2, label: "Cancel" }] }],
+    chips: ["Yes", "No"],
+  };
+}
+
+/** "switch to X": exact session name or session-list number wins over workspaces. */
+function resolveChatSessionExact(query: string): chats.ChatSessionInfo | null {
+  const list = chats.listChatSessions();
+  if (/^\d+$/.test(query)) {
+    const idx = Number(query) - 1;
+    return idx >= 0 && idx < list.length ? list[idx] : null;
+  }
+  return list.find((s) => s.name.toLowerCase() === query.toLowerCase()) || null;
+}
+
+async function chatSessionReply(session: Session, intent: Intent): Promise<Reply> {
+  const action = intent.slots.action || "list";
+  if (action === "new") {
+    // Preserve the user's casing: re-extract the name from the raw text.
+    const rawName = (/^(?:new|create|start|open) session(?: (.+))?$/i.exec(intent.raw)?.[1] || "").trim();
+    const name = rawName || (intent.slots.name || "").trim();
+    try {
+      const info = chats.createChatSession(sessionIdGen(), name);
+      session.chatName = info.name;
+      return {
+        text: `Started **${info.name}** — a fresh conversation.`,
+        chips: ["Sessions", "Morning brief", "Help"],
+        activeSession: { id: info.id, name: info.name },
+      };
+    } catch (e: any) {
+      return { text: String(e?.message || e), chips: ["Sessions"] };
+    }
+  }
+  if (action === "list") {
+    const list = chats.listChatSessions();
+    const now = Date.now();
+    const lines = list.map((s, i) => {
+      const mark = s.id === session.id ? " ← current" : "";
+      const msgs = s.messageCount === 1 ? "1 message" : `${s.messageCount} messages`;
+      return `${i + 1}. **${s.name}** — ${msgs}, active ${chats.relTime(s.last_active_at, now)}${mark}`;
+    });
+    return {
+      text: `**${list.length} chat session${list.length === 1 ? "" : "s"}:**\n${lines.join("\n")}\n\n\`switch to <name or number>\` to jump between them · \`new session <name>\` to start fresh.`,
+      chips: ["New session", "Current session"],
+    };
+  }
+  if (action === "current") {
+    const info = chats.getChatSession(session.id);
+    const tut = session.tutorial;
+    const tutText = !tut || tut.step <= 0 ? "not started"
+      : tut.done || tut.step >= TUTORIAL_STEPS.length ? "finished 🎓"
+      : `step ${tut.step + 1} of ${TUTORIAL_STEPS.length} (${TUTORIAL_STEPS[tut.step]?.title || ""})`;
+    return {
+      text: `You're in **${info?.name || session.chatName || "General"}**\n• Workspace: **${session.workspaceName || "default"}**\n• Messages here: **${info?.messageCount ?? session.history.length}**\n• Tutorial: ${tutText}`,
+      chips: ["Sessions", "New session"],
+    };
+  }
+  if (action === "switch") {
+    const target = (intent.slots.target || "").trim();
+    if (!target) return { text: "Switch to which session? Say `sessions` to see them.", chips: ["Sessions"] };
+    const matches = chats.findChatSession(target);
+    if (!matches.length) return { text: `No chat session matching "${target}". Say \`sessions\` to see them all.`, chips: ["Sessions"] };
+    const [top, second] = [matches[0], matches[1]];
+    if (top.score >= 70 && (!second || top.score - second.score >= 20)) return applyChatSessionSwitch(top.info);
+    const options = matches.slice(0, 5).map((mm, i) => ({ id: mm.info.id, n: i + 1, label: mm.info.name, sub: `${mm.info.messageCount} messages` }));
+    session.choice = { kind: "session", options, then: { action: "switch_chat_session", payload: {} } };
+    return {
+      text: "A few sessions match — which one did you mean?",
+      cards: [{ kind: "choices", options }],
+      chips: options.map((o) => String(o.n)),
+    };
+  }
+  if (action === "rename") {
+    // Work from the raw text to preserve the new name's casing; fuzzy
+    // paraphrases ("rename the session to X") fall back to the slots.
+    let target = (intent.slots.target || "").trim();
+    const rm = /^rename session\s+(.+)$/i.exec(intent.raw);
+    if (rm) target = rm[1].trim();
+    if (!target) return { text: "Rename to what? Say `rename session to <new name>`.", chips: ["Sessions"] };
+    // "rename session to X" renames the current session; otherwise the
+    // "old to new" form renames a named session.
+    const rest = target.replace(/^to\s+/i, "");
+    let id = session.id, newName = rest;
+    const m = rest.match(/^(.+?)\s+to\s+(.+)$/i);
+    if (m) {
+      const found = chats.findChatSession(m[1].trim());
+      if (found.length && found[0].score >= 40) { id = found[0].info.id; newName = m[2].trim(); }
+      else return { text: `No chat session matching "${m[1].trim()}". Say \`sessions\` to see them all.`, chips: ["Sessions"] };
+    }
+    try {
+      const info = chats.renameChatSession(id, newName);
+      if (id === session.id) session.chatName = info.name;
+      return {
+        text: `Renamed to **${info.name}**.`,
+        chips: ["Sessions", "Current session"],
+        activeSession: { id: info.id, name: info.name },
+      };
+    } catch (e: any) {
+      return { text: String(e?.message || e), chips: ["Sessions"] };
+    }
+  }
+  if (action === "delete") {
+    const target = (intent.slots.target || "").trim();
+    let info: chats.ChatSessionInfo | null = null;
+    if (target) {
+      const matches = chats.findChatSession(target);
+      if (!matches.length) return { text: `No chat session matching "${target}".`, chips: ["Sessions"] };
+      const [top, second] = [matches[0], matches[1]];
+      if (top.score >= 70 && (!second || top.score - second.score >= 20)) {
+        info = top.info;
+      } else {
+        const options = matches.slice(0, 5).map((mm, i) => ({ id: mm.info.id, n: i + 1, label: mm.info.name, sub: `${mm.info.messageCount} messages` }));
+        session.choice = { kind: "session", options, then: { action: "delete_chat_session", payload: {} } };
+        return {
+          text: "A few sessions match — which one should I delete?",
+          cards: [{ kind: "choices", options }],
+          chips: options.map((o) => String(o.n)),
+        };
+      }
+    } else {
+      info = chats.getChatSession(session.id);
+    }
+    if (!info) return { text: "That session seems to be gone already.", chips: ["Sessions"] };
+    return requestDeleteChatSession(session, info);
+  }
+  return { text: "Say `sessions` to see your conversations." };
 }
 
 // ---- meridian (read-only recon access) ------------------------------------------------
@@ -1144,6 +1329,8 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
       } catch (e: any) {
         return { text: `Automations aren't available right now: ${String(e?.message || e)}`, chips: HELP_CHIPS.slice(0, 3) };
       }
+
+    case "chat_session": return chatSessionReply(session, intent);
 
     case "list_recons":
     case "meridian_dossier":

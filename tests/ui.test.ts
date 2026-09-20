@@ -22,7 +22,8 @@ beforeAll(async () => {
   els = {};
   ["chat", "chips", "composer", "input", "status-dot", "status-text", "help-btn",
    "cam-btn", "photo-input", "vcf-btn", "vcf-input", "tray", "bell-btn", "bell-badge", "auto-btn",
-   "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "ws-select"].forEach((id) => (els[id] = mkEl("div")));
+   "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "ws-select",
+   "session-select", "session-new"].forEach((id) => (els[id] = mkEl("div")));
   (globalThis as any).document = {
     getElementById: (id: string) => els[id] || null,
     createElement: (t: string) => mkEl(t),
@@ -274,5 +275,50 @@ describe("vcf import button", () => {
     expect(html).toContain("huge.vcf");
     expect(html).toContain("10 MB");
     expect(html).toContain("contacts file");
+  });
+});
+
+describe("session switcher", () => {
+  const outerFetch = (globalThis as any).fetch;
+  const SESSIONS = [
+    { id: "s-a", name: "General", created_at: "", last_active_at: "", messageCount: 1 },
+    { id: "s-b", name: "Pipeline", created_at: "", last_active_at: "", messageCount: 0 },
+  ];
+  beforeAll(() => {
+    (globalThis as any).fetch = async (url: string, opts?: any) => {
+      const ok = (d: any) => ({ json: async () => d });
+      const u = String(url);
+      if (u.includes("/api/chat-sessions") && opts?.method === "POST") {
+        const created = { id: "s-c", name: "Session 3", created_at: "", last_active_at: "", messageCount: 0 };
+        SESSIONS.unshift(created);
+        return ok({ session: created });
+      }
+      if (u.includes("/api/chat-sessions")) return ok({ sessions: SESSIONS });
+      if (u.includes("/api/history")) {
+        const sid = new URL(u, "http://x").searchParams.get("session");
+        return ok({ messages: [{ role: "milton", text: `history for ${sid}` }] });
+      }
+      return ok({});
+    };
+  });
+  afterAll(() => { (globalThis as any).fetch = outerFetch; });
+
+  test("dropdown lists sessions; switching swaps sid and reloads history", async () => {
+    els["session-select"].value = "s-b";
+    els["session-select"]._l.change();
+    await new Promise((r) => setTimeout(r, 60));
+    expect((globalThis as any).localStorage.getItem("milton_sid")).toBe("s-b");
+    expect(els["session-select"].innerHTML).toContain("Pipeline");
+    expect(els["session-select"].value).toBe("s-b");
+    const html = els["chat"].children.map((c: any) => c.innerHTML).join("\n");
+    expect(html).toContain("history for s-b");
+  });
+
+  test("＋ button creates a session and switches to it", async () => {
+    els["session-new"]._l.click();
+    await new Promise((r) => setTimeout(r, 60));
+    expect((globalThis as any).localStorage.getItem("milton_sid")).toBe("s-c");
+    expect(els["session-select"].innerHTML).toContain("Session 3");
+    expect(els["session-select"].value).toBe("s-c");
   });
 });

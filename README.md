@@ -145,6 +145,20 @@ Milton can work inside any exec-crm workspace, not just the default one. Every e
 - **Schedules and triggers pin the workspace they were created in**: `schedule EOD daily at 6pm` while in Acme runs in Acme forever, even if you later switch the chat elsewhere. `list schedules` / `list triggers` show the pinned workspace; unattended runs skip destructive steps as before.
 - If exec-crm is unreachable, Milton says so and keeps the current (or default) workspace rather than guessing.
 
+### Chat sessions
+
+Milton keeps **named chat sessions** — separate conversations, each with its own history, workspace pin, tutorial progress, and widget stash. The header has a session dropdown plus a ＋ button for a fresh one.
+
+- `sessions` — numbered list with message counts and last-active times
+- `new session Pipeline review` — start one (auto-named `Session 2`, `Session 3`, … when you skip the name)
+- `switch session to Pipeline review` / `switch to 2` — jump by fuzzy name or list number; a bare `switch to <name>` prefers a session whose name matches exactly, otherwise it's a workspace switch as before
+- `current session` — name, workspace, message count, tutorial state
+- `rename session to Q4 push` — renames the current session; `rename session Old to New` renames another one
+- `delete session` / `delete session 2` / `remove session 2` — always asks first (destructive intent: skipped by unattended routines); you can't delete your only session
+- Typo-tolerant like everything else: `list sesions`, `new sesion pipeline`, `curent session`, `shwo my sessions`
+- Everything is per session: chat history, the exec-crm workspace pin, tutorial progress, pending confirmations, staged uploads. Deleting a session removes its messages, uploads, workspace pin, and reminders with it.
+- Reminders belong to the session that created them; a reminder whose session was deleted is logged and skipped instead of crashing. Schedules/triggers pin workspaces (not sessions), so deleting a session never strands them.
+
 **Camera & OCR** — tap the 📷 button to snap a photo of printed text (whiteboard, business card, document); Milton transcribes it automatically. Then `read this`, `analyze handwriting` (geometric analysis: slant, stroke pressure, size consistency, spacing, baseline drift — with raw numbers, not mysticism), or save the transcription as a note on a deal.
 
 The OCR engine is hand-written TypeScript with zero dependencies: PNG + baseline-JPEG decoders, Otsu binarization, deskew, and 5x7 template matching. It's tuned for printed text photographed straight-on — cursive handwriting won't transcribe reliably, which is why handwriting gets the analysis view instead. If `MILTON_LLM_URL` points at a vision-capable model, Milton can also offer a vision-model pass when local confidence is low.
@@ -157,6 +171,7 @@ Natural dates (`tomorrow`, `friday`, `in 3 days`, `2026-10-02`) and money (`50k`
 - `POST /api/upload` → multipart image (JPEG/PNG/WebP, ≤10 MB) → `{ id, url }`
 - `GET /api/file/:id` → serves the upload (scoped to its session)
 - `GET /api/history?session=…` → recent messages for a session
+- `GET /api/chat-sessions` → `[{ id, name, created_at, last_active_at, messageCount }]` · `POST /api/chat-sessions` (`{ name? }`) → `{ session }` · `PATCH /api/chat-sessions/:id` (`{ name }`) → `{ session }` · `DELETE /api/chat-sessions/:id` → `{ deleted, sessions }` (refuses the last session)
 - `GET /api/health` → `{ ok, crm, crm_url, llm, llm_url, llm_model, llm_source, analyst_model }`
 - `GET /api/routines` · `POST /api/routines` / `DELETE /api/routines/:name`
 - `GET /api/schedules` · `POST /api/schedules` (`{ routine, when }`) · `PATCH /api/schedules/:id` (`{ active }`) · `DELETE /api/schedules/:id`
