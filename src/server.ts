@@ -3,13 +3,13 @@
 
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
-import { handleMessage, tickAutomation, handleWebhookEvent, handleMeridianCallback, enrichTerminalReply, enrichTickDecision, type Session, type Reply, type UploadRef, type EnrichJobState } from "./brain";
-import { getEnrichJob } from "./meridian";
+import { handleMessage, tickAutomation, handleWebhookEvent, handleMeridianCallback, enrichTerminalReply, enrichTickDecision, prospectTerminalReply, prospectTickDecision, type Session, type Reply, type UploadRef, type EnrichJobState, type ProspectJobState } from "./brain";
+import { getEnrichJob, getProspectJob } from "./meridian";
 import { ping, crmBase } from "./crm";
 import { helpText } from "./intents";
 import { detectKind } from "./ocr";
 import * as auto from "./automation";
-import { initWorkspaceDb, listWorkspaces, getSessionWorkspace, setSessionWorkspace } from "./workspace";
+import { initWorkspaceDb, listWorkspaces, getSessionWorkspace, setSessionWorkspace, runWithWorkspace } from "./workspace";
 import { initChatSessionDb, listChatSessions, getChatSession, createChatSession, renameChatSession, deleteChatSession, ensureChatSession, touchChatSession } from "./chat_sessions";
 import { initReconRunsDb } from "./recon_runs";
 import { initDealNotesDb } from "./deal_notes";
@@ -94,7 +94,7 @@ function loadSession(id: string): Session {
   if (row) {
     try {
       const st = JSON.parse(row.state);
-      s = { id, pending: st.pending, choice: st.choice, enrichJob: st.enrichJob, history: st.history || [], lastOcr: st.lastOcr, notes: st.notes || [], lastWidgetable: st.lastWidgetable, tutorial: st.tutorial };
+      s = { id, pending: st.pending, choice: st.choice, enrichJob: st.enrichJob, prospectJob: st.prospectJob, history: st.history || [], lastOcr: st.lastOcr, notes: st.notes || [], lastWidgetable: st.lastWidgetable, tutorial: st.tutorial };
     } catch {
       s = { id, history: [], notes: [] };
       db.query("UPDATE sessions SET state = ? WHERE id = ?").run(JSON.stringify({ history: [], notes: [] }), id);
@@ -112,7 +112,7 @@ function loadSession(id: string): Session {
 
 function saveSession(s: Session) {
   db.query("UPDATE sessions SET state = ?, updated_at = datetime('now') WHERE id = ?")
-    .run(JSON.stringify({ pending: s.pending, choice: s.choice, enrichJob: s.enrichJob, history: s.history.slice(-40), lastOcr: s.lastOcr, notes: (s.notes || []).slice(-20), lastWidgetable: s.lastWidgetable, tutorial: s.tutorial }), s.id);
+    .run(JSON.stringify({ pending: s.pending, choice: s.choice, enrichJob: s.enrichJob, prospectJob: s.prospectJob, history: s.history.slice(-40), lastOcr: s.lastOcr, notes: (s.notes || []).slice(-20), lastWidgetable: s.lastWidgetable, tutorial: s.tutorial }), s.id);
 }
 
 function logMessage(sessionId: string, role: string, text: string) {
@@ -511,6 +511,46 @@ async function tickEnrichment() {
   }
 }
 
+// ---- prospect tick: 30s background poll of in-flight Meridian prospect jobs --
+// Mirrors tickEnrichment. On `done`, the tick stages the batch into exec-crm's
+// Data Workshop Sandbox itself (staged, never committed), then reports the
+// staged confirmation into the session. Staging runs inside the session's
+// workspace (runWithWorkspace) so the batch lands in the right workspace even
+// from the background sweep, which has no ambient workspace of its own.
+async function tickProspect() {
+  let rows: { id: string; state: string }[] = [];
+  try { rows = db.query("SELECT id, state FROM sessions").all() as any[]; }
+  catch { return; }
+  for (const row of rows) {
+    let st: any;
+    try { st = JSON.parse(row.state); } catch { continue; }
+    const job = st.prospectJob as ProspectJobState | undefined;
+    if (!job?.job_id) continue;
+    let r;
+    try { r = await getProspectJob(job.job_id); }
+    catch { continue; } // Meridian unreachable this round — try again next tick
+    if (!r) continue;
+    const decision = prospectTickDecision(job, r.status, Date.now());
+    if (decision === "keep") continue;
+    const session = loadSession(row.id);
+    // A chat turn may have resolved it concurrently — don't double-stage.
+    if (session.prospectJob?.job_id !== job.job_id) continue;
+    session.prospectJob = undefined;
+    const reply: Reply = decision === "stale"
+      ? {
+        text: `Prospecting **${job.industry}** in **${job.location}** seems to have stalled — it's been running far longer than Meridian's ~60s job cap, so Meridian probably restarted mid-run. Say \`meridian prospect ${job.industry} in ${job.location}\` to try again.`,
+        chips: ["Meridian recons"],
+      }
+      : await runWithWorkspace(session.workspaceId ?? null, () => prospectTerminalReply(session, job, r));
+    session.history.push({ role: "milton", text: reply.text });
+    saveSession(session);
+    logMessage(row.id, "milton", reply.text);
+    auto.broadcastSse("prospect-done", {
+      session_id: row.id, industry: job.industry, location: job.location, decision, reply,
+    });
+  }
+}
+
 // scheduler: run due schedules every 30s (plus one sweep shortly after boot)
 let ticking = false;
 async function sweep() {
@@ -519,6 +559,7 @@ async function sweep() {
   try {
     await tickAutomation(Date.now());
     await tickEnrichment();
+    await tickProspect();
   }
   catch (e) { console.error("scheduler sweep failed:", e); }
   finally { ticking = false; }
@@ -527,4 +568,4 @@ setInterval(sweep, 30000);
 setTimeout(sweep, 5000);
 
 // exported for tests (boots the server against MILTON_DATA on import)
-export { server, loadSession, saveSession, tickEnrichment };
+export { server, loadSession, saveSession, tickEnrichment, tickProspect };

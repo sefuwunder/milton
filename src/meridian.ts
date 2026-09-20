@@ -200,6 +200,82 @@ export async function getEnrichJob(id: string): Promise<EnrichJob | null> {
   };
 }
 
+// ---- territory prospecting (the second async write: Meridian finds companies) --
+// POST /api/prospect { location, industry } -> 201 { job_id, status: "running" };
+// the Overpass + territory pipeline can take longer than a few seconds, so the
+// job runs in Meridian's background and Milton polls GET /api/prospect/:id.
+
+export interface ProspectCompany {
+  name: string; address?: string; lat?: number; lon?: number;
+  tags?: Record<string, string>; industry?: string; territory?: string;
+  source?: string; prospect?: boolean;
+}
+export interface ProspectJob {
+  id: string; location: string; industry: string; status: string;
+  progress: { done: number; total: number; current?: string };
+  error: string | null;
+  companies: ProspectCompany[] | null;
+  nodes: any[]; edges: any[];
+  created_at: number; updated_at: number;
+}
+
+export type ProspectRequestResult =
+  | { ok: true; job_id: string; status: string }
+  | { ok: false; error: string; unreachable: boolean };
+
+/** Start a territory-prospecting job in Meridian. */
+export async function requestProspect(location: string, industry: string): Promise<ProspectRequestResult> {
+  try {
+    const res = await fetch(meridianBase() + "/api/prospect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ location, industry }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (res.status !== 201) {
+      let detail = res.statusText;
+      try { detail = JSON.stringify(await res.json()); } catch { /* keep statusText */ }
+      return { ok: false, error: `status ${res.status}: ${String(detail).slice(0, 200)}`, unreachable: false };
+    }
+    const j: any = await res.json();
+    if (!j?.job_id) return { ok: false, error: "bad response: no job_id", unreachable: false };
+    return { ok: true, job_id: String(j.job_id), status: String(j.status || "running") };
+  } catch (e) {
+    return { ok: false, error: String(e instanceof Error ? e.message : e), unreachable: true };
+  }
+}
+
+/** Poll one prospect job — or null when Meridian is unreachable / unknown id. */
+export async function getProspectJob(id: string): Promise<ProspectJob | null> {
+  const j = await get<any>(`/api/prospect/${encodeURIComponent(id)}`);
+  // Tolerate a { job } wrapper, same as the enrich endpoint.
+  const r = j?.job ?? j;
+  if (!r || r.id == null) return null;
+  const co = (c: any): ProspectCompany => ({
+    name: String(c?.name || ""),
+    ...(c?.address != null ? { address: String(c.address) } : {}),
+    ...(c?.lat != null ? { lat: Number(c.lat) } : {}),
+    ...(c?.lon != null ? { lon: Number(c.lon) } : {}),
+    tags: c?.tags && typeof c.tags === "object" ? c.tags : {},
+    ...(c?.industry != null ? { industry: String(c.industry) } : {}),
+    ...(c?.territory != null ? { territory: String(c.territory) } : {}),
+    ...(c?.source != null ? { source: String(c.source) } : {}),
+    ...(c?.prospect != null ? { prospect: Boolean(c.prospect) } : {}),
+  });
+  return {
+    id: String(r.id),
+    location: String(r.location || ""),
+    industry: String(r.industry || ""),
+    status: String(r.status || "?"),
+    progress: r.progress && typeof r.progress === "object" ? r.progress : { done: 0, total: 0 },
+    error: r.error ?? null,
+    companies: Array.isArray(r.companies) ? r.companies.map(co).filter((c) => c.name) : null,
+    nodes: Array.isArray(r.nodes) ? r.nodes : [],
+    edges: Array.isArray(r.edges) ? r.edges : [],
+    created_at: Number(r.created_at || 0), updated_at: Number(r.updated_at || 0),
+  };
+}
+
 // ---- fuzzy matching (same scoring as crm.ts matchByName / workspace.ts) --------------
 function scoreName(name: string, query: string): number {
   const n = name.toLowerCase(), q = query.toLowerCase().trim();

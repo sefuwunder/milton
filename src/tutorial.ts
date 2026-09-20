@@ -165,7 +165,7 @@ export function graduationText(): string {
     "- **Forgiving input**: typos, paraphrases, scrambled word order all work; near-misses get tappable suggestions.",
     "- **Sessions**: `sessions`, `new session <name>`, `switch session to <name>`, rename, delete — each keeps its own history, workspace, and tutorial.",
     "- **Structure**: custom fields (`add custom field …`), pipeline stages (`add/rename/move/delete stage`), workspaces (`switch to <name>`).",
-    "- **Outside world**: `meridian recons` / `meridian dossier <city>` / `meridian entities <city>`; VCF import, camera OCR + handwriting, or `just met …` capture.",
+    "- **Outside world**: `meridian recons` / `meridian dossier <city>` / `meridian entities <city>` / `meridian prospect <industry> in <location>` (territories stage into the Data Workshop Sandbox); VCF import, camera OCR + handwriting, or `just met …` capture.",
     "- **Analysis & widgets**: `campaign stats`, `closing soon`, `sales cycle`, `pipeline hygiene` — follow any of them with `pin this as a widget`.",
     "- **Automations**: `save routine …` chains commands, `schedule …` puts them on a clock, `when … run …` fires them on CRM events. Destructive steps never auto-run.",
     "",

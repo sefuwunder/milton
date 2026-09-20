@@ -41,7 +41,8 @@ import { currentWorkspaceId } from "./workspace";
 
 const BASE = process.env.EXEC_CRM_URL || process.env.MILTON_CRM_URL || "http://localhost:3001";
 
-async function req(path: string, method = "GET", body?: any): Promise<any> {
+/** Exported for Data Workshop Sandbox staging (brain.ts): workspace-scoped. */
+export async function req(path: string, method = "GET", body?: any): Promise<any> {
   // Session workspace scoping: ?workspace=<id> wins in exec-crm's needWs
   // (over the X-Workspace header). null = default workspace: send nothing.
   const ws = currentWorkspaceId();

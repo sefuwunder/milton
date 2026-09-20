@@ -52,6 +52,21 @@ export interface EnrichJobState {
   job_id: string; targetType: "contact" | "company";
   targetId: number; targetName: string; at: number;
 }
+/** In-flight Meridian territory-prospecting job (poll via `prospect status`). */
+export interface ProspectJobState {
+  job_id: string; industry: string; location: string; at: number;
+}
+/** A job still "running" after this long is treated as stalled (Meridian caps jobs at ~60s). */
+export const PROSPECT_JOB_TIMEOUT_MS = 10 * 60 * 1000;
+/** Pure decision for the 30s prospect tick: keep polling, or deliver. */
+export function prospectTickDecision(
+  job: ProspectJobState, status: string, nowMs: number,
+): "keep" | "done" | "failed" | "stale" {
+  if (status === "done") return "done";
+  if (status === "failed") return "failed";
+  if (nowMs - job.at > PROSPECT_JOB_TIMEOUT_MS) return "stale";
+  return "keep";
+}
 /** Custom-field name the enrichment dossier is written to in exec-crm. */
 export const ENRICH_DOSSIER_FIELD = "Enrichment dossier";
 /** A job still "running" after this long is treated as stalled (Meridian caps jobs at ~60s). */
@@ -77,6 +92,7 @@ export interface Session {
   pending?: PendingAction;
   choice?: ChoiceState;
   enrichJob?: EnrichJobState; // in-flight Meridian enrichment (see `enrichment status`)
+  prospectJob?: ProspectJobState; // in-flight Meridian territory prospecting (see `prospect status`)
   history: { role: "user" | "milton"; text: string }[];
   lastOcr?: { text: string; uploadId: string };
   notes?: SavedNote[];
@@ -1621,6 +1637,206 @@ function enrichOfferReply(session: Session, job: EnrichJobState, r: mer.EnrichJo
   };
 }
 
+// ---- meridian territory prospecting: companies in a territory, staged --------
+// "meridian prospect dental clinics in Madisonville": POST /api/prospect, then
+// poll GET /api/prospect/:id via `prospect status`. On `done`, Milton builds
+// a CONTACT-shaped CSV (name+company = company name) and POSTs it to
+// exec-crm's Data Workshop Sandbox as a new batch — staged, never committed.
+// Nothing is imported until the user approves + commits the batch in
+// exec-crm's Sandbox tab. Staging is reversible (batches can be deleted), so
+// it is NOT a destructive action and needs no confirmation.
+
+/** Missing slots are clarifications, never guesses. */
+async function meridianProspectReply(session: Session, slots: Record<string, string>): Promise<Reply> {
+  const industry = (slots.industry || "").trim();
+  const location = (slots.location || "").trim();
+  if (!industry) {
+    return {
+      text: location
+        ? `Which industry should I prospect in **${location}**? Try \`meridian prospect dental clinics in ${location}\`.`
+        : "Which industry and territory should I prospect? Try `meridian prospect dental clinics in Madisonville`.",
+      chips: ["Meridian recons"],
+    };
+  }
+  if (!location) {
+    return {
+      text: `Which territory should I prospect **${industry}** in? Try \`meridian prospect ${industry} in Madisonville\`.`,
+      chips: ["Meridian recons"],
+    };
+  }
+  return launchProspect(session, industry, location);
+}
+
+/** Start the Meridian job and park it on the session for status polling. */
+async function launchProspect(session: Session, industry: string, location: string): Promise<Reply> {
+  const res = await mer.requestProspect(location, industry);
+  if (!res.ok) {
+    if (res.unreachable) return meridianDown();
+    return { text: `Meridian wouldn't start prospecting: ${res.error}`, chips: ["Meridian recons"] };
+  }
+  session.prospectJob = { job_id: res.job_id, industry, location, at: Date.now() };
+  const short = res.job_id.length > 8 ? res.job_id.slice(0, 8) : res.job_id;
+  return {
+    text: `🔎 Prospecting **${industry}** in **${location}** (job \`${short}\`) — Meridian is scanning the territory now. I'll check every 30 seconds and stage what it finds into the Data Workshop Sandbox when it's done, or say \`prospect status\` any time.`,
+    chips: ["Prospect status", "Meridian recons"],
+  };
+}
+
+/** One poll of the parked job: progress, the staged confirmation, or a plain failure. */
+async function meridianProspectStatusReply(session: Session): Promise<Reply> {
+  const job = session.prospectJob;
+  if (!job) {
+    return { text: "No prospecting job is running right now. Say `meridian prospect dental clinics in Madisonville` to start one.", chips: ["Help"] };
+  }
+  const r = await mer.getProspectJob(job.job_id);
+  if (!r) return meridianDown();
+  if (r.status === "running") {
+    const p = r.progress || { done: 0, total: 0 };
+    const pct = p.total ? ` — ${p.done}/${p.total}` : "";
+    const cur = p.current ? ` (${p.current})` : "";
+    const ageMin = Math.round((Date.now() - job.at) / 60000);
+    const stale = ageMin >= 20
+      ? ` It's been ${ageMin} minutes, which is unusually long — the job may be stuck; its id is \`${job.job_id}\`.`
+      : "";
+    return {
+      text: `Still prospecting **${job.industry}** in **${job.location}**${pct}${cur}.${stale} Say \`prospect status\` again to check.`,
+      chips: ["Prospect status"],
+    };
+  }
+  session.prospectJob = undefined;
+  return prospectTerminalReply(session, job, r);
+}
+
+/** CSV cell: quote when it carries a comma, quote, or newline. */
+function csvCell(v: string): string {
+  const s = String(v ?? "");
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+/** Normalize a company name for dedupe + CRM cross-checks. */
+function normProspectName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
+}
+
+/**
+ * Row notes for a staged prospect: provenance marker, territory + industry,
+ * the address, and the OSM tags Meridian reported — all on ONE line (the
+ * sandbox CSV parser is line-oriented, so notes must not contain newlines).
+ * Best-effort: `known` flags companies already in the CRM so the reviewer
+ * spots duplicates.
+ */
+export function prospectNotes(
+  c: mer.ProspectCompany, industry: string, fallbackTerritory: string, known: boolean,
+): string {
+  const parts = [
+    `meridian-prospect · territory: ${c.territory || fallbackTerritory} · industry: ${industry || c.industry || ""}`.trim(),
+  ];
+  if (c.address) parts.push(c.address);
+  const tags = Object.entries(c.tags || {}).map(([k, v]) => `${k}=${v}`).join("; ");
+  if (tags) parts.push(tags);
+  if (known) parts.push("already in your CRM");
+  return parts.join(" · ");
+}
+
+export interface ProspectBatch { name: string; filename: string; csv: string; count: number; samples: string[] }
+/** Cap: the sandbox allows 5000 rows; stay well under. */
+export const PROSPECT_BATCH_MAX_ROWS = 500;
+
+/**
+ * Build the sandbox batch payload from a finished prospect job. Both `name`
+ * and `company` are set to the company name so staged rows are identifiable;
+ * commit creates/finds the companies. Deduped by normalized name, capped.
+ * Exported for tests.
+ */
+export function buildProspectBatch(
+  industry: string, location: string, companies: mer.ProspectCompany[], known?: Set<string>,
+): ProspectBatch {
+  const seen = new Set<string>();
+  const rows: string[] = [];
+  const samples: string[] = [];
+  for (const c of companies) {
+    if (rows.length >= PROSPECT_BATCH_MAX_ROWS) break;
+    const key = normProspectName(c.name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    if (samples.length < 3) samples.push(c.name);
+    const cells = [c.name, "", "", "", c.name, prospectNotes(c, industry, location, known ? known.has(key) : false)];
+    rows.push(cells.map(csvCell).join(","));
+  }
+  const slug = (s: string) =>
+    s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "prospects";
+  return {
+    name: `Meridian prospects — ${industry} · ${location}`,
+    filename: `meridian-prospects-${slug(industry)}-${slug(location)}.csv`,
+    csv: ["name,title,email,phone,company,notes", ...rows].join("\n"),
+    count: rows.length,
+    samples,
+  };
+}
+
+export interface StageProspectsResult {
+  ok: boolean; count: number; batchId?: number | string; batchName?: string;
+  samples?: string[]; error?: string;
+}
+
+/**
+ * Stage a finished prospect job into exec-crm's Data Workshop Sandbox as a
+ * new batch (workspace-scoped via crm.req's ?workspace= from the ambient
+ * session workspace). The exec-crm company cross-check is best-effort: a
+ * failure listing companies must not kill staging.
+ */
+export async function stageProspects(job: ProspectJobState, r: mer.ProspectJob): Promise<StageProspectsResult> {
+  const companies = r.companies || [];
+  if (!companies.length) return { ok: true, count: 0 };
+  let known: Set<string> | undefined;
+  try {
+    known = new Set((await crm.getCompanies()).map((c) => normProspectName(c.name)));
+  } catch { /* best-effort: never kill staging */ }
+  const batch = buildProspectBatch(job.industry, job.location, companies, known);
+  try {
+    const res = await crm.req("/api/sandbox/batches", "POST", { name: batch.name, filename: batch.filename, csv: batch.csv });
+    return {
+      ok: true, count: batch.count,
+      batchId: res?.batch?.id ?? res?.id ?? "?",
+      batchName: batch.name, samples: batch.samples,
+    };
+  } catch (e: any) {
+    return { ok: false, count: 0, error: String(e?.message || e).slice(0, 200) };
+  }
+}
+
+/**
+ * Build the chat reply for a terminal prospect job. Exported so the 30s
+ * background tick can deliver the same staged confirmation / failure note
+ * without a user message. On `done`, stages into the Data Workshop Sandbox —
+ * staged, never committed; the user approves the batch in exec-crm.
+ */
+export async function prospectTerminalReply(session: Session, job: ProspectJobState, r: mer.ProspectJob): Promise<Reply> {
+  if (r.status === "failed") {
+    return {
+      text: `Prospecting **${job.industry}** in **${job.location}** failed: ${r.error || "unknown error"}.`,
+      chips: ["Meridian recons"],
+    };
+  }
+  const staged = await stageProspects(job, r);
+  if (!staged.ok) {
+    return {
+      text: `Meridian finished prospecting **${job.industry}** in **${job.location}**, but I couldn't stage the results into the Data Workshop Sandbox: ${staged.error}. Nothing was imported — say \`meridian prospect ${job.industry} in ${job.location}\` to try again.`,
+      chips: ["Meridian recons"],
+    };
+  }
+  if (!staged.count) {
+    return {
+      text: `Meridian finished prospecting **${job.industry}** in **${job.location}** but didn't find any companies there.`,
+      chips: ["Meridian recons"],
+    };
+  }
+  const ws = session.workspaceName || "default workspace";
+  return {
+    text: `✅ Staged **${staged.count}** ${staged.count === 1 ? "company" : "companies"} into the Data Workshop Sandbox (workspace **${ws}**) — review and approve them in exec-crm's Sandbox tab; nothing was imported.\n\nBatch \`${staged.batchId}\` — **${staged.batchName}**${(staged.samples || []).length ? `\nIncluding: ${(staged.samples || []).map((s) => `**${s}**`).join(", ")}` : ""}`,
+    chips: ["Prospect status", "Meridian recons"],
+  };
+}
+
 // ---- incoming Meridian completion callback -----------------------------------------
 // POST /api/hooks/meridian receives Meridian's run-completion POST
 // { run_id, city, label, status, nodes, edges, result_url, export_url }.
@@ -1670,6 +1886,8 @@ async function dispatchMeridian(session: Session, slots: Record<string, string>,
     case "meridian_request": return meridianRequestReply(session, slots.city || "");
     case "meridian_enrich": return meridianEnrichReply(session, slots.query || "");
     case "meridian_enrich_status": return meridianEnrichStatusReply(session);
+    case "meridian_prospect": return meridianProspectReply(session, slots);
+    case "meridian_prospect_status": return meridianProspectStatusReply(session);
   }
   return { text: "Nothing to do." };
 }
@@ -1783,6 +2001,8 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
     case "meridian_request":
     case "meridian_enrich":
     case "meridian_enrich_status":
+    case "meridian_prospect":
+    case "meridian_prospect_status":
       try {
         return await dispatchMeridian(session, s, intent.name, opts.raw || "");
       } catch (e: any) {
