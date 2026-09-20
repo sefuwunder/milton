@@ -3,6 +3,7 @@
 
 export interface Deal {
   id: number; title: string; company_id: number | null; contact_id: number | null;
+  campaign_id?: number | null;
   company_name?: string; contact_name?: string;
   value: number; stage: string; probability: number;
   expected_close: string; owner: string; created_at: string; updated_at: string;
@@ -23,6 +24,7 @@ export interface Stage {
   slug: string; name: string; position: number; color: string; deals?: number;
 }
 export interface IncomingHook { id: number; name: string; key: string; created_at: string }
+export interface Campaign { id: number; name: string; status?: string }
 
 import { currentWorkspaceId } from "./workspace";
 
@@ -90,6 +92,10 @@ export async function getIncomingHooks(): Promise<IncomingHook[]> {
 export async function getDeliveries(): Promise<any[]> {
   const j = await req("/api/deliveries");
   return j.deliveries || [];
+}
+export async function getCampaigns(): Promise<Campaign[]> {
+  const j = await req("/api/campaigns");
+  return j.campaigns || [];
 }
 
 export async function createDeal(d: Partial<Deal>): Promise<Deal> {

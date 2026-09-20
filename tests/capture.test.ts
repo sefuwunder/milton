@@ -1,9 +1,13 @@
 // Feature 3: conversational capture ("just met James from Vertex, ...").
-import { test, expect, beforeEach, describe } from "bun:test";
+import { test, expect, beforeEach, afterEach, describe } from "bun:test";
 import { parseIntent, parseCapture } from "../src/intents";
 import { handleMessage, runRoutineUnattended } from "../src/brain";
 import { initAutomationDb } from "../src/automation";
 import { Database } from "bun:sqlite";
+
+// Bun runs all test files in one process: restore the native fetch after each
+// test so later files (e.g. embedded.test.ts) can reach the real network.
+const nativeFetch = globalThis.fetch.bind(globalThis);
 
 function sess() { return { id: "cap-" + Math.random().toString(36).slice(2), history: [], notes: [] } as any; }
 
@@ -46,6 +50,9 @@ beforeEach(() => {
   createdCompany = null; createdContact = null; createdDeal = null;
   initAutomationDb(new Database(":memory:"));
   stubFetch();
+});
+afterEach(() => {
+  (globalThis as any).fetch = nativeFetch;
 });
 
 describe("parseCapture", () => {

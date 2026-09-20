@@ -12,7 +12,8 @@ const sess = (id: string, workspaceId: number | null = null): Session =>
 const dstr = (offsetDays: number): string => {
   const d = new Date();
   d.setDate(d.getDate() + offsetDays);
-  return d.toISOString().slice(0, 10) + " 10:00:00";
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} 10:00:00`;
 };
 
 const stubContacts = [
@@ -30,7 +31,7 @@ const stubDeals = [
   { id: 3, title: "Globex rollout", company_id: 2, contact_id: 2, company_name: "Globex", contact_name: "Bob Smith", value: 5000, stage: "closed_won", probability: 100, expected_close: "", owner: "", created_at: "", updated_at: dstr(-90) },
 ];
 const stubTasks = [
-  { id: 1, title: "Send proposal", deal_id: 1, campaign_id: null, due_date: dstr(-4).slice(0, 10), done: 0, owner: "", created_at: "" }, // daysUntil rounds noon-vs-midnight: reads as 3d overdue
+  { id: 1, title: "Send proposal", deal_id: 1, campaign_id: null, due_date: dstr(-4).slice(0, 10), done: 0, owner: "", created_at: "" }, // 4 calendar days ago -> "4d overdue"
   { id: 2, title: "Call Jane", deal_id: 2, campaign_id: null, due_date: dstr(2).slice(0, 10), done: 0, owner: "", created_at: "" },
   { id: 3, title: "Old done thing", deal_id: 1, campaign_id: null, due_date: dstr(-10).slice(0, 10), done: 1, owner: "", created_at: "" },
 ];
@@ -123,7 +124,7 @@ describe("prep brief assembly", () => {
     expect(r.text).toMatch(/\d+d since update ⚠️/);
     // tasks: overdue called out, done task excluded
     expect(r.text).toContain("Send proposal");
-    expect(r.text).toContain("3d overdue");
+    expect(r.text).toContain("4d overdue");
     expect(r.text).not.toContain("Old done thing");
     // bottom line
     expect(r.text).toContain("2 open deals ($180k), 1 stuck 30+ days, 1 overdue task.");

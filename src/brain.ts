@@ -6,6 +6,7 @@ import * as mer from "./meridian";
 import { parseIntent, helpText, HELP_CHIPS, parseStage, parseMoney, parseDate, parseReminderTime, formatWhen, parseCapture, type Intent } from "./intents";
 import { ocrUpload, type HandMetrics } from "./ocr";
 import { parseVcards, preferredPhone, preferredEmail, type ParsedVCard } from "./vcard";
+import * as an from "./analyst";
 import * as auto from "./automation";
 import * as wss from "./workspace";
 import * as reconRuns from "./recon_runs";
@@ -73,8 +74,12 @@ export function todayStr(ref: Date = new Date()): string {
   return ref.toISOString().slice(0, 10);
 }
 export function daysUntil(dateStr: string, ref: Date = new Date()): number | null {
-  if (!dateStr) return null;
-  const d = new Date(dateStr + "T12:00:00");
+  // Pure calendar-day arithmetic in local time: both sides pinned to local
+  // midnight, so the result is always a whole number of days — no half-day
+  // rounding flakes at noon/midnight boundaries.
+  const m = (dateStr || "").slice(0, 10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
   if (isNaN(d.getTime())) return null;
   const r = new Date(ref); r.setHours(0, 0, 0, 0);
   return Math.round((d.getTime() - r.getTime()) / 86400000);
@@ -120,7 +125,10 @@ async function needOne<T extends { id: number }>(
 type LlmResult = { ok: true; text: string } | { ok: false; error: string };
 
 function llmBase(): string {
-  return (process.env.MILTON_LLM_URL || "").replace(/\/$/, "");
+  // Resolution order lives in analyst.ts: embedded sidecar -> MILTON_LLM_URL.
+  // Chat keeps its existing behavior (30s timeout, snapshot prompt); only the
+  // endpoint source can change.
+  return an.llmEndpointBase();
 }
 
 /** Pull the provider's own error text out of a failed chat-completions response.
@@ -341,6 +349,7 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
     return { text: `Deleted stage "${p.label}".${moved}`, chips: ["Stages", "Show pipeline"] };
   }
   if (p.type === "capture") return captureSave(session, p.payload as CapturePayload);
+  if (p.type === "plan_tasks") return planTasksSave(session, p.payload as { goal: string; steps: string[] });
   if (p.type === "vcard_import") {
     return vcardImportRun(p.payload.cards as ParsedVCard[]);
   }
@@ -1023,6 +1032,11 @@ async function dispatch(session: Session, intent: Intent, opts: MessageOpts): Pr
     case "brief": return briefReply();
     case "hygiene": return hygieneReply();
     case "prep_brief": return prepBriefForName(session, s.name);
+    case "analyze_pipeline": return analyzePipelineReply();
+    case "forecast": return forecastReply();
+    case "plan_day": return planDayReply();
+    case "plan_week": return planWeekReply();
+    case "plan_breakdown": return planBreakdownReply(session, s.goal || "");
     case "activities": return activitiesReply();
     case "webhooks": return webhooksReply();
     case "hooks": return hooksReply();
@@ -1613,6 +1627,221 @@ async function prepBriefReply(session: Session, type: "contact" | "company", id:
 }
 
 // ---- write executors -------------------------------------------------------------------
+
+// ---- analyst & planner ---------------------------------------------------------------
+// Deterministic stats always; the small analyst model adds the "so what" when
+// configured. All read-only and workspace-scoped (crm.* scopes ?workspace=).
+
+async function analyzePipelineReply(): Promise<Reply> {
+  const [deals, stages, campaigns] = await Promise.all([
+    crm.getDeals(), crm.getStages(), crm.getCampaigns().catch(() => [] as crm.Campaign[]),
+  ]);
+  const st = an.computePipelineStats(deals, stages, campaigns);
+  const stageLines = st.stages.filter((s) => s.count > 0).map((s) =>
+    `• **${s.label}** — ${s.count} deal${s.count === 1 ? "" : "s"} · ${fmtMoney(s.total)}` +
+    (s.avgDays !== null ? ` · ${s.avgDays}d avg since update` : "") +
+    (s.avgProb !== null ? ` · ${s.avgProb}% avg win prob` : ""));
+  const lines = [
+    `📊 **Pipeline analysis** — ${st.openCount} open deals · ${fmtMoney(st.openValue)}`,
+    "",
+    ...stageLines,
+    "",
+    st.winRate !== null
+      ? `**Win rate:** ${Math.round(st.winRate * 100)}% (${st.wonCount} won · ${fmtMoney(st.wonValue)} vs ${st.lostCount} lost · ${fmtMoney(st.lostValue)})`
+      : "No closed deals yet — win rate n/a.",
+    st.stale.length
+      ? `**Stale (30+ days since update):**\n${st.stale.slice(0, 5).map((d) => `• **${d.title}** — ${d.stage} · ${fmtMoney(d.value)} · ${d.days}d`).join("\n")}`
+      : "Nothing stale — every open deal was touched in the last 30 days.",
+    st.topCampaigns.length
+      ? `**Top campaigns by open pipeline:**\n${st.topCampaigns.slice(0, 5).map((c) => `• **${c.name}** — ${c.count} deal${c.count === 1 ? "" : "s"} · ${fmtMoney(c.value)}`).join("\n")}`
+      : "",
+  ];
+  if (an.analystConfigured()) {
+    const r = await an.askAnalyst({ system: an.ANALYZE_SYSTEM, facts: st.facts });
+    lines.push("", r.ok
+      ? `**Analyst read** _(from your analyst model)_:\n${r.text}`
+      : `_Analyst insight skipped — ${r.error.slice(0, 200)}._`);
+  }
+  return {
+    text: lines.filter((l) => l !== "").join("\n").replace(/\n{3,}/g, "\n\n"),
+    chips: ["Forecast", "Plan my day", "Show pipeline"],
+  };
+}
+
+async function forecastReply(): Promise<Reply> {
+  const [deals, stages] = await Promise.all([crm.getDeals(), crm.getStages()]);
+  const f = an.computeForecast(deals, stages);
+  const lines = [
+    `🔮 **Forecast — ${f.quarter}**`,
+    "",
+    `**Weighted forecast: ${fmtMoney(f.weightedTotal)}** (from ${fmtMoney(f.openValue)} open pipeline, ${f.openCount} deals)`,
+    ...f.perStage.map((s) => `• **${s.label}** — ${s.count} deal${s.count === 1 ? "" : "s"} · ${fmtMoney(s.value)} → **${fmtMoney(s.weighted)}** weighted`),
+    "",
+    `Closed won this quarter: ${f.wonThisQuarterCount} deals · ${fmtMoney(f.wonThisQuarter)}.`,
+    f.topDeal
+      ? `Largest open deal: **${f.topDeal.title}** · ${fmtMoney(f.topDeal.value)} (${f.topDeal.sharePct}% of open pipeline).`
+      : "",
+    `_Weights: deal probability when set, else stage defaults (prospecting 10%, qualification 25%, proposal 50%, negotiation 75%)._`,
+  ];
+  if (an.analystConfigured()) {
+    const r = await an.askAnalyst({ system: an.FORECAST_SYSTEM, facts: f.facts });
+    lines.push("", r.ok
+      ? `**Risk read** _(from your analyst model)_:\n${r.text}`
+      : `_Risk read skipped — ${r.error.slice(0, 200)}._`);
+  }
+  return {
+    text: lines.filter((l) => l !== "").join("\n").replace(/\n{3,}/g, "\n\n"),
+    chips: ["Analyze my pipeline", "Plan my week", "Morning brief"],
+  };
+}
+
+interface PlanData {
+  overdue: crm.Task[]; dueToday: crm.Task[]; dueThisWeek: crm.Task[];
+  later: crm.Task[]; closingSoon: crm.Deal[]; staleTop: { title: string; stage: string; value: number; days: number }[];
+}
+
+async function gatherPlanData(): Promise<PlanData> {
+  const [tasks, deals] = await Promise.all([crm.getTasks(), crm.getDeals()]);
+  const today = todayStr();
+  const open = tasks.filter((t) => !t.done);
+  const byDue = [...open].sort((a, b) => (a.due_date || "9999").localeCompare(b.due_date || "9999"));
+  const overdue = byDue.filter((t) => t.due_date && t.due_date < today);
+  const dueToday = byDue.filter((t) => t.due_date === today);
+  const dueThisWeek = byDue.filter((t) => {
+    if (!t.due_date || t.due_date <= today) return false;
+    const n = daysUntil(t.due_date);
+    return n !== null && n <= 7;
+  });
+  const later = byDue.filter((t) => !overdue.includes(t) && !dueToday.includes(t) && !dueThisWeek.includes(t));
+  const closingSoon = deals
+    .filter((d) => !d.stage.startsWith("closed_") && d.expected_close)
+    .map((d) => ({ d, n: daysUntil(d.expected_close) }))
+    .filter((x): x is { d: crm.Deal; n: number } => x.n !== null && x.n >= 0 && x.n <= 14)
+    .sort((a, b) => a.n - b.n)
+    .map((x) => x.d);
+  const staleTop = deals
+    .filter((d) => !d.stage.startsWith("closed_"))
+    .map((d) => ({ d, days: daysSince(d.updated_at) }))
+    .filter((x): x is { d: crm.Deal; days: number } => x.days !== null && x.days >= 30)
+    .sort((a, b) => (b.d.value || 0) - (a.d.value || 0))
+    .slice(0, 3)
+    .map((x) => ({ title: x.d.title, stage: stageLabel(x.d.stage), value: x.d.value || 0, days: x.days }));
+  return { overdue, dueToday, dueThisWeek, later, closingSoon, staleTop };
+}
+
+const taskLine = (t: crm.Task) => `• **${t.title}** — ${duePhrase(t.due_date)}`;
+
+async function planDayReply(): Promise<Reply> {
+  const p = await gatherPlanData();
+  const sections: [string, string[]][] = [
+    ["**Do first — overdue:**", p.overdue.map(taskLine)],
+    ["**Due today:**", p.dueToday.map(taskLine)],
+    ["**Due this week:**", p.dueThisWeek.map(taskLine)],
+    ["**Deals closing soon:**", p.closingSoon.map((d) => `• **${d.title}** — ${stageLabel(d.stage)} · ${fmtMoney(d.value)} · closes ${d.expected_close}`)],
+    ["**Needs attention (stale deals):**", p.staleTop.map((d) => `• **${d.title}** — ${d.stage} · ${fmtMoney(d.value)} · ${d.days}d`)],
+  ];
+  const body = sections.filter(([, ls]) => ls.length).map(([h, ls]) => `${h}\n${ls.join("\n")}`).join("\n\n")
+    || "Nothing open — no tasks, no deals closing soon, nothing stale. Enjoy the quiet.";
+  const lines = [`🗓️ **Plan for ${todayStr()}**`, "", body];
+  if (an.analystConfigured()) {
+    const facts = [
+      `Overdue tasks: ${p.overdue.map((t) => t.title).join("; ") || "none"}`,
+      `Due today: ${p.dueToday.map((t) => t.title).join("; ") || "none"}`,
+      `Due this week: ${p.dueThisWeek.map((t) => t.title).join("; ") || "none"}`,
+      `Deals closing within 14 days: ${p.closingSoon.map((d) => `${d.title} (${d.expected_close}, ${d.value})`).join("; ") || "none"}`,
+      `Stale deals: ${p.staleTop.map((d) => `${d.title} (${d.days}d)`).join("; ") || "none"}`,
+    ].join("\n");
+    const r = await an.askAnalyst({ system: an.PLAN_DAY_SYSTEM, facts });
+    lines.push("", r.ok
+      ? `**Suggested schedule** _(from your analyst model)_:\n${r.text}`
+      : `_Schedule skipped — ${r.error.slice(0, 200)}._`);
+  }
+  return {
+    text: lines.join("\n").replace(/\n{3,}/g, "\n\n"),
+    cards: p.overdue.length + p.dueToday.length ? [{ kind: "tasks", title: "Today's tasks", items: [...p.overdue, ...p.dueToday] }] : undefined,
+    chips: ["Plan my week", "My tasks", "Morning brief"],
+  };
+}
+
+function weekdayName(iso: string): string {
+  const d = new Date(iso + "T12:00:00");
+  return isNaN(d.getTime()) ? iso : d.toLocaleDateString("en-US", { weekday: "long" });
+}
+
+async function planWeekReply(): Promise<Reply> {
+  const p = await gatherPlanData();
+  const today = todayStr();
+  const days: string[] = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(); d.setDate(d.getDate() + i);
+    days.push(d.toISOString().slice(0, 10));
+  }
+  const lines = [`🗓️ **Plan for the week**`, ""];
+  if (p.overdue.length) lines.push(`**Overdue — clear first:**\n${p.overdue.map(taskLine).join("\n")}`, "");
+  for (const day of days) {
+    const ts = [...p.dueToday, ...p.dueThisWeek, ...p.later].filter((t) => t.due_date === day);
+    const ds = p.closingSoon.filter((d) => d.expected_close === day);
+    if (!ts.length && !ds.length) continue;
+    lines.push(`**${weekdayName(day)} ${day}${day === today ? " (today)" : ""}:**`);
+    for (const t of ts) lines.push(taskLine(t));
+    for (const d of ds) lines.push(`• 📌 **${d.title}** closes — ${stageLabel(d.stage)} · ${fmtMoney(d.value)}`);
+    lines.push("");
+  }
+  const undated = p.later.filter((t) => !t.due_date);
+  if (undated.length) lines.push(`**No due date:**\n${undated.map(taskLine).join("\n")}`, "");
+  if (p.staleTop.length) lines.push(`**Needs attention (stale deals):**\n${p.staleTop.map((d) => `• **${d.title}** — ${d.stage} · ${fmtMoney(d.value)} · ${d.days}d`).join("\n")}`);
+  if (an.analystConfigured()) {
+    const facts = [
+      `Overdue: ${p.overdue.map((t) => t.title).join("; ") || "none"}`,
+      ...days.map((day) => {
+        const ts = [...p.dueToday, ...p.dueThisWeek].filter((t) => t.due_date === day).map((t) => t.title);
+        const ds = p.closingSoon.filter((d) => d.expected_close === day).map((d) => `${d.title} closes`);
+        return `${weekdayName(day)}: ${[...ts, ...ds].join("; ") || "—"}`;
+      }),
+      `Stale deals: ${p.staleTop.map((d) => `${d.title} (${d.days}d)`).join("; ") || "none"}`,
+    ].join("\n");
+    const r = await an.askAnalyst({ system: an.PLAN_WEEK_SYSTEM, facts });
+    lines.push("", r.ok
+      ? `**Suggested week** _(from your analyst model)_:\n${r.text}`
+      : `_Week plan skipped — ${r.error.slice(0, 200)}._`);
+  }
+  return {
+    text: lines.join("\n").replace(/\n{3,}/g, "\n\n").trim(),
+    chips: ["Plan my day", "My tasks", "Morning brief"],
+  };
+}
+
+async function planBreakdownReply(session: Session, goal: string): Promise<Reply> {
+  const g = (goal || "").trim();
+  if (!g) return { text: "What should I break down? Try `break down launch event`.", chips: ["Help"] };
+  if (!an.analystConfigured()) {
+    return {
+      text: `Breaking down "${g}" needs the analyst model, and I don't see one configured — set \`MILTON_LLM_URL\` (and optionally \`MILTON_ANALYST_MODEL\`) and try again. I won't guess at steps without it.`,
+      chips: ["Help"],
+    };
+  }
+  const r = await an.askAnalyst({ system: an.BREAKDOWN_SYSTEM, facts: `Goal: ${g}` });
+  if (!r.ok) return { text: `I couldn't get steps from the analyst model (${r.error.slice(0, 200)}). Nothing was created.`, chips: ["Help"] };
+  const steps = an.parseNumberedList(r.text);
+  if (!steps.length) {
+    return { text: "The analyst model didn't return a usable step list — nothing was created. Try rephrasing the goal.", chips: ["Help"] };
+  }
+  session.pending = { type: "plan_tasks", label: g, payload: { goal: g, steps } };
+  return {
+    text: `Here's a plan for **${g}** — create these ${steps.length} as tasks?\n${steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}`,
+    cards: [{ kind: "confirm", options: [{ n: 1, label: `Yes, create ${steps.length} tasks` }, { n: 2, label: "Cancel" }] }],
+    chips: ["Yes", "No"],
+  };
+}
+
+async function planTasksSave(session: Session, payload: { goal: string; steps: string[] }): Promise<Reply> {
+  let created = 0;
+  for (const step of payload.steps) {
+    await crm.createTask({ title: step });
+    created++;
+  }
+  return { text: `Created ${created} task${created === 1 ? "" : "s"} for "${payload.goal}".`, chips: ["My tasks", "Plan my day"] };
+}
 function dealCard(d: crm.Deal): Card {
   return {
     kind: "deals", title: d.title,

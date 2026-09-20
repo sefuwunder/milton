@@ -10,6 +10,8 @@ import * as auto from "./automation";
 import { initWorkspaceDb, listWorkspaces, getSessionWorkspace, setSessionWorkspace } from "./workspace";
 import { initReconRunsDb } from "./recon_runs";
 import { hookSecret, verifyHookSecret } from "./hookauth";
+import { embeddedDecision, startEmbedded, type EmbeddedServer } from "./embedded";
+import { llmEndpointBase, analystModel } from "./analyst";
 
 const PORT = Number(process.env.PORT || 3009);
 const DATA_DIR = process.env.MILTON_DATA || "./data";
@@ -151,6 +153,25 @@ const json = (data: any, status = 200) =>
 
 const crmOk = await ping();
 
+// Self-contained mode: spawn the llama-server sidecar when MILTON_EMBEDDED=1,
+// or auto-detect it when models/ holds a .gguf + binary and no MILTON_LLM_URL
+// is set. All LLM traffic (chat + analyst) then routes at the sidecar.
+let embedded: EmbeddedServer | null = null;
+try {
+  const plan = embeddedDecision("models");
+  if (plan) {
+    console.log(`starting embedded model (${plan.gguf})…`);
+    embedded = await startEmbedded(plan);
+    console.log(`embedded model ready (${embedded.label})`);
+  }
+} catch (e: any) {
+  console.error(`embedded model failed: ${e?.message || e}`);
+  process.exit(1);
+}
+const stopEmbedded = () => { try { embedded?.stop(); } catch { /* already gone */ } };
+process.on("SIGINT", () => { stopEmbedded(); process.exit(0); });
+process.on("SIGTERM", () => { stopEmbedded(); process.exit(0); });
+
 const server = Bun.serve({
   port: PORT,
   idleTimeout: 120, // SSE streams stay open; 25s keep-alive pings refresh it
@@ -166,9 +187,11 @@ const server = Bun.serve({
     if (path === "/api/health" && method === "GET") {
       return json({
         ok: true, crm: crmOk, crm_url: crmBase(),
-        llm: Boolean(process.env.MILTON_LLM_URL),
+        llm: Boolean(llmEndpointBase()),
         llm_url: process.env.MILTON_LLM_URL || null,
         llm_model: process.env.MILTON_LLM_MODEL || null,
+        llm_source: embedded ? "embedded" : (process.env.MILTON_LLM_URL ? "env" : "none"),
+        analyst_model: analystModel(),
       });
     }
 
@@ -378,7 +401,7 @@ const server = Bun.serve({
 
 console.log(`milton listening on http://localhost:${server.port}`);
 console.log(`exec-crm: ${crmBase()} (${crmOk ? "reachable" : "UNREACHABLE"})`);
-console.log(`LLM mode: ${process.env.MILTON_LLM_URL ? "enabled" : "local-only (set MILTON_LLM_URL for freeform chat)"}`);
+console.log(`LLM mode: ${embedded ? `embedded (${embedded.label})` : process.env.MILTON_LLM_URL ? "enabled" : "local-only (set MILTON_LLM_URL for freeform chat, MILTON_EMBEDDED=1 for the bundled model)"}`);
 console.log(`automation scheduler: every 30s${process.env.MILTON_HOOK_SECRET ? "" : " (incoming webhooks disabled: set MILTON_HOOK_SECRET)"}`);
 if (!crmOk) console.log("Hint: start exec-crm first, or set EXEC_CRM_URL (or MILTON_CRM_URL) to its address.");
 

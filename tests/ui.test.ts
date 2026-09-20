@@ -205,3 +205,23 @@ describe("vCard attachments", () => {
     expect(div.innerHTML).not.toContain("<img");
   });
 });
+
+describe("analyst replies", () => {
+  const analysisReply = {
+    text: "📊 **Pipeline analysis** — 3 open deals · $190k\n• **Negotiation** — 1 deal · $120k\n**Win rate:** 100%\n\n**Analyst read** _(from your analyst model)_:\n- Stub insight: negotiation holds most open value",
+    chips: ["Forecast", "Plan my day"],
+  };
+  test("analysis brief renders markdown, analyst section, and chips", () => {
+    const div = T.addMsg("milton", analysisReply);
+    expect(div.className).toContain("milton");
+    expect(div.innerHTML).toContain("Pipeline analysis");
+    expect(div.innerHTML).toContain("<b>");
+    expect(div.innerHTML).toContain("Analyst read");
+    expect(div.innerHTML).toContain("Stub insight");
+  });
+  test("breakdown confirm card renders yes/no picks", () => {
+    const html = T.cardHTML({ kind: "confirm", options: [{ n: 1, label: "Yes, create 3 tasks" }, { n: 2, label: "Cancel" }] });
+    expect(html).toContain("Yes, create 3 tasks");
+    expect(html).toContain("data-confirm");
+  });
+});

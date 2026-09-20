@@ -27,6 +27,27 @@ MILTON_LLM_URL=http://localhost:11434/v1 MILTON_LLM_MODEL=qwen2.5:7b bun src/ser
 
 Without it, Milton runs fully offline on its built-in command engine — every CRM operation below works with no model at all.
 
+**Endpoint resolution order:** embedded llama-server sidecar (when active) → `MILTON_LLM_URL` → none. When no model is configured anywhere, the statistical briefs below are fully deterministic.
+
+### Self-contained mode (no Ollama needed)
+
+One command fetches everything into gitignored `models/` (idempotent — skips what's already there):
+
+```bash
+scripts/get-model.sh          # re-fetch with --force
+MILTON_EMBEDDED=1 bun src/server.ts
+```
+
+What it downloads: the matching `llama-server` binary from the official llama.cpp releases (~10–30MB) into `models/bin/`, plus a default tiny GGUF — Qwen3-0.6B `Q4_K_M` (~400MB) — into `models/`. Override the model with `MILTON_MODEL_URL`, pin the llama.cpp release with `LLAMA_CPP_VERSION`. Expect ~450MB on disk and ~1GB of free RAM for the default model.
+
+You don't even need `MILTON_EMBEDDED=1`: when `models/*.gguf` and `models/bin/llama-server` exist **and** `MILTON_LLM_URL` is unset, Milton auto-detects and starts the sidecar on its own. An explicit `MILTON_LLM_URL` always wins over auto-detect (`MILTON_EMBEDDED=1` wins over everything). At boot it logs `embedded model ready (qwen3-0.6b)`; the sidecar is killed on shutdown. `GET /api/health` reports `llm_source: "embedded" | "env" | "none"`.
+
+Switching back to Ollama is just removing the model files (or setting `MILTON_LLM_URL`): the sidecar never starts when an explicit endpoint is configured.
+
+> The model files never ship: `models/` is gitignored and must stay out of the published zip (hundreds of MB).
+
+Without it, Milton runs fully offline on its built-in command engine — every CRM operation below works with no model at all.
+
 If the model endpoint is misconfigured (wrong model name, unreachable host), Milton says so in-chat — e.g. `I couldn't reach the language model (404 from …/chat/completions: model '…' not found)` — instead of silently falling back to "I'm not sure what you mean". `GET /api/health` also reports `llm_url` and `llm_model` so you can inspect the configuration.
 
 ## What Milton can do
@@ -40,6 +61,19 @@ If the model endpoint is misconfigured (wrong model name, unreachable host), Mil
 **People & tasks** — `add contact Jane Doe at Acme jane@acme.com` · `add company Globex` · `add task Call Acme tomorrow` · `remind me to send the proposal friday` · `complete task 3`
 
 **Routines** — `morning brief` (open pipeline, closing this week, overdue/due-today tasks, latest activity) · `pipeline hygiene` (missing close dates, stale deals, deals without contacts, overdue tasks)
+
+### Analyst & planner
+
+A small LLM (self-contained sidecar or your `MILTON_LLM_URL`) turns your CRM data into analysis — the math is always computed deterministically first, so every brief is useful even with no model at all:
+
+- `analyze my pipeline` — per-stage counts/totals, average days since update, win rate, stale deals (30d+), top campaigns by open value; the analyst adds a short "so what" read
+- `forecast` — weighted forecast from deal probabilities (falling back to stage weights: prospecting 10%, qualification 25%, proposal 50%, negotiation 75%), closed-won this quarter, largest-deal concentration; the analyst adds a risk read
+- `plan my day` / `plan my week` — overdue first, then due today / this week, deals closing soon, stale deals needing attention; the analyst optionally time-blocks the day
+- `break down launch event` — the analyst turns a goal into numbered steps and asks before creating them as tasks (requires the model; never writes without confirmation)
+
+Related env: `MILTON_ANALYST_MODEL` (default `MILTON_LLM_MODEL`, then `local-model`), `MILTON_LLM_TIMEOUT_MS` (default `90000`). If the model is unreachable Milton keeps the deterministic brief and adds a one-line note — including a `NO_PROXY=localhost,127.0.0.1` hint when a proxy looks like it's intercepting loopback traffic.
+
+Small models that work well here (all run fine on a laptop): `qwen3:0.6b` (the embedded default), `qwen3:1.7b`, `llama3.2:1b`, `qwen3.5:0.8b`. Larger models give richer prose; the deterministic briefs don't care either way.
 
 ### Automations — routines, schedules, triggers
 
@@ -111,7 +145,7 @@ Natural dates (`tomorrow`, `friday`, `in 3 days`, `2026-10-02`) and money (`50k`
 - `POST /api/upload` → multipart image (JPEG/PNG/WebP, ≤10 MB) → `{ id, url }`
 - `GET /api/file/:id` → serves the upload (scoped to its session)
 - `GET /api/history?session=…` → recent messages for a session
-- `GET /api/health` → `{ ok, crm, crm_url, llm, llm_url, llm_model }`
+- `GET /api/health` → `{ ok, crm, crm_url, llm, llm_url, llm_model, llm_source, analyst_model }`
 - `GET /api/routines` · `POST /api/routines` / `DELETE /api/routines/:name`
 - `GET /api/schedules` · `POST /api/schedules` (`{ routine, when }`) · `PATCH /api/schedules/:id` (`{ active }`) · `DELETE /api/schedules/:id`
 - `GET /api/triggers` (includes supported `events`) · `POST /api/triggers` (`{ event, routine }`) · `DELETE /api/triggers/:id`
@@ -123,7 +157,7 @@ Natural dates (`tomorrow`, `friday`, `in 3 days`, `2026-10-02`) and money (`50k`
 ## Tests
 
 ```bash
-bun test tests/   # 327 tests: intent parser, help/parser sync, brain vs stubbed CRM, OCR engine, uploads, LLM error paths, DOM-stubbed UI, routines/schedules/triggers, webhook + scheduler, Meridian read + run-request intents, automations panel dismiss behavior, auto light/dark theme
+bun test tests/   # 454 tests: intent parser, help/parser sync, brain vs stubbed CRM, analyst/planner + embedded sidecar boot smoke (stub llama-server), OCR engine, uploads, LLM error paths, DOM-stubbed UI, routines/schedules/triggers, webhook + scheduler, Meridian read + run-request intents, automations panel dismiss behavior, auto light/dark theme
 ```
 
 ## Layout

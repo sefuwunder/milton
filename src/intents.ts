@@ -13,6 +13,7 @@ export type IntentName =
   | "capture"
   | "ocr_read" | "handwriting" | "save_note"
   | "prep_brief"
+  | "analyze_pipeline" | "forecast" | "plan_day" | "plan_week" | "plan_breakdown"
   | "save_routine" | "run_routine" | "list_routines" | "delete_routine" | "show_routine"
   | "schedule_add" | "list_schedules" | "unschedule" | "pause_schedule" | "resume_schedule"
   | "trigger_add" | "list_triggers" | "delete_trigger" | "trigger_help" | "list_runs"
@@ -87,7 +88,7 @@ export function parseDate(s: string, ref: Date = new Date()): string | null {
 }
 
 // Finds a date expression anywhere inside a longer string; returns {date, rest}.
-export function extractDate(s: string): { date: string; rest: string } | null {
+export function extractDate(s: string, ref: Date = new Date()): { date: string; rest: string } | null {
   const patterns = [
     /\b(today|tomorrow|next week)\b/i,
     /\bin (\d+) days?\b/i,
@@ -98,7 +99,7 @@ export function extractDate(s: string): { date: string; rest: string } | null {
   for (const p of patterns) {
     const m = s.match(p);
     if (m) {
-      const date = parseDate(m[0]);
+      const date = parseDate(m[0], ref);
       if (date) return { date, rest: (s.slice(0, m.index) + " " + s.slice((m.index || 0) + m[0].length)).replace(/\s+/g, " ").trim() };
     }
   }
@@ -120,7 +121,7 @@ export function parseReminderTime(s: string, nowMs: number): { fireAt: number; t
     return { fireAt: nowMs + n * unit, text: rest.replace(/^to /, "").trim() };
   }
   // absolute day + optional clock time (time is matched after the day is cut)
-  const dt = extractDate(s);
+  const dt = extractDate(s, new Date(nowMs));
   const base = dt ? dt.rest : s;
   const tm = base.match(/\bat (\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/);
   if (!dt && !tm) return null;
@@ -298,6 +299,15 @@ export function parseIntent(raw: string): Intent {
   else if ((m = cased.match(/^meeting prep(?: for)? (.+)$/i))) set("prep_brief", { name: m[1].trim() });
   else if ((m = cased.match(/^prep for (.+)$/i))) set("prep_brief", { name: m[1].trim() });
 
+  // ---- analyst & planner -----------------------------------------------------------
+  // Before the reads: "analyze my pipeline" must not fall through to "pipeline".
+  else if (/^(analyze( my)? pipeline|pipeline stats|pipeline analysis|how'?s my pipeline|pipeline report)$/.test(text)) set("analyze_pipeline");
+  else if (/^(forecast|sales forecast|revenue forecast|what will close this quarter|quarterly forecast|this quarter'?s forecast)$/.test(text)) set("forecast");
+  else if (/^(plan my day|daily plan|plan today|today'?s plan)$/.test(text)) set("plan_day");
+  else if (/^(plan my week|weekly plan|plan this week|this week'?s plan)$/.test(text)) set("plan_week");
+  else if ((m = cased.match(/^break down (.+)$/i))) set("plan_breakdown", { goal: m[1].trim() });
+  else if ((m = cased.match(/^plan (.+)$/i))) set("plan_breakdown", { goal: m[1].trim() });
+
   // ---- routines ---------------------------------------------------------------
   else if (/\b(morning brief|daily brief|brief me|briefing)\b/.test(text)) set("brief");
   else if (/\b(pipeline hygiene|hygiene|health check|cleanup|stale deals)\b/.test(text)) set("hygiene");
@@ -438,6 +448,9 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["add stage Discovery before proposal", "add_stage"], ["rename stage Proposal to Scoping", "rename_stage"]], note: "edit the pipeline schema" },
       { cmds: [["meridian recon Austin", "meridian_request"]], note: "request a new Meridian recon — I report back when it finishes" },
       { cmds: [["meridian entities Austin company", "meridian_entities"]], note: "its orgs, filtered by type" },
+      { cmds: [["analyze my pipeline", "analyze_pipeline"], ["forecast", "forecast"]], note: "pipeline stats & weighted forecast — deterministic, plus analyst-model insights when set" },
+      { cmds: [["plan my day", "plan_day"], ["plan my week", "plan_week"]], note: "prioritized plan from tasks, closing deals, stale deals" },
+      { cmds: [["break down launch event", "plan_breakdown"]], note: "the analyst model proposes steps — I ask before creating them as tasks" },
     ],
   },
   {
