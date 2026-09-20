@@ -46,7 +46,7 @@ export interface Reply {
 
 export interface PendingAction { type: string; label: string; payload: any }
 export interface ChoiceState {
-  kind: "deal" | "contact" | "company" | "task" | "workspace" | "session" | "stage" | "recon" | "prep" | "intent";
+  kind: "deal" | "contact" | "company" | "task" | "workspace" | "session" | "stage" | "recon" | "prep" | "intent" | "field";
   options: { id: number | string; n?: number; label: string; sub?: string }[];
   then: { action: string; payload: any };
 }
@@ -383,8 +383,11 @@ async function dispatchChoice(session: Session, ch: ChoiceState, id: number | st
     }
     return prepBriefReply(session, p.type, p.id);
   }
-  if (ch.kind === "intent") {
-    // fuzzy near-tie resolution: re-run the chosen canonical command.
+  if (ch.kind === "field") {
+    // custom-field numbered choice: ambiguous field name or entity name.
+    return customFieldChoice(session, ch, id);
+  }
+  if (ch.kind === "intent") {    // fuzzy near-tie resolution: re-run the chosen canonical command.
     const cmd = ch.then.payload?.commands?.[id];
     if (typeof cmd !== "string") return { text: "I lost track of that choice — try the command again." };
     const intent2 = parseIntent(cmd);
@@ -412,6 +415,10 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
   if (p.type === "delete_task") {
     await crm.deleteTask(p.payload.id);
     return { text: `Deleted task "${p.label}".`, chips: ["My tasks"] };
+  }
+  if (p.type === "delete_custom_field") {
+    await crm.deleteCustomField(p.payload.id);
+    return { text: `Deleted custom field ${p.label}.`, chips: ["Help"] };
   }
   if (p.type === "delete_stage") {
     await crm.deleteStage(p.payload.slug, p.payload.moveTo);
@@ -453,10 +460,11 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
 // ---- automations: routines, schedules, triggers ------------------------------------
 // Intents that currently ask for confirmation before acting. Routine steps resolving
 // to these never auto-confirm: interactive runs ask once up front, unattended runs skip.
-const DESTRUCTIVE_PENDING = new Set(["delete_deal", "delete_task", "close_lost", "close_won", "delete_stage", "delete_chat_session"]);
+const DESTRUCTIVE_PENDING = new Set(["delete_deal", "delete_task", "close_lost", "close_won", "delete_stage", "delete_chat_session", "delete_custom_field"]);
 
 function isDestructiveIntent(intent: Intent): boolean {
   if (intent.name === "delete_deal" || intent.name === "delete_task" || intent.name === "delete_stage") return true;
+  if (intent.name === "delete_custom_field") return true; // removing a field drops its values too
   if (intent.name === "close_deal") return true; // won and lost both move money / pipeline state
   if (intent.name === "chat_session" && intent.slots.action === "delete") return true; // never auto-run in routines
   return false;
@@ -1364,6 +1372,11 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
     case "delete_stage": return stageByName(session, s.query, "delete_stage", {});
     case "move_stage": return stageByName(session, s.query, "move_stage", { pos: s.pos, ref: s.ref });
 
+    case "add_custom_field": return addCustomFieldReply(session, s);
+    case "set_custom_field": return setCustomFieldReply(session, s);
+    case "show_custom_fields": return showCustomFieldsReply(session, s);
+    case "delete_custom_field": return deleteCustomFieldReply(session, s);
+
     case "add_contact": return addContactReply(s);
     case "capture": return captureReply(session, s.rest || "");
     case "import_contacts": return importContactsReply(session, opts);
@@ -1599,6 +1612,254 @@ async function dealDetailReply(session: Session, query: string): Promise<Reply> 
     then: { action: "deal_detail", payload: {} },
   };
   return need.reply!;
+}
+
+// ---- custom fields (exec-crm /api/custom-fields) --------------------------------
+// Workspace-scoped like every other exec-crm call (via wss.runWithWorkspace in
+// handleMessage). Definitions and values are managed entirely through chat:
+//   add custom field Renewal date [of type date] to contacts
+//   set Renewal date to 2026-10-01 for contact Amara Okafor
+//   show custom fields for contact Amara Okafor
+//   list custom fields for contacts
+//   remove custom field Renewal date from contacts   (destructive: confirms)
+type CfEntityType = "contact" | "company" | "campaign" | "task";
+function cfPlural(et: string): string {
+  return et === "company" ? "companies" : `${et}s`;
+}
+/** Strip "custom field(s)" and articles so "set custom field X ..." and
+ *  "set the X custom field ..." both find X. */
+function cfCleanFieldName(s: string): string {
+  return s
+    .replace(/^(?:the\s+|a\s+|an\s+)?custom\s+fields?\s+/i, "")
+    .replace(/\s+(?:the\s+|a\s+|an\s+)?custom\s+fields?$/i, "")
+    .replace(/^(?:the|a|an)\s+/i, "")
+    .trim();
+}
+function cfShowValue(f: crm.CustomField): string {
+  if (f.value == null || f.value === "") return "—";
+  if (f.field_type === "checkbox") return f.value === "true" ? "✓ yes" : "☐ no";
+  return String(f.value);
+}
+/** Type-check a raw chat value before sending; exec-crm validates too. */
+function cfCoerceValue(field: { name: string; field_type: string }, raw: string): { value?: string; error?: string } {
+  const v = raw.trim();
+  if (field.field_type === "number") {
+    if (!/^-?\d+(?:\.\d+)?$/.test(v)) {
+      return { error: `"${raw}" isn't a number — **${field.name}** needs a numeric value.` };
+    }
+    return { value: v };
+  }
+  if (field.field_type === "date") {
+    const d = parseDate(v);
+    const m = d ? d.match(/^(\d{4})-(\d{2})-(\d{2})$/) : null;
+    const dt = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+    const real = m && dt && !isNaN(dt.getTime()) && dt.getMonth() === Number(m[2]) - 1 && dt.getDate() === Number(m[3]);
+    if (!real) return { error: `I couldn't parse "${raw}" as a date — try YYYY-MM-DD, e.g. 2026-10-01.` };
+    return { value: d! };
+  }
+  if (field.field_type === "checkbox") {
+    const t = v.toLowerCase();
+    if (["true", "yes", "y", "1", "on", "checked"].includes(t)) return { value: "true" };
+    if (["false", "no", "n", "0", "off", "unchecked"].includes(t)) return { value: "false" };
+    return { error: `"${raw}" isn't a yes/no value — **${field.name}** is a checkbox. Try "yes" or "no".` };
+  }
+  return { value: raw };
+}
+/** Turn an exec-crm 4xx into a plain sentence; anything else (CRM down, …)
+ *  rethrows so handleMessage's catch renders the standard message. */
+function cfFriendlyError(e: any, doing: string): string {
+  const msg = String(e?.message || e);
+  const m = msg.match(/-> 4\d\d (.*)$/);
+  if (m) {
+    let detail = m[1].trim().slice(0, 220);
+    try {
+      const j = JSON.parse(m[1]);
+      if (j && typeof j.error === "string") detail = j.error.slice(0, 220);
+    } catch { /* keep the raw body */ }
+    return `Couldn't ${doing}: ${detail}`;
+  }
+  throw e;
+}
+/** Resolve a field name against one entity type's definitions, with numbered
+ *  disambiguation on ambiguity. Returns the field or a reply (choice/error). */
+async function cfResolveField(session: Session, et: CfEntityType, rawName: string, op: string,
+  payload: Record<string, any>): Promise<{ field?: crm.CustomField; reply?: Reply }> {
+  const name = cfCleanFieldName(rawName);
+  let fields: crm.CustomField[];
+  try { fields = await crm.getCustomFields(et); }
+  catch (e) { return { reply: { text: cfFriendlyError(e, "load custom fields") } }; }
+  const matches = crm.matchByName(fields, name);
+  if (!matches.length) {
+    const known = fields.length
+      ? ` Known fields on ${cfPlural(et)}: ${fields.map((f) => `"${f.name}"`).join(", ")}.`
+      : ` There are no custom fields on ${cfPlural(et)} yet — add one first.`;
+    return { reply: { text: `I couldn't find a custom field called "${rawName}" on ${cfPlural(et)}.${known}`, chips: ["List custom fields"] } };
+  }
+  const [top, second] = [matches[0], matches[1]];
+  if (top.score >= 70 && (!second || top.score - second.score >= 20)) return { field: top.item };
+  session.choice = {
+    kind: "field",
+    options: matches.slice(0, 5).map((m, i) => ({ id: m.item.id, n: i + 1, label: m.item.name, sub: `${cfPlural(et)} · ${m.item.field_type}` })),
+    then: { action: "custom_field_field", payload: { op, entity_type: et, ...payload } },
+  };
+  return {
+    reply: {
+      text: `A few fields match "${rawName}" — which one did you mean?`,
+      cards: [{ kind: "choices", options: session.choice.options }],
+      chips: session.choice.options.map((o) => String(o.n)),
+    },
+  };
+}
+/** Resolve an entity name to its id, with numbered disambiguation. */
+async function cfResolveEntity(session: Session, et: CfEntityType, query: string, op: string,
+  payload: Record<string, any>): Promise<{ id?: number; name?: string; reply?: Reply }> {
+  const resolvers: Record<CfEntityType, (q: string) => Promise<crm.Match<any>[]>> = {
+    contact: crm.resolveContact, company: crm.resolveCompany,
+    campaign: crm.resolveCampaign, task: crm.resolveTask,
+  };
+  let matches: crm.Match<any>[];
+  try { matches = await resolvers[et](query); }
+  catch (e) { return { reply: { text: cfFriendlyError(e, `find that ${et}`) } }; }
+  const labelOf = (it: any) => String(it.name ?? it.title ?? `#${it.id}`);
+  if (!matches.length) return { reply: { text: `I couldn't find a ${et} matching "${query}".`, chips: ["Help"] } };
+  const [top, second] = [matches[0], matches[1]];
+  if (top.score >= 70 && (!second || top.score - second.score >= 20)) {
+    return { id: top.item.id, name: labelOf(top.item) };
+  }
+  session.choice = {
+    kind: "field",
+    options: matches.slice(0, 5).map((m, i) => ({ id: m.item.id, n: i + 1, label: labelOf(m.item), sub: et })),
+    then: { action: "custom_field_entity", payload: { op, entity_type: et, ...payload } },
+  };
+  return {
+    reply: {
+      text: `A few ${cfPlural(et)} match "${query}" — which one did you mean?`,
+      cards: [{ kind: "choices", options: session.choice.options }],
+      chips: session.choice.options.map((o) => String(o.n)),
+    },
+  };
+}
+
+async function addCustomFieldReply(session: Session, s: Record<string, string>): Promise<Reply> {
+  const et = s.entity_type as CfEntityType;
+  const name = (s.name || "").trim();
+  if (!name) return { text: "What should the field be called?" };
+  let ft = (s.field_type || "").toLowerCase();
+  let inferred = "";
+  if (!ft) {
+    // infer date from the name and say so; everything else defaults to text
+    ft = /\b(date|day|deadline)\b/i.test(name) ? "date" : "text";
+    if (ft === "date") inferred = ` I inferred **date** from the name — say "of type text" to override it.`;
+  }
+  try {
+    const f = await crm.addCustomField(et, name, ft);
+    return {
+      text: `Added custom field **${f.name}** (${f.field_type}) to ${cfPlural(et)}.${inferred}`,
+      chips: [`List custom fields for ${cfPlural(et)}`, "Help"],
+    };
+  } catch (e) {
+    return { text: cfFriendlyError(e, `add the "${name}" field`) };
+  }
+}
+
+async function setCustomFieldReply(session: Session, s: Record<string, string>): Promise<Reply> {
+  const et = s.entity_type as CfEntityType;
+  if ((et as string) === "deal") {
+    return {
+      text: "exec-crm supports custom fields on campaigns, contacts, companies, and tasks — not on deals. Want to set it on one of those instead?",
+      chips: ["Help"],
+    };
+  }
+  const r = await cfResolveField(session, et, s.field || "", "set", { value: s.value || "", query: s.query || "" });
+  if (r.reply) return r.reply;
+  return setCustomFieldWith(session, et, r.field!, { value: s.value || "", query: s.query || "" });
+}
+async function setCustomFieldWith(session: Session, et: CfEntityType, field: crm.CustomField, p: { value: string; query: string }): Promise<Reply> {
+  const coerced = cfCoerceValue(field, p.value);
+  if (coerced.error) return { text: coerced.error };
+  const e = await cfResolveEntity(session, et, p.query, "set", { field_id: field.id, field_name: field.name, field_type: field.field_type, value: coerced.value! });
+  if (e.reply) return e.reply;
+  return setCustomFieldWithEntity(session, et, field, e.id!, e.name!, coerced.value!);
+}
+async function setCustomFieldWithEntity(session: Session, et: CfEntityType, field: { id: number; name: string; field_type: string },
+  entityId: number, entityName: string, value: string): Promise<Reply> {
+  try {
+    await crm.setCustomFieldValue(field.id, entityId, value);
+  } catch (e) {
+    return { text: cfFriendlyError(e, "save that value") };
+  }
+  return {
+    text: `Set **${field.name}** to ${cfShowValue({ ...field, value })} for ${et} "${entityName}".`,
+    chips: [`Show custom fields for ${et} ${entityName}`, "Help"],
+  };
+}
+
+async function showCustomFieldsReply(session: Session, s: Record<string, string>): Promise<Reply> {
+  const et = s.entity_type as CfEntityType;
+  const query = (s.query || "").trim();
+  if (!query) {
+    let fields: crm.CustomField[];
+    try { fields = await crm.getCustomFields(et); }
+    catch (e) { return { text: cfFriendlyError(e, "load custom fields") }; }
+    if (!fields.length) return { text: `No custom fields on ${cfPlural(et)} yet — add one with "add custom field <name> to ${cfPlural(et)}".`, chips: ["Help"] };
+    const lines = fields.map((f) => `• **${f.name}** (${f.field_type})`);
+    return { text: `Custom fields on ${cfPlural(et)}:\n${lines.join("\n")}`, chips: ["Help"] };
+  }
+  const e = await cfResolveEntity(session, et, query, "show", {});
+  if (e.reply) return e.reply;
+  return showCustomFieldsWith(session, et, e.id!, e.name!);
+}
+async function showCustomFieldsWith(session: Session, et: CfEntityType, entityId: number, entityName: string): Promise<Reply> {
+  let vals: crm.CustomField[];
+  try { vals = await crm.getCustomFieldValues(et, entityId); }
+  catch (e) { return { text: cfFriendlyError(e, "load custom fields") }; }
+  if (!vals.length) return { text: `"${entityName}" has no custom fields on ${cfPlural(et)} yet — add one with "add custom field <name> to ${cfPlural(et)}".`, chips: ["Help"] };
+  const lines = vals.map((f) => `• **${f.name}** (${f.field_type}): ${cfShowValue(f)}`);
+  return { text: `Custom fields for ${et} "${entityName}":\n${lines.join("\n")}`, chips: ["Help"] };
+}
+
+async function deleteCustomFieldReply(session: Session, s: Record<string, string>): Promise<Reply> {
+  const et = s.entity_type as CfEntityType;
+  const r = await cfResolveField(session, et, s.name || "", "delete", {});
+  if (r.reply) return r.reply;
+  return deleteCustomFieldConfirm(session, et, r.field!);
+}
+/** Destructive: confirmation card; unattended runs never auto-confirm
+ *  (DESTRUCTIVE_PENDING / isDestructiveIntent). */
+function deleteCustomFieldConfirm(session: Session, et: CfEntityType, field: crm.CustomField): Reply {
+  session.pending = { type: "delete_custom_field", label: `${field.name} (${cfPlural(et)})`, payload: { id: field.id } };
+  return {
+    text: `Delete custom field **"${field.name}"** from ${cfPlural(et)}? This removes it and all its values. This can't be undone.`,
+    cards: [{ kind: "confirm", options: [{ n: 1, label: "Yes, delete" }, { n: 2, label: "Cancel" }] }],
+    chips: ["Yes", "No"],
+  };
+}
+/** Numbered field/entity choice resolution for the custom-field flows. */
+async function customFieldChoice(session: Session, ch: ChoiceState, id: number | string): Promise<Reply> {
+  const p = ch.then.payload as any;
+  const et = p.entity_type as CfEntityType;
+  if (ch.then.action === "custom_field_field") {
+    let fields: crm.CustomField[];
+    try { fields = await crm.getCustomFields(et); }
+    catch (e) { return { text: cfFriendlyError(e, "load custom fields") }; }
+    const f = fields.find((x) => x.id === Number(id));
+    if (!f) return { text: "That field seems to be gone — list the custom fields to see what's there now." };
+    if (p.op === "set") return setCustomFieldWith(session, et, f, { value: p.value || "", query: p.query || "" });
+    if (p.op === "delete") return deleteCustomFieldConfirm(session, et, f);
+    return { text: "I lost track of that choice — try again." };
+  }
+  if (ch.then.action === "custom_field_entity") {
+    const label = String(ch.options.find((o) => o.id === id)?.label || `#${id}`);
+    if (p.op === "set") {
+      const fields = await crm.getCustomFields(et).catch(() => [] as crm.CustomField[]);
+      const f = fields.find((x) => x.id === Number(p.field_id));
+      if (!f) return { text: "That field seems to be gone — list the custom fields to see what's there now." };
+      return setCustomFieldWithEntity(session, et, f, Number(id), label, p.value);
+    }
+    if (p.op === "show") return showCustomFieldsWith(session, et, Number(id), label);
+    return { text: "I lost track of that choice — try again." };
+  }
+  return { text: "I lost track of that choice — try again." };
 }
 
 // ---- milton widgets -----------------------------------------------------------

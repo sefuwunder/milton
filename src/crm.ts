@@ -215,8 +215,42 @@ export async function resolveTask(query: string): Promise<Match<Task>[]> {
   }
   return matchByName(tasks.map((t) => ({ ...t, name: t.title })), query) as Match<Task>[];
 }
+export async function resolveCampaign(query: string): Promise<Match<Campaign>[]> {
+  return matchByName(await getCampaigns(), query);
+}
 
 export function crmBase(): string { return BASE; }
+
+// ---- custom fields (exec-crm's /api/custom-fields, workspace-scoped like everything else)
+export interface CustomField { id: number; name: string; field_type: string; value?: string | null }
+// exec-crm definitions carry name=slug, label=display, type; the values
+// endpoint carries field_id, name=label, field_type. Normalize both to one shape.
+function normField(f: any): CustomField {
+  return {
+    id: Number(f.id ?? f.field_id),
+    name: String(f.label ?? f.name ?? ""),
+    field_type: String(f.type ?? f.field_type ?? "text"),
+    value: f.value ?? null,
+  };
+}
+export async function getCustomFields(entityType: string): Promise<CustomField[]> {
+  const j = await req(`/api/custom-fields?entity_type=${encodeURIComponent(entityType)}`);
+  return (j.fields || []).map(normField);
+}
+export async function addCustomField(entityType: string, name: string, fieldType: string): Promise<CustomField> {
+  const j = await req("/api/custom-fields", "POST", { entity_type: entityType, name, field_type: fieldType });
+  return normField(j.field);
+}
+export async function deleteCustomField(id: number): Promise<void> {
+  await req(`/api/custom-fields/${id}`, "DELETE");
+}
+export async function getCustomFieldValues(entityType: string, entityId: number): Promise<CustomField[]> {
+  const j = await req(`/api/custom-fields/values?entity_type=${encodeURIComponent(entityType)}&entity_id=${entityId}`);
+  return (j.values || j.fields || []).map(normField);
+}
+export async function setCustomFieldValue(fieldId: number, entityId: number, value: string): Promise<{ ok: boolean }> {
+  return req("/api/custom-fields/values", "PUT", { field_id: fieldId, entity_id: entityId, value });
+}
 
 // ---- milton widgets (published to exec-crm's /api/milton/widgets, rendered on its Milton tab)
 export interface Widgetable {

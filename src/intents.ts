@@ -24,6 +24,7 @@ export type IntentName =
   | "chat_session" // named chat sessions; slots.action = new|list|switch|rename|delete|current
   | "list_recons" | "meridian_dossier" | "meridian_entities" | "meridian_request"
   | "list_stages" | "add_stage" | "rename_stage" | "delete_stage" | "move_stage"
+  | "add_custom_field" | "set_custom_field" | "show_custom_fields" | "delete_custom_field"
   | "confirm_yes" | "confirm_no" | "choose_number"
   | "disambiguate_intent" // fuzzy near-tie: numbered choice between candidate intents
   | "tutorial" // interactive tutorial mode; slots.action = start|restart|status|skip|back|exit
@@ -234,6 +235,17 @@ function stripDealWord(q: string): string {
   return q.replace(/^(deal|opportunity|opp) /, "").replace(/ (deal|opportunity|opp)$/, "").trim();
 }
 
+// Singularize a custom-field entity word ("companies" -> "company").
+export function singCf(s: string): string {
+  const t = s.toLowerCase().trim();
+  if (/^contacts?$/.test(t)) return "contact";
+  if (/^compan(y|ies)$/.test(t)) return "company";
+  if (/^campaigns?$/.test(t)) return "campaign";
+  if (/^tasks?$/.test(t)) return "task";
+  if (/^deals?$/.test(t)) return "deal";
+  return t;
+}
+
 export function parseIntent(raw: string): Intent {
   const text = norm(raw);
   const cased = raw.replace(/[?!.,;:]+$/g, "").replace(/\s+/g, " ").trim(); // no lowercasing: stage labels keep their case
@@ -406,6 +418,49 @@ export function parseIntent(raw: string): Intent {
   // known deal title in brain.ts.
   else if ((m = text.match(/^(?:add )?note (?:on|to) (.+?)\s*:\s*(.+)$/))) set("add_note", { query: m[1].trim(), text: m[2].trim() });
   else if ((m = text.match(/^(?:add )?note (?:on|to) (.+)$/))) set("add_note", { rest: m[1].trim() });
+  // ---- custom fields (exec-crm /api/custom-fields, workspace-scoped) ----
+  // "add custom field Renewal date of type date to contacts"
+  // "add the VIP custom field to companies"
+  else if ((m = cased.match(/^(?:add|create|new)(?: a| an)? custom fields? (.+?)(?: of type (text|number|date|checkbox))? (?:to|for|on) (campaigns?|contacts?|compan(?:y|ies)|tasks?)$/i))) {
+    set("add_custom_field", {
+      name: m[1].trim(),
+      ...(m[2] ? { field_type: m[2].toLowerCase() } : {}),
+      entity_type: singCf(m[3]),
+    });
+  }
+  else if ((m = cased.match(/^(?:add|create|new)(?: a| an| the)? (.+?) custom fields?(?: of type (text|number|date|checkbox))? (?:to|for|on) (campaigns?|contacts?|compan(?:y|ies)|tasks?)$/i))) {
+    set("add_custom_field", {
+      name: m[1].trim(),
+      ...(m[2] ? { field_type: m[2].toLowerCase() } : {}),
+      entity_type: singCf(m[3]),
+    });
+  }
+  // "set Renewal date to 2026-10-01 for contact Amara Okafor"
+  // Before the deal writes: "set renewal date to X for contact Y" would
+  // otherwise read as set_deal_field (field="contact", query="renewal date to X for").
+  // Deals have no custom fields in exec-crm — brain.ts explains that.
+  else if ((m = cased.match(/^set (.+?) to (.+?) for (contacts?|compan(?:y|ies)|campaigns?|tasks?|deals?) (.+)$/i))) {
+    set("set_custom_field", {
+      field: m[1].trim().replace(/^(?:the|a|an)\s+/i, ""), value: m[2].trim(),
+      entity_type: singCf(m[3]), query: m[4].trim(),
+    });
+  }
+  // "remove custom field VIP from companies" / "delete the VIP custom field from companies"
+  // Before delete_task: "delete the VIP custom field from companies" must not
+  // parse as deleting a task.
+  else if ((m = cased.match(/^(?:remove|delete)(?: the)? custom fields? (.+?) from (campaigns?|contacts?|compan(?:y|ies)|tasks?)$/i))) {
+    set("delete_custom_field", { name: m[1].trim(), entity_type: singCf(m[2]) });
+  }
+  else if ((m = cased.match(/^(?:remove|delete)(?: the| a| an)? (.+?) custom fields? from (campaigns?|contacts?|compan(?:y|ies)|tasks?)$/i))) {
+    set("delete_custom_field", { name: m[1].trim(), entity_type: singCf(m[2]) });
+  }
+  // "list custom fields for contacts" / "show custom fields for company Globex"
+  else if ((m = cased.match(/^(?:show|list|get|display|what are)(?: the)? custom fields?(?: of)? (?:for )?(campaigns?|contacts?|compan(?:y|ies)|tasks?)(?: (.+))?$/i))) {
+    set("show_custom_fields", {
+      entity_type: singCf(m[1]),
+      ...(m[2] ? { query: m[2].trim() } : {}),
+    });
+  }
   else if ((m = text.match(/^(?:update |set )(?:deal )?(.+?) (value|worth|amount|probability|chance|close date|expected close|owner|contact|company) (?:to )?(.+)$/))) {
     set("set_deal_field", { query: stripDealWord(m[1]), field: m[2], value: m[3] });
   }
@@ -470,7 +525,10 @@ export function parseIntent(raw: string): Intent {
   }
   else if ((m = text.match(/^(?:complete|finish|done with|mark (?:as )?done|check off)(?: task)? (.+)$/))) set("complete_task", { query: m[1].replace(/^task /, "") });
   else if ((m = text.match(/^(?:reopen|uncomplete|mark (?:as )?not done)(?: task)? (.+)$/))) set("reopen_task", { query: m[1].replace(/^task /, "") });
-  else if ((m = text.match(/^(?:delete|remove)(?: task)? (.+)$/))) set("delete_task", { query: m[1].replace(/^task /, "") });
+  // A custom-field delete with a typo'd marker ("delete the VIP custom feild
+  // from companies") must not land here — skip it so the fuzzy parser repairs
+  // it into delete_custom_field instead.
+  else if ((m = text.match(/^(?:delete|remove)(?!.*(?:custom|custum|costum)\s+(?:field|feild)s?)(?: task)? (.+)$/))) set("delete_task", { query: m[1].replace(/^task /, "") });
 
   return { name, raw, text, slots };
 }
@@ -521,6 +579,8 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["schedule EOD every weekday at 6pm", "schedule_add"]], note: "put routines on a clock" },
       { cmds: [["pause schedule 3", "pause_schedule"], ["resume schedule 3", "resume_schedule"], ["unschedule 3", "unschedule"]], note: "" },
       { cmds: [["add stage Discovery before proposal", "add_stage"], ["rename stage Proposal to Scoping", "rename_stage"]], note: "edit the pipeline schema" },
+      { cmds: [["add custom field Renewal date to contacts", "add_custom_field"], ["set Renewal date to 2026-10-01 for contact Amara", "set_custom_field"]], note: "custom fields on contacts, companies, campaigns & tasks" },
+      { cmds: [["show custom fields for contacts", "show_custom_fields"], ["remove custom field Renewal date from contacts", "delete_custom_field"]], note: "" },
       { cmds: [["meridian recon Austin", "meridian_request"]], note: "request a new Meridian recon — I report back when it finishes" },
       { cmds: [["meridian entities Austin company", "meridian_entities"]], note: "its orgs, filtered by type" },
       { cmds: [["analyze my pipeline", "analyze_pipeline"], ["forecast", "forecast"]], note: "pipeline stats & weighted forecast — deterministic, plus analyst-model insights when set" },

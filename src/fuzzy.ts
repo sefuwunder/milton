@@ -169,6 +169,49 @@ const SHOW = ["show", "list", "display", "view", "get", "gimme"];
 const DEALN = ["deal", "deals", "opportunity", "opportunities", "opp", "opps"];
 const ART = ["the", "a", "an"];
 
+// ---- custom fields (exec-crm /api/custom-fields) -------------------------------
+// Fuzzy companions to the exact matchers in intents.ts: typo-tolerant and
+// paraphrase-tolerant ("creat a custom feild X for contacts",
+// "what custom fields do contacts have"). Builds re-emit the canonical
+// command, which the exact parser must accept (check in parseIntentFuzzy).
+const CF_KW = [
+  ...K("custom", 2.5),
+  ...K("field", 2.5, "fields", "attribute", "attributes"),
+  ...K("campaigns", 2, "campaign"),
+  ...K("contacts", 2, "contact"),
+  ...K("companies", 2, "company"),
+  ...K("tasks", 2, "task"),
+];
+const CF_SING: Record<string, string> = {
+  campaigns: "campaign", contacts: "contact", companies: "company", tasks: "task", deals: "deal",
+};
+/** Without a "custom"/"field" word this isn't a field command — "get me my
+ *  tasks" must stay a task list, and a strong-but-failed read here would
+ *  claim the tokens and break nearby ties. */
+const CF_WORDS = ["custom", "field", "fields", "attribute", "attributes"];
+const noCfWords = (toks: string[]) => !toks.some((t) => CF_WORDS.includes(t));
+/** First entity word, canonical plural; deals included so "set X to Y for
+ *  deal Z" reaches the exact parser's not-supported-on-deals explanation. */
+function cfEnt(low: string[]): string | null {
+  for (const x of low) {
+    if (x === "campaigns" || x === "campaign") return "campaigns";
+    if (x === "contacts" || x === "contact") return "contacts";
+    if (x === "companies" || x === "company") return "companies";
+    if (x === "tasks" || x === "task") return "tasks";
+    if (x === "deals" || x === "deal") return "deals";
+  }
+  return null;
+}
+/** Explicit "of type <t>" / "type <t>" only — a type word inside the name
+ *  ("Renewal date") is not an explicit type; brain.ts infers date from those. */
+function cfType(low: string[]): string {
+  const TYPES = ["text", "number", "date", "checkbox"];
+  for (let i = 0; i < low.length; i++) {
+    if (low[i] === "type" && TYPES.includes(low[i + 1])) return low[i + 1];
+  }
+  return "";
+}
+
 // Stage alias keys (must match STAGE_ALIASES keys in intents.ts, single-word).
 const STAGE_KEYS = [
   "prospecting", "prospect", "qualification", "qualifying", "qualified",
@@ -895,6 +938,108 @@ const MORE: FuzzMatcher[] = [
     ph: [P("current session", 4), P("which session", 4)],
     mustHave: ["session"],
     build: () => "current session",
+  },
+  {
+    intent: "add_custom_field", label: "add a custom field", need: 4, pri: 16, remBonus: 1, noRemBonus: 0,
+    mustHave: ["add"],
+    veto: noCfWords,
+    kw: [...K("add", 3, "create", "new", "make", "insert"), ...CF_KW],
+    ph: [P("add custom field", 4), P("new custom field", 4), P("create custom field", 4)],
+    build: (t) => {
+      const low = t.map((x) => x.toLowerCase());
+      const ent = cfEnt(low);
+      if (!ent) return null;
+      // name sits after the LAST custom/field marker (typo-repaired "feild"
+      // canonicalizes in place, so "custom" alone isn't the anchor)
+      const ci = Math.max(low.lastIndexOf("custom"), low.lastIndexOf("field"), low.lastIndexOf("fields"));
+      const toIdx = low.lastIndexOf(ent);
+      if (ci < 0 || toIdx <= ci) return null;
+      const type = cfType(low);
+      let nameToks = t.slice(ci + 1, toIdx);
+      if (nameToks.every((x) => ["field", "fields", "to", "for", "on"].includes(x.toLowerCase()))) {
+        // "add the VIP custom field to companies": name sits before "custom"
+        const cc = low.lastIndexOf("custom");
+        nameToks = t.slice(0, cc >= 0 ? cc : ci);
+      }
+      if (type) {
+        // strip an explicit "of type <type>" / "type <type>" tail, not a type
+        // word that is part of the name ("Renewal date" keeps its name)
+        const lnt = nameToks.map((x) => x.toLowerCase());
+        const ti = lnt.lastIndexOf(type);
+        if (ti >= 0 && lnt[ti - 1] === "type") {
+          nameToks = nameToks.slice(0, ti - 1);
+          if (nameToks.length && nameToks[nameToks.length - 1].toLowerCase() === "of") nameToks.pop();
+        }
+      }
+      const name = drop(nameToks, ["add", "create", "new", "make", "insert", "to", "for", "on", ...ART]).join(" ");
+      if (!name) return null;
+      return `add custom field ${name}${type ? ` of type ${type}` : ""} to ${ent}`;
+    },
+  },
+  {
+    intent: "set_custom_field", label: "set a custom field value", need: 4, pri: 17, remBonus: 1, noRemBonus: 0,
+    mustHave: ["set"],
+    // the field word keeps "set acme value to 50k" on the deal path
+    veto: noCfWords,
+    kw: [...K("set", 3, "update", "edit", "change", "modify"), ...CF_KW],
+    ph: [P("set custom field", 4)],
+    build: (t) => {
+      const low = t.map((x) => x.toLowerCase());
+      const ent = cfEnt(low);
+      if (!ent) return null;
+      const toIdx = low.lastIndexOf("to");
+      const forIdx = low.lastIndexOf("for");
+      if (toIdx < 1 || forIdx <= toIdx) return null;
+      const field = drop(t.slice(1, toIdx), [...ART]).join(" ").replace(/^(?:custom fields? )/i, "");
+      const value = drop(t.slice(toIdx + 1, forIdx), [...ART]).join(" ");
+      let qToks = t.slice(forIdx + 1);
+      const qi = qToks.findIndex((x) => { const l = x.toLowerCase(); return l === ent || l === CF_SING[ent]; });
+      if (qi >= 0) qToks = qToks.slice(qi + 1);
+      const query = drop(qToks, [...ART]).join(" ");
+      if (!field || !value || !query) return null;
+      return `set ${field} to ${value} for ${CF_SING[ent]} ${query}`;
+    },
+  },
+  {
+    intent: "show_custom_fields", label: "show custom fields", need: 4, pri: 18, remBonus: 1, noRemBonus: 0,
+    kw: [...K("show", 2.5, "list", "display", "view", "get"), ...CF_KW],
+    ph: [P("custom fields", 4), P("show custom fields", 4.5), P("list custom fields", 4.5)],
+    // an action verb (set/delete/add) makes this a write, not a read; and
+    // without a "custom"/"field" word it isn't a field command at all
+    veto: (toks) => toks.some((t) => ["set", "update", "edit", "change", "modify", "add", "create", "make", "insert", "remove", "delete", "drop", "erase"].includes(t)) || noCfWords(toks),
+    build: (t) => {
+      const low = t.map((x) => x.toLowerCase());
+      const ent = cfEnt(low);
+      if (!ent) return null;
+      // trailing glue ("what custom fields do contacts have") isn't a name
+      const name = drop(t.slice(low.indexOf(ent) + 1), [...ART, "have", "has", "had", "do", "does"]).join(" ");
+      if (name) return `show custom fields for ${CF_SING[ent]} ${name}`;
+      return `list custom fields for ${ent}`;
+    },
+  },
+  {
+    intent: "delete_custom_field", label: "delete a custom field", need: 4, pri: 19, remBonus: 1, noRemBonus: 0,
+    mustHave: ["remove"],
+    // the field word keeps "delete task X" on the task path
+    veto: noCfWords,
+    kw: [...K("remove", 3, "delete", "drop", "erase"), ...CF_KW],
+    ph: [P("delete custom field", 4), P("remove custom field", 4)],
+    build: (t) => {
+      const low = t.map((x) => x.toLowerCase());
+      const ent = cfEnt(low);
+      const fromIdx = low.lastIndexOf("from");
+      const fi = Math.max(low.lastIndexOf("custom"), low.lastIndexOf("field"), low.lastIndexOf("fields"));
+      if (!ent || fi < 0 || fromIdx <= fi) return null;
+      let nameToks = t.slice(fi + 1, fromIdx);
+      if (nameToks.every((x) => ["field", "fields"].includes(x.toLowerCase()))) {
+        // "delete the VIP custom field from companies": name sits before "custom"
+        const cc = low.lastIndexOf("custom");
+        nameToks = t.slice(0, cc >= 0 ? cc : fi);
+      }
+      const name = drop(nameToks, ["remove", "delete", "drop", "erase", ...ART]).join(" ");
+      if (!name) return null;
+      return `remove custom field ${name} from ${ent}`;
+    },
   },
 ];
 
