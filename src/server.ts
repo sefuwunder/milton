@@ -11,6 +11,8 @@ import { initWorkspaceDb, listWorkspaces, getSessionWorkspace, setSessionWorkspa
 import { initChatSessionDb, listChatSessions, getChatSession, createChatSession, renameChatSession, deleteChatSession, ensureChatSession, touchChatSession } from "./chat_sessions";
 import { initReconRunsDb } from "./recon_runs";
 import { initDealNotesDb } from "./deal_notes";
+import { initUsabilityDb } from "./usability";
+import { commandRegistry } from "./commands";
 import { hookSecret, verifyHookSecret } from "./hookauth";
 import { embeddedDecision, startEmbedded, type EmbeddedServer } from "./embedded";
 import { llmEndpointBase, analystModel } from "./analyst";
@@ -49,6 +51,7 @@ initWorkspaceDb(db);
 initChatSessionDb(db, `${DATA_DIR}/uploads`);
 initReconRunsDb(db);
 initDealNotesDb(db);
+initUsabilityDb(db);
 
 // Incoming webhooks share one auth pattern: 503 when MILTON_HOOK_SECRET isn't
 // configured, 401 on a bad X-Milton-Secret (constant-time comparison).
@@ -202,6 +205,10 @@ const server = Bun.serve({
         llm_source: embedded ? "embedded" : (process.env.MILTON_LLM_URL ? "env" : "none"),
         analyst_model: analystModel(),
       });
+    }
+
+    if (path === "/api/commands" && method === "GET") {
+      return json({ commands: commandRegistry() });
     }
 
     if (path === "/api/history" && method === "GET") {

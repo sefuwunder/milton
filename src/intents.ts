@@ -28,6 +28,12 @@ export type IntentName =
   | "confirm_yes" | "confirm_no" | "choose_number"
   | "disambiguate_intent" // fuzzy near-tie: numbered choice between candidate intents
   | "tutorial" // interactive tutorial mode; slots.action = start|restart|status|skip|back|exit
+  | "wizard_start" // guided setup: bare "new deal" / "new contact" / "new company" / "new task"
+  | "undo" // undo the session's latest mutation
+  | "deal_journey" // stage history timeline for a deal
+  | "task_blockers" // what's blocking a task
+  | "duplicates" // show duplicate contacts and companies
+  | "deals_by_source" // deals from <source>
   | "unknown";
 
 export interface Intent {
@@ -37,6 +43,38 @@ export interface Intent {
   slots: Record<string, string>;
   fuzzy?: boolean; // set when the fuzzy interpreter (not the exact regexes) resolved this
 }
+
+// Every parser intent, enumerable: the command registry (src/commands.ts)
+// must register each one so nothing the parser understands is invisible to
+// the palette or the unknown-command suggester.
+export const INTENT_NAMES: IntentName[] = [
+  "help", "pipeline", "deals", "deal_detail", "kpis", "tasks",
+  "contacts", "companies", "brief", "hygiene", "webhooks", "hooks",
+  "deliveries", "activities", "notes",
+  "add_deal", "move_deal", "set_deal_field", "close_deal", "delete_deal",
+  "add_contact", "add_company", "add_task", "complete_task", "reopen_task",
+  "delete_task", "remind_add", "remind_list", "remind_cancel", "import_contacts",
+  "capture",
+  "ocr_read", "handwriting", "save_note",
+  "prep_brief",
+  "analyze_pipeline", "forecast", "plan_day", "plan_week", "plan_breakdown",
+  "sales_cycle", "top_deals", "campaign_stats", "closing_soon",
+  "pin_widget",
+  "contact_detail", "search", "add_note", "add_campaign",
+  "save_routine", "run_routine", "list_routines", "delete_routine", "show_routine",
+  "schedule_add", "list_schedules", "unschedule", "pause_schedule", "resume_schedule",
+  "trigger_add", "list_triggers", "delete_trigger", "trigger_help", "list_runs",
+  "list_workspaces", "switch_workspace", "current_workspace",
+  "chat_session",
+  "list_recons", "meridian_dossier", "meridian_entities", "meridian_request",
+  "list_stages", "add_stage", "rename_stage", "delete_stage", "move_stage",
+  "add_custom_field", "set_custom_field", "show_custom_fields", "delete_custom_field",
+  "confirm_yes", "confirm_no", "choose_number",
+  "disambiguate_intent",
+  "tutorial",
+  "wizard_start", "undo", "deal_journey", "task_blockers", "duplicates", "deals_by_source",
+  "unknown",
+];
 
 const STAGE_ALIASES: Record<string, string> = {
   prospecting: "prospecting", prospect: "prospecting",
@@ -257,6 +295,7 @@ export function parseIntent(raw: string): Intent {
   // ---- conversational control ------------------------------------------------
   if (/^(yes|yep|yeah|y|sure|do it|confirm|go ahead|ok|okay)$/.test(text)) return { name: "confirm_yes", raw, text, slots };
   if (/^(no|nope|nah|cancel|never mind|nevermind|abort)$/.test(text)) return { name: "confirm_no", raw, text, slots };
+  if (/^(undo|undo that|undo last|undo the last (?:change|action))$/.test(text)) return { name: "undo", raw, text, slots };
   let m = text.match(/^(?:number |option |#)?([1-9])$/) || text.match(/(?:choose|pick|select|option|number)\s+([1-9])\b/);
   if (m) return { name: "choose_number", raw, text, slots: { n: m[1] } };
 
@@ -373,9 +412,14 @@ export function parseIntent(raw: string): Intent {
   else if (/^(incoming hooks?|inbound hooks?|zapier|n8n|make hooks?)$/.test(text)) set("hooks");
   else if (/^(deliveries|webhook deliveries|delivery log)$/.test(text)) set("deliveries");
   else if (/^(list |show |get |all )?(companies|accounts)$/.test(text)) set("companies");
+  else if ((m = text.match(/^(?:list |show |get |all )?companies?(?: (?:named|called|like|for) (.+))?$/))) set("companies", m[1] ? { search: m[1] } : {});
   else if (/^(tasks?|to-?dos?|my tasks?|open tasks?|pending tasks?|what'?s (on|due)|due (today|tomorrow|this week))$/.test(text)) set("tasks");
   else if (/^(completed tasks?|done tasks?|finished tasks?)$/.test(text)) set("tasks", { filter: "done" });
   else if (/^(deals?|opportunities|open deals?|all deals?|my deals?)$/.test(text)) set("deals");
+  else if ((m = text.match(/^deals from (.+)$/))) set("deals_by_source", { source: m[1].trim() });
+  else if (/^(?:show|list|find|check)(?: me)? duplicates$/.test(text)) set("duplicates");
+  else if ((m = text.match(/^(?:what'?s|whats|what is) blocking (.+?)\??$/))) set("task_blockers", { query: m[1].trim() });
+  else if ((m = text.match(/^why is (.+?) blocked\??$/))) set("task_blockers", { query: m[1].trim() });
   else if ((m = text.match(new RegExp(`^(?:show |list |get )?(${STAGE_WORDS}) deals?$`)))) set("deals", { stage: parseStage(m[1])! });
   else if ((m = text.match(new RegExp(`^(?:list |show |get |all )?${DEAL_WORD}s? in (\\w[\\w ]*)$`)))) {
     // hardcoded aliases resolve here; custom/editable stages resolve in
@@ -392,9 +436,12 @@ export function parseIntent(raw: string): Intent {
     else set("deals", { stage_name: m[1] });
   }
   else if ((m = text.match(/^(?:list |show |get |find |search )?contacts?(?: (?:named|called|like|for) (.+))?$/))) set("contacts", m[1] ? { search: m[1] } : {});
+  else if ((m = text.match(/^(?:deal journey|journey)(?: for| of)? (.+)$/))) set("deal_journey", { query: stripDealWord(m[1].trim()) });
+  else if ((m = text.match(/^show (?:the )?journey (?:for|of) (.+)$/))) set("deal_journey", { query: stripDealWord(m[1].trim()) });
   else if ((m = text.match(new RegExp(`^(?:show|get|open|display|tell me about) ${DEAL_WORD} (.+)$`)))) set("deal_detail", { query: m[1] });
   else if ((m = text.match(/^(?:show|get|find|lookup|tell me about) contact (.+)$/))) set("contact_detail", { query: m[1] });
   else if ((m = text.match(/^(?:who is|who'?s) (.+)$/))) set("contact_detail", { query: m[1] });
+  else if ((m = text.match(/^(?:what'?s|whats|show|get) (his|her|their|its) (email|phone|number)$/))) set("contact_detail", { query: m[1], field: m[2] });
   else if ((m = text.match(/^(?:show|get|find) company (.+)$/))) set("companies", { search: m[1] });
   else if ((m = text.match(/^(?:show|get|list) tasks?(?: for| about| on)? (.+)$/))) set("tasks", { search: m[1] });
   else if ((m = text.match(/^search (.+)$/))) set("search", { query: m[1] });
@@ -404,6 +451,13 @@ export function parseIntent(raw: string): Intent {
   else if (/^(analyze (this |the |my )?handwriting|handwriting analysis|what does the handwriting (say|show)|describe (this |the |my )?handwriting)$/.test(text)) set("handwriting");
   else if (/^(save note to a deal|save this note|file this note)$/.test(text)) set("save_note");
   else if (/^(my notes|notes|list notes|show notes|saved notes)$/.test(text)) set("notes");
+
+  // ---- guided creation wizards --------------------------------------------------
+  // Bare "new deal" / "new contact" / "new company" / "new task" open the
+  // step-by-step wizard; anything with details after it keeps the old
+  // one-shot matchers below. Only "new" triggers it — "add a deal" with
+  // nothing after it stays unknown (historical behavior).
+  else if ((m = text.match(/^new (deal|contact|company|task)$/))) set("wizard_start", { kind: m[1] });
 
   // ---- deal writes --------------------------------------------------------------
   else if ((m = text.match(new RegExp(`^(?:mark |set )?${DEAL_WORD} (.+?) as (?:closed[ -]?)?(won|lost)$`)))) set("close_deal", { query: m[1], result: m[2] });
@@ -551,6 +605,11 @@ export const HELP_LEVELS: HelpLevel[] = [
     rows: [
       { cmds: [["morning brief", "brief"]], note: "today's digest: pipeline, closing soon, tasks, activity" },
       { cmds: [["my tasks", "tasks"], ["kpis", "kpis"], ["list deals in negotiation", "deals"], ["show negotiation deals", "deals"], ["show deal Acme", "deal_detail"]], note: "" },
+      { cmds: [["deal journey Acme", "deal_journey"], ["deals from Referral", "deals_by_source"]], note: "stage-history timeline and source-filtered deals" },
+      { cmds: [["what's blocking the launch", "task_blockers"], ["show duplicates", "duplicates"]], note: "task blockers; find duplicate contacts & companies" },
+      { cmds: [["new deal", "wizard_start"], ["new contact", "wizard_start"], ["new company", "wizard_start"], ["new task", "wizard_start"]], note: "guided setup — one question at a time, skip or cancel anytime" },
+      { cmds: [["undo", "undo"]], note: "undo the last change in this chat" },
+      { cmds: [["what's her email", "contact_detail"]], note: "pronouns work after discussing someone: it, that deal, her…" },
       { cmds: [["sales cycle", "sales_cycle"], ["top deals", "top_deals"], ["closing soon", "closing_soon"]], note: "where deals stall, biggest open deals, closes in the next 30 days" },
       { cmds: [["campaign stats", "campaign_stats"], ["stale deals", "hygiene"], ["what needs attention", "hygiene"]], note: "campaign win rates & pipeline hygiene" },
       { cmds: [["pin this as a widget", "pin_widget"], ["add widget", "pin_widget"]], note: "pin the last analysis to the Milton tab in exec-crm" },
@@ -617,5 +676,6 @@ export function helpText(): string {
   }
   lines.push("Anything else I don't recognize goes to your LLM if `MILTON_LLM_URL` is set.");
   lines.push("I'll ask before anything destructive, and let you pick when a name matches more than one record.");
+  lines.push("Tip: type `/` in the chat box to browse every command, or say `undo` to reverse your last change.");
   return lines.join("\n");
 }

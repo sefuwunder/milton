@@ -16,6 +16,17 @@ export interface Company { id: number; name: string; industry: string; website: 
 export interface Task {
   id: number; title: string; deal_id: number | null; campaign_id: number | null;
   due_date: string; done: number; owner: string; created_at: string;
+  blocked_by?: { id: number; title: string; done: number }[];
+  is_blocked?: boolean;
+}
+export interface DealHistoryEntry {
+  id: number; from_stage: string | null; to_stage: string | null;
+  created_at: string; from_name?: string | null; to_name?: string | null;
+}
+export interface DuplicatePair {
+  a: { id: number; name: string; email?: string | null };
+  b: { id: number; name: string; email?: string | null };
+  reason: string;
 }
 export interface Kpis { [k: string]: any }
 export interface Activity { id: number; kind: string; text: string; ref_type: string; ref_id: number; created_at: string }
@@ -58,9 +69,22 @@ export async function ping(): Promise<boolean> {
   try { await req("/api/kpis"); return true; } catch { return false; }
 }
 
-export async function getDeals(): Promise<Deal[]> {
-  const j = await req("/api/deals");
+export async function getDeals(source?: string): Promise<Deal[]> {
+  const q = source ? `?source=${encodeURIComponent(source)}` : "";
+  const j = await req(`/api/deals${q}`);
   return j.deals || [];
+}
+export async function getDealSources(): Promise<string[]> {
+  const j = await req("/api/deal-sources");
+  return j.sources || [];
+}
+export async function getDealHistory(id: number): Promise<DealHistoryEntry[]> {
+  const j = await req(`/api/deals/${id}/history`);
+  return j.history || [];
+}
+export async function getDuplicates(type: "contact" | "company"): Promise<DuplicatePair[]> {
+  const j = await req(`/api/duplicates?type=${type}`);
+  return j.pairs || [];
 }
 export async function getContacts(): Promise<Contact[]> {
   const j = await req("/api/contacts");
@@ -162,6 +186,11 @@ export async function createTask(t: Partial<Task>): Promise<Task> {
 }
 export async function patchTask(id: number, t: Partial<Task>): Promise<Task> {
   const j = await req(`/api/tasks/${id}`, "PATCH", t);
+  return j.task;
+}
+/** Flip task completion. Throws on 409 when open blockers exist unless confirm=true. */
+export async function toggleTask(id: number, confirm?: boolean): Promise<Task> {
+  const j = await req(`/api/tasks/${id}/toggle`, "POST", confirm ? { confirm: true } : {});
   return j.task;
 }
 export async function deleteTask(id: number): Promise<void> {

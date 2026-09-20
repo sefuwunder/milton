@@ -22,7 +22,7 @@ beforeAll(async () => {
   els = {};
   ["chat", "chips", "composer", "input", "status-dot", "status-text", "help-btn",
    "cam-btn", "photo-input", "vcf-btn", "vcf-input", "tray", "bell-btn", "bell-badge", "auto-btn",
-   "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "ws-select",
+   "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "ws-select", "palette",
    "session-select", "session-new"].forEach((id) => (els[id] = mkEl("div")));
   (globalThis as any).document = {
     getElementById: (id: string) => els[id] || null,
@@ -71,6 +71,7 @@ describe("cards", () => {
       { kind: "choices", options: [{ n: 1, label: "One", sub: "sub" }] },
       { kind: "confirm", options: [{ n: 1, label: "Yes, delete" }] },
       { kind: "findings", items: [{ icon: "📅", text: "gap" }] },
+      { kind: "suggestions", title: "Did you mean…", items: [{ name: "undo", description: "Undo the last change", usage: "undo" }, { name: "deal_journey", description: "Stage-history timeline for a deal", usage: "deal journey Acme" }] },
       { kind: "transcription", title: "Photo transcription", ocrText: "HELLO 123", confidence: 0.93, script: "print", imageUrl: "/api/file/abc" },
       { kind: "handwriting", title: "Handwriting analysis", metrics: { slantDeg: 8.5, strokeMedian: 4.2, strokeStd: 1.1, heightMean: 22.4, heightStd: 3.3, spacingRatio: 2.8, baselineDrift: -1.2, inkDensity: 0.14, chars: 42, words: 9, lines: 3 }, notes: ["Slant: leans right by 8.5°."], imageUrl: "/api/file/abc" },
     ];

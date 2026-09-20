@@ -15,6 +15,8 @@ import * as reconRuns from "./recon_runs";
 import * as dealNotes from "./deal_notes";
 import { hookSecret } from "./hookauth";
 import { TUTORIAL_STEPS, tutorialControl, tutorialFollowup, type TutorialState, type TutorialAction } from "./tutorial";
+import * as usability from "./usability";
+import { suggestCommands } from "./commands";
 
 export interface Card {
   kind: "deals" | "pipeline" | "kpis" | "tasks" | "contacts" | "companies" | "activities" | "webhooks" | "choices" | "confirm" | "findings" | "transcription" | "handwriting";
@@ -229,8 +231,141 @@ export async function handleMessage(session: Session, raw: string, opts: Message
   return wss.runWithWorkspace(session.workspaceId ?? null, () => handleMessageScoped(session, raw, opts));
 }
 
+// ---- guided creation wizards + undo ------------------------------------------------
+// Wizards keep multi-turn state per named chat session (usability.ts); bare
+// "new deal" etc. start them. Undo pops the per-session journal — it is never
+// journaled itself, and has no redo.
+
+/** Start (or restart) a guided creation wizard. */
+function startWizard(session: Session, kind: string): Reply {
+  const def = usability.WIZARDS[kind];
+  if (!def) {
+    return {
+      text: "I can walk you through a new deal, contact, company, or task — which one?",
+      chips: ["New deal", "New contact", "New company", "New task"],
+    };
+  }
+  const wiz = { kind, step: 0, data: {} as Record<string, string> };
+  usability.setWizard(session.id, wiz);
+  const p = usability.wizardPrompt(wiz);
+  return { text: p.text, chips: p.chips };
+}
+
+/** Finish a completed wizard by running the same one-shot create path. */
+async function finishWizard(session: Session, kind: string, slots: Record<string, string>): Promise<Reply> {
+  usability.clearWizard(session.id);
+  if (kind === "deal") return addDealReply(session, slots);
+  if (kind === "contact") return addContactReply(session, slots);
+  if (kind === "company") return addCompanyReply(session, slots);
+  return addTaskReply(session, slots);
+}
+
+/** Run one undo: pop the journal, apply the inverse. Not itself journaled. */
+async function runUndo(session: Session): Promise<Reply> {
+  const e = usability.popUndo(session.id);
+  if (!e) {
+    return { text: "Nothing to undo — no changes yet in this chat.", chips: HELP_CHIPS.slice(0, 3) };
+  }
+  const inv = e.inverse || {};
+  if (inv.undoable === false) {
+    return { text: `I can't undo that one: ${inv.why || "it isn't reversible"}. (${e.label})`, chips: ["Help"] };
+  }
+  try {
+    switch (inv.op) {
+      case "delete_deal": await crm.deleteDeal(inv.id); break;
+      case "set_stage": await crm.patchDeal(inv.id, { stage: inv.stage }); break;
+      case "patch_deal": await crm.patchDeal(inv.id, inv.patch); break;
+      case "recreate_deal": {
+        const s = inv.snapshot || {};
+        await crm.createDeal({
+          title: s.title, value: s.value, stage: s.stage, probability: s.probability,
+          expected_close: s.expected_close, owner: s.owner, company_id: s.company_id,
+          contact_id: s.contact_id, campaign_id: s.campaign_id,
+        });
+        break;
+      }
+      case "delete_task": await crm.deleteTask(inv.id); break;
+      case "delete_tasks":
+        for (const id of inv.ids || []) {
+          try { await crm.deleteTask(id); } catch { /* undo as much as possible */ }
+        }
+        break;
+      case "set_task_done": await crm.toggleTask(inv.id); break; // inverse of a toggle is another toggle
+      case "recreate_task": {
+        const s = inv.snapshot || {};
+        await crm.createTask({ title: s.title, due_date: s.due_date, deal_id: s.deal_id, owner: s.owner });
+        break;
+      }
+      case "delete_stage": await crm.deleteStage(inv.slug); break;
+      case "rename_stage": await crm.patchStage(inv.slug, { name: inv.name }); break;
+      case "move_stage_back": await crm.patchStage(inv.slug, { position: inv.position }); break;
+      case "set_cf_value": await crm.setCustomFieldValue(inv.field_id, inv.entity_id, inv.value ?? ""); break;
+      case "delete_custom_field": await crm.deleteCustomField(inv.id); break;
+      case "cancel_reminder": auto.cancelReminder(inv.id, session.id); break;
+      case "recreate_reminder": auto.createReminder(session.id, inv.text, inv.fireAt); break;
+      case "remove_session_note":
+        session.notes = (session.notes || []).filter((n) => !(n.dealId === inv.dealId && n.at === inv.at));
+        break;
+      case "delete_deal_note": dealNotes.deleteDealNote(inv.id); break;
+      case "delete_contacts": // not supported by exec-crm — handled by undoable:false above
+      default: return { text: `I don't know how to undo that one (${e.label}).`, chips: ["Help"] };
+    }
+  } catch (err: any) {
+    return { text: `Couldn't undo "${e.label}": ${String(err?.message || err)}`, chips: ["Help"] };
+  }
+  return { text: `Undid: ${e.label}.`, chips: ["Show pipeline", "My tasks"] };
+}
+
+/** Small helper: journal a mutation with its inverse op. */
+function jpush(session: Session, label: string, inverse: any): void {
+  usability.pushUndo(session.id, label, inverse);
+}
+
 async function handleMessageScoped(session: Session, raw: string, opts: MessageOpts = {}): Promise<Reply> {
-  const intent = parseIntentFuzzy(raw);
+  let intent = parseIntentFuzzy(raw);
+
+  // 0) guided creation wizard owns the turn while active
+  {
+    const wiz = usability.getWizard(session.id);
+    if (wiz) {
+      const t = raw.trim().toLowerCase();
+      if (t === "cancel") {
+        usability.clearWizard(session.id);
+        return { text: "Wizard cancelled — nothing was created.", chips: HELP_CHIPS.slice(0, 3) };
+      }
+      if (intent.name === "wizard_start") return startWizard(session, intent.slots.kind || "deal");
+      if (intent.name === "undo") {
+        const r = await runUndo(session);
+        const w2 = usability.getWizard(session.id);
+        const p = w2 ? usability.wizardPrompt(w2) : null;
+        return { text: r.text + (p ? `\n\n---\n${p.text}` : ""), chips: p ? p.chips : ["Help"] };
+      }
+      if (t === "skip" || intent.name === "unknown" || intent.name === "disambiguate_intent") {
+        // a wizard answer (or skip): feed it into the wizard. Ambiguous input
+        // mid-wizard is most likely an answer attempt, not a real question.
+        const turn = usability.wizardAnswer(session.id, wiz, t === "skip" ? "__skip__" : raw);
+        if (turn.finished) return finishWizard(session, turn.kind!, turn.slots!);
+        return { text: turn.reply!.text, chips: turn.reply!.chips };
+      }
+      // escape hatch: a different valid intent — answer it, then resume the wizard
+      const r = await dispatch(session, intent, { ...opts, raw });
+      const w2 = usability.getWizard(session.id);
+      const p = w2 ? usability.wizardPrompt(w2) : null;
+      return { ...r, text: r.text + (p ? `\n\n---\n${p.text}` : "") };
+    }
+  }
+
+  // 0b) pronoun resolution: "it", "that deal", "her" -> most recent mention of that type
+  {
+    const pr = usability.applyPronouns(session.id, intent);
+    intent = pr.intent;
+    if (pr.missing) {
+      return {
+        text: `Which ${pr.missing} do you mean? I don't have a recent one in this conversation — name it and I'll remember.`,
+        chips: pr.missing === "deal" ? ["Show pipeline"] : pr.missing === "task" ? ["My tasks"] : pr.missing === "contact" ? ["List contacts"] : ["List companies"],
+      };
+    }
+  }
 
   // 1) resolve an outstanding disambiguation choice
   if (session.choice && intent.name === "choose_number") {
@@ -345,7 +480,7 @@ async function dispatchChoice(session: Session, ch: ChoiceState, id: number | st
     const contacts = await crm.getContacts();
     const c = contacts.find((x) => x.id === id);
     if (!c) return { text: "That contact seems to be gone — try again." };
-    return contactDetailCard(session, c);
+    return contactDetailCard(session, c, ch.then.payload?.field);
   }
   if (ch.kind === "task") {
     const tasks = await crm.getTasks();
@@ -401,20 +536,34 @@ async function dispatchChoice(session: Session, ch: ChoiceState, id: number | st
 
 async function runPending(session: Session, p: PendingAction): Promise<Reply> {
   if (p.type === "delete_deal") {
+    const snap = (await crm.getDeals()).find((d) => d.id === p.payload.id);
     await crm.deleteDeal(p.payload.id);
+    if (snap) jpush(session, `Deleted deal "${p.label}"`, { op: "recreate_deal", snapshot: snap });
     return { text: `Deleted deal "${p.label}".`, chips: ["Show pipeline", "List deals"] };
   }
   if (p.type === "close_lost") {
+    const before = (await crm.getDeals()).find((d) => d.id === p.payload.id);
     const deal = await crm.patchDeal(p.payload.id, { stage: "closed_lost" });
+    if (before) jpush(session, `Marked "${deal.title}" as lost`, { op: "patch_deal", id: deal.id, patch: { stage: before.stage } });
     return { text: `Marked "${deal.title}" as lost.`, cards: [dealCard(deal)], chips: ["Show pipeline", "Morning brief"] };
   }
   if (p.type === "close_won") {
+    const before = (await crm.getDeals()).find((d) => d.id === p.payload.id);
     const deal = await crm.patchDeal(p.payload.id, { stage: "closed_won", probability: 100 });
+    if (before) jpush(session, `Marked "${deal.title}" as won`, { op: "patch_deal", id: deal.id, patch: { stage: before.stage, probability: before.probability } });
     return { text: `🎉 "${deal.title}" is **won** — ${fmtMoney(deal.value)} in the books.`, cards: [dealCard(deal)], chips: ["Show pipeline", "Morning brief"] };
   }
   if (p.type === "delete_task") {
+    const snap = (await crm.getTasks()).find((t) => t.id === p.payload.id);
     await crm.deleteTask(p.payload.id);
+    if (snap) jpush(session, `Deleted task "${p.label}"`, { op: "recreate_task", snapshot: snap });
     return { text: `Deleted task "${p.label}".`, chips: ["My tasks"] };
+  }
+  if (p.type === "complete_blocked_task") {
+    const t = await crm.toggleTask(p.payload.id, true);
+    jpush(session, `Completed "${t.title}" over its blockers`, { op: "set_task_done", id: t.id });
+    usability.trackMention(session.id, "task", t.id, t.title);
+    return { text: `✅ "${t.title}" done (completed over its blockers).`, chips: ["My tasks", "Morning brief"] };
   }
   if (p.type === "delete_custom_field") {
     await crm.deleteCustomField(p.payload.id);
@@ -428,7 +577,7 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
   if (p.type === "capture") return captureSave(session, p.payload as CapturePayload);
   if (p.type === "plan_tasks") return planTasksSave(session, p.payload as { goal: string; steps: string[] });
   if (p.type === "vcard_import") {
-    return vcardImportRun(p.payload.cards as ParsedVCard[]);
+    return vcardImportRun(session, p.payload.cards as ParsedVCard[]);
   }
   if (p.type === "delete_chat_session") {
     const { name, remaining } = chats.deleteChatSession(p.payload.id);
@@ -444,6 +593,7 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
   }
   if (p.type === "reminder_add") {
     const r = auto.createReminder(session.id, String(p.payload.text), Number(p.payload.fireAt));
+    jpush(session, `Set a reminder to ${r.text}`, { op: "cancel_reminder", id: r.id });
     return { text: `⏰ I'll remind you to **${r.text}** ${formatWhen(r.fire_at)}.`, chips: ["Reminders"] };
   }
   if (p.type === "routine_run") {
@@ -1288,7 +1438,10 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
     case "help": return { text: helpText(), chips: HELP_CHIPS };
     case "pipeline": return pipelineReply();
     case "deals": return dealsReply(s.stage, s.search, s.stage_name);
+    case "deals_by_source": return dealsBySourceReply(s.source || "");
+    case "duplicates": return duplicatesReply();
     case "deal_detail": return dealDetailReply(session, s.query);
+    case "deal_journey": return dealByName(session, s.query, "deal_journey", {});
     case "kpis": return withWidget(session, kpisReply());
     case "tasks": return tasksReply(s.filter, s.search);
     case "contacts": return contactsReply(s.search);
@@ -1306,7 +1459,7 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
     case "campaign_stats": return withWidget(session, campaignStatsReply());
     case "closing_soon": return withWidget(session, closingSoonReply());
     case "pin_widget": return pinWidgetReply(session);
-    case "contact_detail": return contactDetailReply(session, s.query || "");
+    case "contact_detail": return contactDetailReply(session, s.query || "", s.field);
     case "search": return searchReply(s.query || "");
     case "activities": return activitiesReply();
     case "webhooks": return webhooksReply();
@@ -1358,7 +1511,7 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
       return handwritingReply(photo);
     case "save_note": return saveNoteReply(session);
 
-    case "add_deal": return addDealReply(s);
+    case "add_deal": return addDealReply(session, s);
     case "move_deal": return dealByName(session, s.query, "move_deal", { stage: s.stage });
     case "close_deal": return dealByName(session, s.query, "close_deal", { result: s.result });
     case "delete_deal": return dealByName(session, s.query, "delete_deal", {});
@@ -1377,14 +1530,10 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
     case "show_custom_fields": return showCustomFieldsReply(session, s);
     case "delete_custom_field": return deleteCustomFieldReply(session, s);
 
-    case "add_contact": return addContactReply(s);
+    case "add_contact": return addContactReply(session, s);
+    case "add_company": return addCompanyReply(session, s);
     case "capture": return captureReply(session, s.rest || "");
     case "import_contacts": return importContactsReply(session, opts);
-    case "add_company": {
-      if (!s.name) return { text: "What should the company be called?" };
-      const c = await crm.createCompany({ name: s.name });
-      return { text: `Added company "${c.name}".`, chips: ["List companies", `Add contact … at ${c.name}`] };
-    }
     case "add_task": return addTaskReply(session, s);
     case "remind_add": return remindAddReply(session, s.rest || "");
     case "remind_list": return remindListReply(session);
@@ -1392,29 +1541,41 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
     case "complete_task": return taskByName(session, s.query, "complete_task", {});
     case "reopen_task": return taskByName(session, s.query, "reopen_task", {});
     case "delete_task": return taskByName(session, s.query, "delete_task", {});
+    case "task_blockers": return taskByName(session, s.query, "task_blockers", {});
+    case "wizard_start": return startWizard(session, s.kind || "deal");
+    case "undo": return runUndo(session);
 
     case "confirm_yes":
     case "confirm_no":
     case "choose_number":
       return { text: "There's nothing pending right now.", chips: HELP_CHIPS.slice(0, 3) };
 
-    case "unknown": {
-      const llm = await llmReply(intent.raw, session.history);
-      if (llm.ok) return { text: llm.text, chips: ["Show pipeline", "Morning brief", "Help"] };
-      if (llmBase()) {
-        // LLM is configured but the call failed — say so plainly instead of
-        // pretending the question was just unrecognized.
-        return {
-          text: `I couldn't reach the language model (${llm.error}) — check MILTON_LLM_MODEL against \`ollama list\` if the model name looks wrong.`,
-          chips: ["Show pipeline", "Morning brief", "Help"],
-        };
-      }
-      return {
-        text: `I'm not sure what you mean by "${intent.raw}". I work best with direct commands — try one of these, or type "help" for the full list.`,
-        chips: ["Show pipeline", "Morning brief", "My tasks", "Help"],
-      };
-    }
+    case "unknown": return unknownReply(session, intent);
+    default: return unknownReply(session, intent); // dispatch stays total: never undefined
   }
+}
+
+/** Graceful unknown-input reply: three closest registry commands as fill-in chips. */
+async function unknownReply(session: Session, intent: Intent): Promise<Reply> {
+  const llm = await llmReply(intent.raw, session.history);
+  if (llm.ok) return { text: llm.text, chips: ["Show pipeline", "Morning brief", "Help"] };
+  // graceful failure: suggest the three closest registry commands as
+  // tappable chips ("/"-prefixed chips fill the input instead of sending).
+  const suggCmds = suggestCommands(intent.raw, 3);
+  const sugg = suggCmds.map((c) => "/" + c.usage);
+  if (llmBase()) {
+    // LLM is configured but the call failed — say so plainly instead of
+    // pretending the question was just unrecognized.
+    return {
+      text: `I couldn't reach the language model (${llm.error}) — check MILTON_LLM_MODEL against \`ollama list\` if the model name looks wrong.\n\nOr try one of these:`,
+      chips: sugg.length ? sugg : ["Show pipeline", "Morning brief", "Help"],
+    };
+  }
+  return {
+    text: `I'm not sure what you mean by "${intent.raw}". Did you mean one of these? (tap to fill it in, or type \`help\` for the full list)`,
+    chips: sugg.length ? sugg : ["Show pipeline", "Morning brief", "My tasks", "Help"],
+    ...(suggCmds.length ? { cards: [{ kind: "suggestions", title: "Did you mean…", items: suggCmds } as any] } : {}),
+  };
 }
 
 // ---- photo OCR + handwriting executors ---------------------------------------------
@@ -1601,6 +1762,7 @@ async function dealDetailReply(session: Session, query: string): Promise<Reply> 
   if (!query) return { text: "Which deal? Try `show deal Acme`." };
   const { deal, matches } = await pickDeal(query);
   if (deal) {
+    usability.trackMention(session.id, "deal", deal.id, deal.title);
     const lines = [`"${deal.title}" at a glance:`, ...dealNotesLines(deal, session)];
     return { text: lines.join("\n"), cards: [dealCard(deal)], chips: [`Move ${deal.title} to negotiation`, `Set ${deal.title} value to …`, "Show pipeline"] };
   }
@@ -1753,6 +1915,7 @@ async function addCustomFieldReply(session: Session, s: Record<string, string>):
   }
   try {
     const f = await crm.addCustomField(et, name, ft);
+    jpush(session, `Added custom field "${f.name}"`, { op: "delete_custom_field", id: f.id });
     return {
       text: `Added custom field **${f.name}** (${f.field_type}) to ${cfPlural(et)}.${inferred}`,
       chips: [`List custom fields for ${cfPlural(et)}`, "Help"],
@@ -1783,11 +1946,17 @@ async function setCustomFieldWith(session: Session, et: CfEntityType, field: crm
 }
 async function setCustomFieldWithEntity(session: Session, et: CfEntityType, field: { id: number; name: string; field_type: string },
   entityId: number, entityName: string, value: string): Promise<Reply> {
+  let old: string | null = null;
+  try {
+    const vals = await crm.getCustomFieldValues(et, entityId);
+    old = (vals.find((f) => f.id === field.id)?.value ?? null) as string | null;
+  } catch { /* best-effort undo baseline */ }
   try {
     await crm.setCustomFieldValue(field.id, entityId, value);
   } catch (e) {
     return { text: cfFriendlyError(e, "save that value") };
   }
+  jpush(session, `Set ${field.name} for ${et} "${entityName}"`, { op: "set_cf_value", field_id: field.id, entity_id: entityId, value: old });
   return {
     text: `Set **${field.name}** to ${cfShowValue({ ...field, value })} for ${et} "${entityName}".`,
     chips: [`Show custom fields for ${et} ${entityName}`, "Help"],
@@ -2198,22 +2367,31 @@ function dealNotesLines(deal: crm.Deal, session: Session): string[] {
   ];
 }
 
-async function contactDetailReply(session: Session, query: string): Promise<Reply> {
+async function contactDetailReply(session: Session, query: string, field?: string): Promise<Reply> {
   if (!query) return { text: "Which contact? Try `who is Jane Doe`.", chips: ["List contacts"] };
   const matches = await crm.resolveContact(query);
   const need = await needOne(matches, "contact",
     (c) => c.name, (c) => c.company_name || c.email || "",
-    { action: "contact_detail", payload: {} }, "contact");
-  if (need.item) return contactDetailCard(session, need.item as crm.Contact);
+    { action: "contact_detail", payload: { field } }, "contact");
+  if (need.item) return contactDetailCard(session, need.item as crm.Contact, field);
   session.choice = {
     kind: "contact",
     options: matches.slice(0, 5).map((m, i) => ({ id: m.item.id, n: i + 1, label: m.item.name, sub: m.item.company_name || m.item.email || "" })),
-    then: { action: "contact_detail", payload: {} },
+    then: { action: "contact_detail", payload: { field } },
   };
   return need.reply!;
 }
 
-async function contactDetailCard(session: Session, c: crm.Contact): Promise<Reply> {
+async function contactDetailCard(session: Session, c: crm.Contact, field?: string): Promise<Reply> {
+  usability.trackMention(session.id, "contact", c.id, c.name);
+  if (field) {
+    // "what's her email" / "his phone" after a pronoun pass
+    const val = field === "email" ? c.email : c.phone;
+    return {
+      text: val ? `${c.name}'s ${field}: **${val}**` : `${c.name} has no ${field} on file.`,
+      chips: [`Who is ${c.name}`, "List contacts"],
+    };
+  }
   const [deals, companies, tasks] = await Promise.all([crm.getDeals(), crm.getCompanies(), crm.getTasks()]);
   const company = c.company_id ? companies.find((x) => x.id === c.company_id) : undefined;
   const linked = deals
@@ -2749,12 +2927,14 @@ async function planBreakdownReply(session: Session, goal: string): Promise<Reply
 }
 
 async function planTasksSave(session: Session, payload: { goal: string; steps: string[] }): Promise<Reply> {
-  let created = 0;
+  const ids: number[] = [];
   for (const step of payload.steps) {
-    await crm.createTask({ title: step });
-    created++;
+    const t = await crm.createTask({ title: step });
+    ids.push(t.id);
+    usability.trackMention(session.id, "task", t.id, t.title);
   }
-  return { text: `Created ${created} task${created === 1 ? "" : "s"} for "${payload.goal}".`, chips: ["My tasks", "Plan my day"] };
+  jpush(session, `Planned ${ids.length} tasks for "${payload.goal}"`, { op: "delete_tasks", ids });
+  return { text: `Created ${ids.length} task${ids.length === 1 ? "" : "s"} for "${payload.goal}".`, chips: ["My tasks", "Plan my day"] };
 }
 function dealCard(d: crm.Deal): Card {
   return {
@@ -2815,6 +2995,7 @@ async function addStageReply(session: Session, s: Record<string, string>): Promi
   }
   try {
     const st = await crm.addStage(name, s.pos && ref ? { [s.pos]: ref.slug } : {});
+    jpush(session, `Added stage "${st.name}"`, { op: "delete_stage", slug: st.slug });
     const where = s.pos && ref ? ` ${s.pos} **${ref.name}**` : " at the end";
     return { text: `Added stage **${st.name}**${where} of the pipeline.`, chips: ["Stages", "Show pipeline"] };
   } catch (e: any) {
@@ -2849,6 +3030,7 @@ async function stageAction(session: Session, action: string, stage: crm.Stage, p
     if (!name) return { text: "What should it be renamed to?" };
     try {
       const st = await crm.patchStage(stage.slug, { name });
+      jpush(session, `Renamed stage "${stage.name}"`, { op: "rename_stage", slug: stage.slug, name: stage.name });
       return { text: `Renamed "${stage.name}" → **${st.name}**.`, chips: ["Stages", "Show pipeline"] };
     } catch (e: any) {
       return { text: friendlyStageError(e, "rename the stage") };
@@ -2860,6 +3042,7 @@ async function stageAction(session: Session, action: string, stage: crm.Stage, p
     if (r.stage.slug === stage.slug) return { text: "That's the same stage — pick a different one." };
     try {
       await crm.patchStage(stage.slug, { [payload.pos]: r.stage.slug });
+      jpush(session, `Moved stage "${stage.name}"`, { op: "move_stage_back", slug: stage.slug, position: stage.position });
       return { text: `Moved **${stage.name}** ${payload.pos} **${r.stage.name}**.`, chips: ["Stages", "Show pipeline"] };
     } catch (e: any) {
       return { text: friendlyStageError(e, "move the stage") };
@@ -2883,10 +3066,14 @@ async function stageAction(session: Session, action: string, stage: crm.Stage, p
 }
 
 async function dealAction(session: Session, action: string, deal: crm.Deal, payload: any): Promise<Reply> {
+  usability.trackMention(session.id, "deal", deal.id, deal.title);
   if (action === "move_deal") {
+    const from = deal.stage;
     const d = await crm.patchDeal(deal.id, { stage: payload.stage });
+    jpush(session, `Moved "${d.title}" to ${stageLabel(d.stage)}`, { op: "set_stage", id: deal.id, stage: from });
     return { text: `Moved "${d.title}" to **${stageLabel(d.stage)}**.`, cards: [dealCard(d)], chips: ["Show pipeline", "Morning brief"] };
   }
+  if (action === "deal_journey") return dealJourneyReply(deal);
   if (action === "close_deal") {
     const won = payload.result === "won";
     // Both directions ask first: closing moves pipeline state and money.
@@ -2936,6 +3123,9 @@ async function dealAction(session: Session, action: string, deal: crm.Deal, payl
       patch.contact_id = ms[0].item.id;
     }
     const d = await crm.patchDeal(deal.id, patch);
+    const before: any = {};
+    for (const k of Object.keys(patch)) before[k] = (deal as any)[k];
+    jpush(session, `Updated "${d.title}"`, { op: "patch_deal", id: deal.id, patch: before });
     return { text: `Updated "${d.title}".`, cards: [dealCard(d)], chips: ["Show pipeline"] };
   }
   if (action === "save_note") {
@@ -2945,6 +3135,7 @@ async function dealAction(session: Session, action: string, deal: crm.Deal, payl
       uploadId: payload.uploadId, at: new Date().toISOString(),
     };
     session.notes = [...(session.notes || []), note].slice(-20);
+    jpush(session, `Filed a note on "${deal.title}"`, { op: "remove_session_note", dealId: deal.id, at: note.at });
     return {
       text: `Saved to **"${deal.title}"** — ${(session.notes || []).length} note${(session.notes || []).length === 1 ? "" : "s"} filed this session.`,
       cards: [dealCard(deal)], chips: ["My notes", "Morning brief", "Show pipeline"],
@@ -2957,7 +3148,8 @@ async function dealAction(session: Session, action: string, deal: crm.Deal, payl
   if (action === "add_note") {
     const text = String(payload.text || "").trim().slice(0, 2000);
     if (!text) return { text: `What should I note on "${deal.title}"? Try \`note on ${deal.title}: <text>\`.` };
-    dealNotes.addDealNote(deal.id, text, session.workspaceId ?? null);
+    const note = dealNotes.addDealNote(deal.id, text, session.workspaceId ?? null);
+    jpush(session, `Noted on "${deal.title}"`, { op: "delete_deal_note", id: note.id });
     const n = dealNotes.countDealNotes(deal.id, session.workspaceId ?? null);
     return {
       text: `📝 Noted on **"${deal.title}"** — "${text.length > 120 ? text.slice(0, 120) + "…" : text}" (${n} note${n === 1 ? "" : "s"} on this deal).`,
@@ -2967,12 +3159,14 @@ async function dealAction(session: Session, action: string, deal: crm.Deal, payl
   }
   if (action === "add_task_deal") {
     const t = await crm.createTask({ title: payload.title, due_date: payload.due || "", deal_id: deal.id });
+    jpush(session, `Added task "${t.title}"`, { op: "delete_task", id: t.id });
+    usability.trackMention(session.id, "task", t.id, t.title);
     return { text: `Added task "${t.title}" linked to deal "${deal.title}".`, chips: ["My tasks", "Morning brief"] };
   }
   return { text: "I lost track of that action — try again." };
 }
 
-async function addDealReply(s: Record<string, string>): Promise<Reply> {
+async function addDealReply(session: Session, s: Record<string, string>): Promise<Reply> {
   if (!s.title) return { text: "What's the deal called? Try `add deal Website redesign for Acme worth 50k`." };
   const patch: any = { title: s.title, stage: "prospecting" };
   if (s.value) patch.value = Number(s.value);
@@ -2982,11 +3176,13 @@ async function addDealReply(s: Record<string, string>): Promise<Reply> {
     if (ms.length) patch.company_id = ms[0].item.id;
   }
   const d = await crm.createDeal(patch);
+  jpush(session, `Created deal "${d.title}"`, { op: "delete_deal", id: d.id });
+  usability.trackMention(session.id, "deal", d.id, d.title);
   const note = s.company && !patch.company_id ? ` (I couldn't find a company matching "${s.company}" — deal created without one.)` : "";
   return { text: `Created deal "${d.title}"${d.value ? ` worth ${fmtMoney(d.value)}` : ""}${d.expected_close ? `, closing ${d.expected_close}` : ""}.${note}`, cards: [dealCard(d)], chips: ["Show pipeline", `Move ${d.title} to qualification`] };
 }
 
-async function addContactReply(s: Record<string, string>): Promise<Reply> {
+async function addContactReply(session: Session, s: Record<string, string>): Promise<Reply> {
   if (!s.name) return { text: "Who should I add? Try `add contact Jane Doe at Acme`." };
   const patch: any = { name: s.name };
   if (s.email) patch.email = s.email;
@@ -2996,7 +3192,23 @@ async function addContactReply(s: Record<string, string>): Promise<Reply> {
     if (ms.length) patch.company_id = ms[0].item.id;
   }
   const c = await crm.createContact(patch);
+  // exec-crm has no contact DELETE endpoint, so creation can't be honestly
+  // undone — mark it explicitly instead of pretending.
+  jpush(session, `Added contact "${c.name}"`, { op: "delete_contact", id: c.id, undoable: false, why: "exec-crm has no contact delete endpoint" });
+  usability.trackMention(session.id, "contact", c.id, c.name);
   return { text: `Added contact "${c.name}"${c.email ? ` (${c.email})` : ""}.`, chips: ["List contacts", "Show pipeline"] };
+}
+
+async function addCompanyReply(session: Session, s: Record<string, string>): Promise<Reply> {
+  if (!s.name) return { text: "What should the company be called?" };
+  const patch: any = { name: s.name };
+  if (s.industry) patch.industry = s.industry;
+  if (s.website) patch.website = s.website;
+  const c = await crm.createCompany(patch);
+  // exec-crm has no company DELETE endpoint — mark explicitly, don't pretend.
+  jpush(session, `Added company "${c.name}"`, { op: "delete_company", id: c.id, undoable: false, why: "exec-crm has no company delete endpoint" });
+  usability.trackMention(session.id, "company", c.id, c.name);
+  return { text: `Added company "${c.name}".`, chips: ["List companies", `Add contact … at ${c.name}`] };
 }
 
 // ---- conversational capture -----------------------------------------------------------
@@ -3076,6 +3288,13 @@ async function captureSave(session: Session, p: CapturePayload): Promise<Reply> 
   };
   if (companyId) dealPatch.company_id = companyId;
   const deal = await crm.createDeal(dealPatch);
+  // undo removes the deal draft (exec-crm has no contact/company delete
+  // endpoint, so those two creations are stated, not pretended)
+  jpush(session, `Captured ${p.name} (contact${companyName ? " + company" : ""} + deal draft)`,
+    { op: "delete_deal", id: deal.id });
+  usability.trackMention(session.id, "contact", contact.id, contact.name);
+  usability.trackMention(session.id, "deal", deal.id, deal.title);
+  if (companyId) usability.trackMention(session.id, "company", companyId, companyName || p.company);
   return {
     text: `Saved ✅ **${p.name}**${companyName ? ` at **${companyName}**` : ""} — contact added and deal draft **"${deal.title}"** opened in ${stages[0]?.name || "the first stage"}.`,
     chips: ["Show pipeline", "List contacts"],
@@ -3133,7 +3352,7 @@ async function importContactsReply(session: Session, opts: MessageOpts): Promise
 
 /** Confirmed vCard import: dedupe by email against the session workspace, then
  *  create each contact. Never throws the whole batch away on one failure. */
-async function vcardImportRun(cards: ParsedVCard[]): Promise<Reply> {
+async function vcardImportRun(session: Session, cards: ParsedVCard[]): Promise<Reply> {
   const existing = new Set(
     (await crm.getContacts()).map((c) => (c.email || "").toLowerCase()).filter(Boolean)
   );
@@ -3171,6 +3390,12 @@ async function vcardImportRun(cards: ParsedVCard[]): Promise<Reply> {
   const bits = [`Imported **${created}** contact${created === 1 ? "" : "s"}`];
   if (skipped) bits.push(`${skipped} skipped (no name or already in exec-crm)`);
   if (failed) bits.push(`${failed} failed (${failures.slice(0, 3).join(", ")}${failures.length > 3 ? "…" : ""})`);
+  if (created) {
+    // exec-crm has no contact DELETE endpoint — journaled for the record,
+    // honestly marked as not undoable.
+    jpush(session, `Imported ${created} contacts from vCard`,
+      { op: "delete_contacts", undoable: false, why: "exec-crm has no contact delete endpoint" });
+  }
   return { text: bits.join(" · ") + ".", chips: ["List contacts", "Morning brief"] };
 }
 
@@ -3192,6 +3417,8 @@ async function addTaskReply(session: Session, s: Record<string, string>): Promis
     }
   }
   const t = await crm.createTask(patch);
+  jpush(session, `Added task "${t.title}"`, { op: "delete_task", id: t.id });
+  usability.trackMention(session.id, "task", t.id, t.title);
   return { text: `Added task "${t.title}"${t.due_date ? ` (${duePhrase(t.due_date)})` : ""}.`, chips: ["My tasks", "Morning brief"] };
 }
 
@@ -3233,7 +3460,9 @@ function remindCancelReply(session: Session, idRaw: string): Reply {
   if (!Number.isInteger(id) || id <= 0) {
     return { text: "Which reminder? Use `cancel reminder <n>` with the number from `reminders`.", chips: ["Reminders"] };
   }
-  if (auto.cancelReminder(id, session.id)) {
+  const before = auto.listReminders(session.id).find((r) => r.id === id);
+  if (before && auto.cancelReminder(id, session.id)) {
+    jpush(session, `Cancelled reminder to ${before.text}`, { op: "recreate_reminder", text: before.text, fireAt: before.fire_at });
     return { text: `Cancelled reminder **${id}**.`, chips: ["Reminders"] };
   }
   return { text: `No pending reminder **${id}** in this chat.`, chips: ["Reminders"] };
@@ -3253,14 +3482,34 @@ async function taskByName(session: Session, query: string, action: string, paylo
 }
 
 async function taskAction(session: Session, action: string, task: crm.Task, payload: any): Promise<Reply> {
+  usability.trackMention(session.id, "task", task.id, task.title);
   if (action === "complete_task") {
-    await crm.patchTask(task.id, { done: 1 });
-    return { text: `✅ "${task.title}" done.`, chips: ["My tasks", "Morning brief"] };
+    if (task.done) return { text: `"${task.title}" is already done.`, chips: ["My tasks"] };
+    try {
+      const t = await crm.toggleTask(task.id);
+      jpush(session, `Completed "${task.title}"`, { op: "set_task_done", id: task.id });
+      return { text: `✅ "${t.title}" done.`, chips: ["My tasks", "Morning brief"] };
+    } catch (e: any) {
+      const blockers = toggleBlockers(e);
+      if (blockers) {
+        session.pending = { type: "complete_blocked_task", label: task.title, payload: { id: task.id } };
+        const lines = blockers.map((b) => `• ${b.title}`).join("\n");
+        return {
+          text: `"${task.title}" is blocked by:\n${lines}\n\nComplete it anyway?`,
+          cards: [{ kind: "confirm", options: [{ n: 1, label: "Yes, complete anyway" }, { n: 2, label: "Cancel" }] }],
+          chips: ["Yes", "No"],
+        };
+      }
+      throw e;
+    }
   }
   if (action === "reopen_task") {
-    await crm.patchTask(task.id, { done: 0 });
-    return { text: `Reopened "${task.title}".`, chips: ["My tasks"] };
+    if (!task.done) return { text: `"${task.title}" is already open.`, chips: ["My tasks"] };
+    const t = await crm.toggleTask(task.id);
+    jpush(session, `Reopened "${task.title}"`, { op: "set_task_done", id: task.id });
+    return { text: `Reopened "${t.title}".`, chips: ["My tasks"] };
   }
+  if (action === "task_blockers") return taskBlockersReply(task);
   if (action === "delete_task") {
     session.pending = { type: "delete_task", label: task.title, payload: { id: task.id } };
     return {
@@ -3270,4 +3519,100 @@ async function taskAction(session: Session, action: string, task: crm.Task, payl
     };
   }
   return { text: "I lost track of that action — try again." };
+}
+
+/** Pull the open-blocker list out of a toggleTask 409 error, or null. */
+function toggleBlockers(e: any): { id: number; title: string }[] | null {
+  const msg = String(e?.message || e);
+  const m = msg.match(/-> 409 ([\s\S]*)$/);
+  if (!m) return null;
+  try {
+    const j = JSON.parse(m[1]);
+    if (j.error === "blocked" && Array.isArray(j.blocked_by)) return j.blocked_by;
+  } catch { /* not the shape we expect */ }
+  return null;
+}
+
+async function taskBlockersReply(task: crm.Task): Promise<Reply> {
+  let t = task;
+  try {
+    const tasks = await crm.getTasks();
+    t = tasks.find((x) => x.id === task.id) || task;
+  } catch { /* fall back to the stale copy */ }
+  const blockers = (t.blocked_by || []).filter((b) => !b.done);
+  if (!blockers.length) {
+    return { text: `"${t.title}" isn't blocked by anything open — you're clear.`, chips: ["My tasks", `Complete ${t.title}`] };
+  }
+  const lines = blockers.map((b) => `• **${b.title}**`).join("\n");
+  return {
+    text: `"${t.title}" is blocked by:\n${lines}\n\n${blockers.length === 1 ? "Finish it" : "Finish them"} first, or complete the task anyway.`,
+    chips: [...blockers.map((b) => `Complete ${b.title}`), `Complete ${t.title}`],
+  };
+}
+
+async function dealJourneyReply(deal: crm.Deal): Promise<Reply> {
+  let history: crm.DealHistoryEntry[];
+  try {
+    history = await crm.getDealHistory(deal.id);
+  } catch {
+    return { text: `Couldn't load the journey for "${deal.title}".`, chips: [`Show deal ${deal.title}`] };
+  }
+  if (!history.length) {
+    return {
+      text: `"${deal.title}" has no recorded stage moves yet — it's still in **${stageLabel(deal.stage)}**.`,
+      cards: [dealCard(deal)],
+    };
+  }
+  const lines = history.map((h) => {
+    const from = h.from_name || stageLabel(h.from_stage || "?");
+    const to = h.to_name || stageLabel(h.to_stage || "?");
+    const when = (h.created_at || "").slice(0, 10);
+    return `• ${when} — ${from} → **${to}**`;
+  });
+  return {
+    text: `🛤️ **Journey: "${deal.title}"**\n${lines.join("\n")}`,
+    cards: [dealCard(deal)],
+    chips: [`Show deal ${deal.title}`, "Show pipeline"],
+  };
+}
+
+async function duplicatesReply(): Promise<Reply> {
+  const [contacts, companies] = await Promise.all([
+    crm.getDuplicates("contact").catch(() => [] as crm.DuplicatePair[]),
+    crm.getDuplicates("company").catch(() => [] as crm.DuplicatePair[]),
+  ]);
+  const lines: string[] = [];
+  for (const p of contacts) lines.push(`• 👤 ${p.a.name} ⇄ ${p.b.name} — ${p.reason}`);
+  for (const p of companies) lines.push(`• 🏢 ${p.a.name} ⇄ ${p.b.name} — ${p.reason}`);
+  if (!lines.length) {
+    return { text: "No duplicates found — contacts and companies all look unique.", chips: ["List contacts", "List companies"] };
+  }
+  return {
+    text: `🔍 **Possible duplicates** (${lines.length}):\n${lines.join("\n")}\n\nMerging happens in exec-crm — open the contact or company there to merge a pair.`,
+    chips: ["List contacts", "List companies"],
+  };
+}
+
+async function dealsBySourceReply(rawSource: string): Promise<Reply> {
+  const known = await crm.getDealSources().catch(() => [] as string[]);
+  if (!rawSource) {
+    return known.length
+      ? { text: `Which source? Known sources: ${known.join(", ")}.`, chips: known.map((s) => `Deals from ${s}`) }
+      : { text: "Which source?", chips: ["Show pipeline"] };
+  }
+  // case-insensitive match against the known sources, so "deals from referral"
+  // finds "Referral"
+  const source = known.find((k) => k.toLowerCase() === rawSource.toLowerCase()) || rawSource;
+  const deals = await crm.getDeals(source);
+  if (!deals.length) {
+    const hint = known.length ? ` Known sources: ${known.join(", ")}.` : "";
+    return { text: `No deals from "${rawSource}".${hint}`, chips: ["Show pipeline"] };
+  }
+  const total = deals.reduce((a, d) => a + (d.value || 0), 0);
+  const lines = deals.map((d) => `• **${d.title}** — ${fmtMoney(d.value)} · ${stageLabel(d.stage)}`).join("\n");
+  return {
+    text: `📥 **Deals from "${source}"** — ${deals.length} deal${deals.length === 1 ? "" : "s"} · ${fmtMoney(total)}:\n${lines}`,
+    cards: [{ kind: "deals", title: `Deals from ${source}`, items: deals }],
+    chips: ["Show pipeline"],
+  };
 }

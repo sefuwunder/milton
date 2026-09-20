@@ -169,6 +169,10 @@
         h += `<ul class="notes">` + (card.notes || []).map((n) => `<li>${esc(n)}</li>`).join("") + `</ul>`;
         break;
       }
+      case "suggestions":
+        h += (card.items || []).map((c) =>
+          `<button class="opt" data-fill="${esc("/" + c.usage)}"><span class="n">/</span><span style="text-align:left"><b>${esc(String(c.name).replace(/_/g, " "))}</b><br><small style="color:var(--muted)">${esc(c.description || "")}</small></span></button>`).join("");
+        break;
     }
     return h + `</div>`;
   }
@@ -190,7 +194,11 @@
     (chips || []).forEach((c) => {
       const b = document.createElement("button");
       b.className = "chip"; b.type = "button"; b.textContent = c;
-      b.addEventListener("click", () => send(c));
+      // "/"-prefixed chips are suggestions: tap fills the input, doesn't send
+      b.addEventListener("click", () => {
+        if (c.charAt(0) === "/") { input.value = c.slice(1); input.focus(); }
+        else send(c);
+      });
       chipsEl.appendChild(b);
     });
   }
@@ -202,7 +210,11 @@
     if (conf) {
       const label = conf.getAttribute("data-confirm") || "";
       send(/cancel/i.test(label) ? "No" : "Yes");
+      return;
     }
+    // suggestion card rows fill the input instead of sending
+    const fill = e.target.closest("[data-fill]");
+    if (fill) { input.value = fill.getAttribute("data-fill").slice(1); input.focus(); }
   });
 
   // ---- camera uploads ------------------------------------------------------------
@@ -458,6 +470,7 @@
     if (!text && !atts.length) return;
     if (!autoView.hidden) hideAuto(); // typing a message means you're done with the panel
     input.value = "";
+    hidePalette();
     const photos = atts.filter((a) => !a.isVcf).map((a) => a.url + "?session=" + encodeURIComponent(sid));
     const files = atts.filter((a) => a.isVcf).map((a) => a.name);
     addMsg("user", { text, photos, files });
@@ -481,6 +494,66 @@
       addMsg("milton", { text: "I couldn't reach the Milton server. Is it running?" });
     }
   }
+
+  // ---- slash-command palette ---------------------------------------------------
+  // Typing "/" opens a live-filtered dropdown of every command. Arrows move,
+  // Enter inserts (only after moving — a plain Enter still sends, so "/" alone
+  // remains an ordinary message), Escape closes. Tap/click inserts too.
+  const paletteEl = document.getElementById("palette");
+  let palCommands = null; // [{name, description, usage, examples}]
+  let palItems = [], palIdx = 0, palArmed = false;
+
+  async function loadCommands() {
+    if (palCommands) return palCommands;
+    try {
+      const res = await fetch("/api/commands");
+      const j = await res.json();
+      palCommands = (j.commands || []).filter((c) => !c.internal);
+    } catch { palCommands = []; }
+    return palCommands;
+  }
+  function palFilter(q) {
+    q = (q || "").toLowerCase();
+    return palCommands.filter((c) =>
+      !q || c.name.toLowerCase().indexOf(q) >= 0 || (c.description || "").toLowerCase().indexOf(q) >= 0
+        || (c.usage || "").toLowerCase().indexOf(q) >= 0
+    ).slice(0, 8);
+  }
+  function renderPalette() {
+    if (!palCommands) return;
+    palItems = palFilter(input.value.slice(1));
+    palIdx = Math.min(palIdx, Math.max(palItems.length - 1, 0));
+    if (!palItems.length) { hidePalette(); return; }
+    paletteEl.innerHTML = palItems.map((c, i) =>
+      `<button type="button" role="option" aria-selected="${i === palIdx}" class="pal-row${i === palIdx ? " sel" : ""}" data-pal="${i}">` +
+      `<span class="pal-usage">${esc(c.usage)}</span><span class="pal-desc">${esc(c.description)}</span></button>`
+    ).join("");
+    paletteEl.hidden = false;
+  }
+  function hidePalette() { paletteEl.hidden = true; palArmed = false; }
+  function insertCommand(c) {
+    if (!c) return;
+    input.value = c.usage;
+    hidePalette();
+    input.focus();
+  }
+  input.addEventListener("input", () => {
+    if (input.value.charAt(0) === "/") {
+      palIdx = 0; palArmed = false;
+      loadCommands().then(renderPalette);
+    } else hidePalette();
+  });
+  paletteEl.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-pal]");
+    if (b) insertCommand(palItems[Number(b.getAttribute("data-pal"))]);
+  });
+  input.addEventListener("keydown", (e) => {
+    if (paletteEl.hidden) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); palIdx = Math.min(palIdx + 1, palItems.length - 1); palArmed = true; renderPalette(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); palIdx = Math.max(palIdx - 1, 0); palArmed = true; renderPalette(); }
+    else if (e.key === "Escape") { hidePalette(); }
+    else if (e.key === "Enter" && palArmed) { e.preventDefault(); insertCommand(palItems[palIdx]); }
+  });
 
   form.addEventListener("submit", (e) => { e.preventDefault(); send(input.value); });
   document.getElementById("help-btn").addEventListener("click", () => send("help"));

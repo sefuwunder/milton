@@ -298,7 +298,7 @@ describe("workspace UI", () => {
     const els: Record<string, any> = {};
     ["chat", "chips", "composer", "input", "status-dot", "status-text", "help-btn",
      "cam-btn", "photo-input", "vcf-btn", "vcf-input", "tray", "bell-btn", "bell-badge", "auto-btn",
-     "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "ws-select"].forEach((id) => (els[id] = mkEl("div")));
+     "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "ws-select", "palette"].forEach((id) => (els[id] = mkEl("div")));
     (globalThis as any).document = {
       getElementById: (id: string) => els[id] || null,
       createElement: (t: string) => mkEl(t),

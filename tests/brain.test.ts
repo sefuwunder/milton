@@ -11,9 +11,9 @@ beforeAll(() => { auto.initAutomationDb(new Database(":memory:")); initDealNotes
 const calls: { method: string; path: string; body?: any }[] = [];
 
 const stubDeals = [
-  { id: 1, title: "Acme Website", company_id: 1, contact_id: 1, campaign_id: 1, company_name: "Acme", contact_name: "Jane Doe", value: 50000, stage: "proposal", probability: 60, expected_close: "2026-09-25", owner: "", created_at: "2026-09-01", updated_at: "2026-09-18" },
-  { id: 2, title: "Acme Retainer", company_id: 1, contact_id: 1, campaign_id: 1, company_name: "Acme", contact_name: "Jane Doe", value: 20000, stage: "negotiation", probability: 80, expected_close: "", owner: "", created_at: "2026-09-05", updated_at: "2026-08-01" },
-  { id: 3, title: "Globex Audit", company_id: 2, contact_id: null, campaign_id: 2, company_name: "Globex", contact_name: null, value: 120000, stage: "qualification", probability: 30, expected_close: "2026-10-15", owner: "", created_at: "2026-09-10", updated_at: "2026-09-19" },
+  { id: 1, title: "Acme Website", company_id: 1, contact_id: 1, campaign_id: 1, company_name: "Acme", contact_name: "Jane Doe", value: 50000, stage: "proposal", probability: 60, expected_close: "2026-09-25", owner: "", source: "Referral", created_at: "2026-09-01", updated_at: "2026-09-18" },
+  { id: 2, title: "Acme Retainer", company_id: 1, contact_id: 1, campaign_id: 1, company_name: "Acme", contact_name: "Jane Doe", value: 20000, stage: "negotiation", probability: 80, expected_close: "", owner: "", source: "Website", created_at: "2026-09-05", updated_at: "2026-08-01" },
+  { id: 3, title: "Globex Audit", company_id: 2, contact_id: null, campaign_id: 2, company_name: "Globex", contact_name: null, value: 120000, stage: "qualification", probability: 30, expected_close: "2026-10-15", owner: "", source: "Website", created_at: "2026-09-10", updated_at: "2026-09-19" },
 ];
 const stubContacts = [
   { id: 1, name: "Jane Doe", email: "jane@acme.com", phone: "", company_id: 1, company_name: "Acme", title: "", notes: "" },
@@ -47,6 +47,25 @@ function stubFetch(input: any, init: any = {}): Promise<Response> {
 
   if (method === "GET" && path === "/api/kpis") return ok({ pipeline_value: 190000, open_deals: 3, win_rate: 42 });
   if (method === "GET" && path === "/api/deals") return ok({ deals: stubDeals });
+  // deal sources + source filtering
+  if (method === "GET" && path === "/api/deal-sources") return ok({ sources: ["Referral", "Website"] });
+  const dealSrc = path.match(/^\/api\/deals\?source=(.+)$/);
+  if (method === "GET" && dealSrc) {
+    const src = decodeURIComponent(dealSrc[1]);
+    return ok({ deals: stubDeals.filter((d) => (d as any).source === src) });
+  }
+  // duplicate pairs
+  if (method === "GET" && path === "/api/duplicates?type=contact")
+    return ok({ pairs: [{ a: { id: 1, name: "Jane Doe", email: "jane@acme.com" }, b: { id: 5, name: "Jane D.", email: "jane@acme.com" }, reason: "same email address" }] });
+  if (method === "GET" && path === "/api/duplicates?type=company") return ok({ pairs: [] });
+  // deal stage history
+  const dealHist = path.match(/^\/api\/deals\/(\d+)\/history$/);
+  if (method === "GET" && dealHist)
+    return ok({ history: [
+      { id: 1, from_stage: null, to_stage: "prospecting", created_at: "2026-09-01" },
+      { id: 2, from_stage: "prospecting", to_stage: "qualification", created_at: "2026-09-10" },
+      { id: 3, from_stage: "qualification", to_stage: "proposal", created_at: "2026-09-18" },
+    ] });
   if (method === "GET" && path === "/api/contacts") return ok({ contacts: stubContacts });
   if (method === "GET" && path === "/api/companies") return ok({ companies: stubCompanies });
   if (method === "GET" && path === "/api/tasks") return ok({ tasks: stubTasks });
@@ -67,13 +86,24 @@ function stubFetch(input: any, init: any = {}): Promise<Response> {
   if (method === "POST" && path === "/api/contacts") return ok({ contact: { id: 9, ...body } }, 201);
   if (method === "POST" && path === "/api/companies") return ok({ company: { id: 9, ...body } }, 201);
   if (method === "POST" && path === "/api/tasks") return ok({ task: { id: 9, done: 0, ...body } }, 201);
+  const err = (data: any, status: number) => Promise.resolve(new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } }));
   const taskPatch = path.match(/^\/api\/tasks\/(\d+)$/);
   if (taskPatch && method === "PATCH") return ok({ task: { id: Number(taskPatch[1]), ...body } });
   if (taskPatch && method === "DELETE") return ok({ ok: true });
+  // completion contract: POST /api/tasks/:id/toggle flips done; 409 with
+  // {error:"blocked", blocked_by} when open blockers exist and no confirm
+  const taskToggle = path.match(/^\/api\/tasks\/(\d+)\/toggle$/);
+  if (taskToggle && method === "POST") {
+    const t = stubTasks.find((x) => x.id === Number(taskToggle[1]));
+    const open = (t?.blocked_by || []).filter((b: any) => !b.done);
+    if (open.length && !body?.confirm) {
+      return err({ error: "blocked", blocked_by: open.map((b: any) => ({ id: b.id, title: b.title })) }, 409);
+    }
+    return ok({ task: { ...t, done: t && t.done ? 0 : 1 } });
+  }
 
   // pipeline stages (query-stripped so ?workspace= scoping still matches)
   const base = path.split("?")[0];
-  const err = (data: any, status: number) => Promise.resolve(new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } }));
   if (method === "GET" && base === "/api/stages") return ok({ stages: stubStages });
   if (method === "POST" && base === "/api/stages") {
     const slug = String(body.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
@@ -94,7 +124,10 @@ function stubFetch(input: any, init: any = {}): Promise<Response> {
 const realFetch = globalThis.fetch.bind(globalThis);
 (globalThis as any).fetch = stubFetch;
 
-function freshSession(): Session { return { id: "test", history: [] }; }
+// unique session per test: wizard/mention/undo state is keyed by session id,
+// so sharing one id would leak state between tests.
+let __sid = 0;
+function freshSession(): Session { return { id: `test-${++__sid}`, history: [] }; }
 beforeEach(() => { calls.length = 0; });
 
 describe("reads", () => {
@@ -200,7 +233,21 @@ describe("task writes", () => {
   });
   test("complete task by id", async () => {
     await handleMessage(freshSession(), "complete task 1");
-    expect(calls.some((c) => c.method === "PATCH" && c.path === "/api/tasks/1" && c.body.done === 1)).toBe(true);
+    expect(calls.some((c) => c.method === "POST" && c.path === "/api/tasks/1/toggle")).toBe(true);
+  });
+  test("complete blocked task asks before overriding", async () => {
+    (stubTasks[0] as any).blocked_by = [{ id: 7, title: "Sign NDA", done: 0 }];
+    (stubTasks[0] as any).is_blocked = true;
+    const s = freshSession();
+    const r1 = await handleMessage(s, "complete task 1");
+    expect(r1.text).toContain("blocked by");
+    expect(s.pending?.type).toBe("complete_blocked_task");
+    expect(calls.some((c) => c.method === "POST" && c.path === "/api/tasks/1/toggle" && c.body?.confirm === true)).toBe(false);
+    const r2 = await handleMessage(s, "yes");
+    expect(r2.text).toContain("done");
+    expect(calls.some((c) => c.method === "POST" && c.path === "/api/tasks/1/toggle" && c.body?.confirm === true)).toBe(true);
+    delete (stubTasks[0] as any).blocked_by;
+    delete (stubTasks[0] as any).is_blocked;
   });
   test("remind me asks for confirmation, then stores a one-shot reminder", async () => {
     const s = freshSession();
@@ -373,5 +420,122 @@ describe("photo notes", () => {
     expect(r1.text).toMatch(/camera button/);
     const r2 = await handleMessage(s, "analyze the handwriting", {});
     expect(r2.text).toMatch(/camera button/);
+  });
+});
+
+describe("usability batch", () => {
+  test("new deal wizard: four steps then creates", async () => {
+    const s = freshSession();
+    const r1 = await handleMessage(s, "new deal");
+    expect(r1.text).toContain("1 of 4");
+    await handleMessage(s, "Acme Website");
+    const r3 = await handleMessage(s, "50k");
+    expect(r3.text).toContain("3 of 4");
+    await handleMessage(s, "skip"); // company
+    const r = await handleMessage(s, "skip"); // close date
+    expect(r.text).toContain("Created deal");
+    const post = calls.find((c) => c.method === "POST" && c.path === "/api/deals");
+    expect(post?.body.title).toBe("Acme Website");
+    expect(post?.body.value).toBe(50000);
+  });
+  test("wizard: invalid value re-asks, cancel stops", async () => {
+    const s = freshSession();
+    await handleMessage(s, "new deal");
+    await handleMessage(s, "Acme");
+    const bad = await handleMessage(s, "lots");
+    expect(bad.text).toContain("doesn't look like an amount");
+    const c = await handleMessage(s, "cancel");
+    expect(c.text).toContain("Wizard cancelled");
+    expect(calls.some((x) => x.method === "POST" && x.path === "/api/deals")).toBe(false);
+  });
+  test("mid-wizard intent answers then resumes the wizard", async () => {
+    const s = freshSession();
+    await handleMessage(s, "new deal");
+    const r = await handleMessage(s, "my tasks");
+    expect(r.cards?.[0]?.kind).toBe("tasks");
+    expect(r.cards?.[0]?.items?.[0]?.title).toBe("Call Acme");
+    expect(r.text).toContain("1 of 4"); // wizard prompt resumed
+    // and the wizard is still alive afterwards
+    const r2 = await handleMessage(s, "Acme Website");
+    expect(r2.text).toContain("2 of 4");
+  });
+  test("pronoun: show deal then move it", async () => {
+    const s = freshSession();
+    await handleMessage(s, "show deal acme website");
+    const r1 = await handleMessage(s, "move it to negotiation");
+    expect(r1.text).toContain("Moved");
+    expect(r1.text).toContain("Negotiation");
+    expect(calls.some((c) => c.method === "PATCH" && c.path === "/api/deals/1" && c.body.stage === "negotiation")).toBe(true);
+  });
+  test("pronoun: who's her email resolves the contact", async () => {
+    const s = freshSession();
+    await handleMessage(s, "who is jane doe");
+    const r = await handleMessage(s, "what's her email");
+    expect(r.text).toContain("jane@acme.com");
+  });
+  test("pronoun with no mention asks which one", async () => {
+    const r = await handleMessage(freshSession(), "move it to negotiation");
+    expect(r.text).toContain("Which deal do you mean?");
+  });
+  test("undo deal create round-trips a delete", async () => {
+    const s = freshSession();
+    await handleMessage(s, "add deal Undo Me worth 5k");
+    expect(calls.some((c) => c.method === "POST" && c.path === "/api/deals")).toBe(true);
+    const r = await handleMessage(s, "undo");
+    expect(r.text).toContain("Undid: Created deal");
+    expect(calls.some((c) => c.method === "DELETE" && c.path === "/api/deals/9")).toBe(true);
+  });
+  test("undo task toggle flips it back", async () => {
+    const s = freshSession();
+    await handleMessage(s, "complete task 1");
+    const r = await handleMessage(s, "undo");
+    expect(r.text).toContain("Undid");
+    const toggles = calls.filter((c) => c.method === "POST" && c.path === "/api/tasks/1/toggle");
+    expect(toggles.length).toBe(2); // complete + undo
+  });
+  test("undo with nothing journaled", async () => {
+    const r = await handleMessage(freshSession(), "undo");
+    expect(r.text).toContain("Nothing to undo");
+  });
+  test("undo contact create is honest about exec-crm limits", async () => {
+    const s = freshSession();
+    await handleMessage(s, "add contact Bob at Acme");
+    const r = await handleMessage(s, "undo");
+    expect(r.text).toContain("can't undo that one");
+  });
+  test("deal journey shows the stage timeline", async () => {
+    const r = await handleMessage(freshSession(), "deal journey acme website");
+    expect(r.text).toContain("Journey");
+    expect(r.text).toContain("Qualification");
+    expect(r.text).toContain("Proposal");
+  });
+  test("task blockers: unblocked task says so", async () => {
+    const r = await handleMessage(freshSession(), "what's blocking call acme");
+    expect(r.text).toContain("isn't blocked");
+  });
+  test("show duplicates lists contact pairs with merge guidance", async () => {
+    const r = await handleMessage(freshSession(), "show duplicates");
+    expect(r.text).toContain("Possible duplicates");
+    expect(r.text).toContain("Jane Doe");
+    expect(r.text).toContain("exec-crm");
+  });
+  test("deals from a source filters", async () => {
+    const r = await handleMessage(freshSession(), "deals from referral");
+    expect(r.text).toContain("Acme Website");
+    expect(r.text).not.toContain("Acme Retainer");
+  });
+  test("unknown input suggests slash commands as fill-in chips", async () => {
+    const r = await handleMessage(freshSession(), "updo");
+    expect(r.text).toContain("Did you mean");
+    expect(r.cards?.[0]?.kind).toBe("suggestions");
+    const chips = r.chips || [];
+    expect(chips.length).toBeGreaterThan(0);
+    expect(chips.every((c) => c.startsWith("/"))).toBe(true);
+  });
+  test("pure gibberish falls back to generic chips (no noise suggestions)", async () => {
+    const r = await handleMessage(freshSession(), "frobnicator");
+    expect(r.text).toContain("Did you mean");
+    expect(r.cards || []).toEqual([]);
+    expect(r.chips).toContain("Show pipeline");
   });
 });
