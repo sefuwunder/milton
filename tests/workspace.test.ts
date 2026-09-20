@@ -8,12 +8,19 @@ import * as auto from "../src/automation";
 import * as wss from "../src/workspace";
 import { getDeals, getKpis } from "../src/crm";
 import { handleMessage, runRoutineUnattended, type Session } from "../src/brain";
+import * as chats from "../src/chat_sessions";
 
 let mem: Database;
 beforeAll(() => {
   mem = new Database(":memory:");
   auto.initAutomationDb(mem);
   wss.initWorkspaceDb(new Database(":memory:"));
+  // initChatSessionDb migrates the sessions table in place, so it needs the
+  // table to exist (mirrors tests/sessions.test.ts setup).
+  const csdb = new Database(":memory:");
+  csdb.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')))`);
+  chats.initChatSessionDb(csdb);
   auto.saveRoutine("wseod", ["kpis"]);
 });
 

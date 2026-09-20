@@ -7,7 +7,7 @@
 // Nothing is written until the user says Yes; the dossier then lands in
 // exec-crm itself, in an "Enrichment dossier" text custom field on the
 // contact/company (created on first use, earlier dossiers preserved).
-import { describe, test, expect, afterEach, beforeAll } from "bun:test";
+import { describe, test, expect, afterEach, afterAll, beforeAll } from "bun:test";
 import { parseIntent } from "../src/intents";
 import * as mer from "../src/meridian";
 import {
@@ -491,9 +491,16 @@ describe("enrichment tick", () => {
     process.env.MILTON_DATA = `/tmp/milton-enrich-tick-test-${Date.now()}`;
     process.env.PORT = "0";
     srv = await import("../src/server.ts");
+    // The server module binds its database on first import and bun shares
+    // module state across test files: if another file imported server.ts
+    // first, this import is cached and MILTON_DATA above is ignored. Reset
+    // explicitly so the tick tests always run against their own dir.
+    srv.__resetDataDirForTests(process.env.MILTON_DATA);
     const { ensureChatSession } = await import("../src/chat_sessions");
     ensureChatSession(TICK_SID);
   });
+
+  afterAll(() => { (globalThis as any).fetch = realFetch; });
 
   function parkJob(job: EnrichJobState) {
     (globalThis as any).fetch = tickStubFetch;

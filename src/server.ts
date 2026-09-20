@@ -2,6 +2,7 @@
 // Bun + zero dependencies + SQLite. Everything stays on your machine.
 
 import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
 import { handleMessage, tickAutomation, handleWebhookEvent, handleMeridianCallback, enrichTerminalReply, enrichTickDecision, type Session, type Reply, type UploadRef, type EnrichJobState } from "./brain";
 import { getEnrichJob } from "./meridian";
 import { ping, crmBase } from "./crm";
@@ -19,12 +20,15 @@ import { embeddedDecision, startEmbedded, type EmbeddedServer } from "./embedded
 import { llmEndpointBase, analystModel } from "./analyst";
 
 const PORT = Number(process.env.PORT || 3009);
-const DATA_DIR = process.env.MILTON_DATA || "./data";
 
-await Bun.$`mkdir -p ${DATA_DIR}`.quiet().catch(() => {});
-
-const db = new Database(`${DATA_DIR}/milton.db`);
-db.exec(`
+let db!: Database;
+function initDataDir(dataDir: string) {
+  // NOTE: the previous handle is intentionally left open, not closed: the
+  // per-domain init*Db() helpers keep their own reference to it, and closing
+  // it out from under them breaks their modules. Abandoning a test-only
+  // SQLite handle is harmless (reclaimed on process exit).
+  db = new Database(`${dataDir}/milton.db`);
+  db.exec(`
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     state TEXT NOT NULL DEFAULT '{}',
@@ -47,12 +51,30 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now'))
   );
 `);
-auto.initAutomationDb(db);
-initWorkspaceDb(db);
-initChatSessionDb(db, `${DATA_DIR}/uploads`);
-initReconRunsDb(db);
-initDealNotesDb(db);
-initUsabilityDb(db);
+  auto.initAutomationDb(db);
+  initWorkspaceDb(db);
+  initChatSessionDb(db, `${dataDir}/uploads`);
+  initReconRunsDb(db);
+  initDealNotesDb(db);
+  initUsabilityDb(db);
+}
+
+const DATA_DIR = process.env.MILTON_DATA || "./data";
+await Bun.$`mkdir -p ${DATA_DIR}`.quiet().catch(() => {});
+initDataDir(DATA_DIR);
+
+/**
+ * Test-only hook: re-point the server — sessions, uploads, automation,
+ * workspace, chat-session, recon-run, deal-note and usability stores — at a
+ * fresh data dir. bun shares module state across test files and server.ts
+ * binds its database on first import, so without this a test file that
+ * imports server.ts after another file did silently reuses the other file's
+ * MILTON_DATA, and tests pass or fail depending on test-file order.
+ */
+export function __resetDataDirForTests(dataDir: string) {
+  mkdirSync(dataDir, { recursive: true });
+  initDataDir(dataDir);
+}
 
 // Incoming webhooks share one auth pattern: 503 when MILTON_HOOK_SECRET isn't
 // configured, 401 on a bad X-Milton-Secret (constant-time comparison).
