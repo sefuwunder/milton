@@ -62,7 +62,7 @@ function loadSession(id: string): Session {
   if (row) {
     try {
       const st = JSON.parse(row.state);
-      s = { id, pending: st.pending, choice: st.choice, history: st.history || [], lastOcr: st.lastOcr, notes: st.notes || [] };
+      s = { id, pending: st.pending, choice: st.choice, history: st.history || [], lastOcr: st.lastOcr, notes: st.notes || [], lastWidgetable: st.lastWidgetable };
     } catch {
       s = { id, history: [], notes: [] };
       db.query("INSERT INTO sessions (id, state) VALUES (?, ?)").run(id, JSON.stringify({ history: [], notes: [] }));
@@ -79,7 +79,7 @@ function loadSession(id: string): Session {
 
 function saveSession(s: Session) {
   db.query("UPDATE sessions SET state = ?, updated_at = datetime('now') WHERE id = ?")
-    .run(JSON.stringify({ pending: s.pending, choice: s.choice, history: s.history.slice(-40), lastOcr: s.lastOcr, notes: (s.notes || []).slice(-20) }), s.id);
+    .run(JSON.stringify({ pending: s.pending, choice: s.choice, history: s.history.slice(-40), lastOcr: s.lastOcr, notes: (s.notes || []).slice(-20), lastWidgetable: s.lastWidgetable }), s.id);
 }
 
 function logMessage(sessionId: string, role: string, text: string) {

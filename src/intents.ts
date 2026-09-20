@@ -15,6 +15,7 @@ export type IntentName =
   | "prep_brief"
   | "analyze_pipeline" | "forecast" | "plan_day" | "plan_week" | "plan_breakdown"
   | "sales_cycle" | "top_deals" | "campaign_stats" | "closing_soon"
+  | "pin_widget"
   | "contact_detail" | "search" | "add_note" | "add_campaign"
   | "save_routine" | "run_routine" | "list_routines" | "delete_routine" | "show_routine"
   | "schedule_add" | "list_schedules" | "unschedule" | "pause_schedule" | "resume_schedule"
@@ -316,6 +317,7 @@ export function parseIntent(raw: string): Intent {
   else if (/^(top deals|biggest deals|largest deals|leaderboard)$/.test(text)) set("top_deals");
   else if (/^(campaign performance|campaign roi|campaign stats|campaign report)$/.test(text)) set("campaign_stats");
   else if (/^(closing soon|closing this month|upcoming closes|deals closing soon)$/.test(text)) set("closing_soon");
+  else if (/^(pin (this|it)( as( a)? widget)?|pin( a)? widget|add( a)? widget|save (this|it)( as( a)? widget)?)$/.test(text)) set("pin_widget");
   else if (/^(plan my day|daily plan|plan today|today'?s plan)$/.test(text)) set("plan_day");
   else if (/^(plan my week|weekly plan|plan this week|this week'?s plan)$/.test(text)) set("plan_week");
   else if ((m = cased.match(/^break down (.+)$/i))) set("plan_breakdown", { goal: m[1].trim() });
@@ -467,6 +469,7 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["my tasks", "tasks"], ["kpis", "kpis"], ["list deals in negotiation", "deals"], ["show negotiation deals", "deals"], ["show deal Acme", "deal_detail"]], note: "" },
       { cmds: [["sales cycle", "sales_cycle"], ["top deals", "top_deals"], ["closing soon", "closing_soon"]], note: "where deals stall, biggest open deals, closes in the next 30 days" },
       { cmds: [["campaign stats", "campaign_stats"], ["stale deals", "hygiene"], ["what needs attention", "hygiene"]], note: "campaign win rates & pipeline hygiene" },
+      { cmds: [["pin this as a widget", "pin_widget"], ["add widget", "pin_widget"]], note: "pin the last analysis to the Milton tab in exec-crm" },
       { cmds: [["who is Jane Doe", "contact_detail"], ["search acme", "search"]], note: "contact detail cards and cross-entity search" },
       { cmds: [["note on Acme: called today, wants the proposal", "add_note"]], note: "pin a note to a deal — kept in Milton, shown on deal lookup" },
       { cmds: [["new campaign Q4 Push for Acme", "add_campaign"]], note: "campaigns need a company — I'll ask if you skip it" },

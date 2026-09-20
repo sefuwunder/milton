@@ -217,3 +217,16 @@ export async function resolveTask(query: string): Promise<Match<Task>[]> {
 }
 
 export function crmBase(): string { return BASE; }
+
+// ---- milton widgets (published to exec-crm's /api/milton/widgets, rendered on its Milton tab)
+export interface Widgetable {
+  kind: "stat" | "table" | "bars" | "list";
+  title: string;
+  payload: any;
+  source?: string;
+}
+/** Pin a widget to the active session workspace's Milton tab in exec-crm. */
+export async function pinWidget(w: Widgetable): Promise<any> {
+  const j = await req("/api/milton/widgets", "POST", w);
+  return j.widget;
+}

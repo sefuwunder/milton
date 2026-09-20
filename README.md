@@ -58,6 +58,8 @@ If the model endpoint is misconfigured (wrong model name, unreachable host), Mil
 
 **Analysis (all offline, deterministic)** — `sales cycle` (average creation-to-won + where deals stall) · `top deals` (biggest open deals) · `campaign stats` (open/won/win rate per campaign) · `closing soon` (30-day closes with weighted values) · `stale deals` (30d+ untouched, oldest first)
 
+**Widgets** — after any analysis above, `pin this as a widget` (also `add widget`, `save it as a widget`) publishes the result to exec-crm's **Milton** tab for the active workspace (stat/table/bars/list cards, newest first, capped at 50).
+
 **Work the pipeline** — `add deal Website redesign for Acme worth 50k close friday` · `move Acme deal to negotiation` · `mark Acme deal as won` (asks first, like lost) · `set Acme deal value to 75k` · `note on Acme: called today, wants the proposal` · `new campaign Q4 Push for Acme` · `delete deal Old Opp` (asks first)
 
 **Deal notes** — exec-crm has no deal-notes endpoint, so `note on <deal> <text>` pins notes in Milton's own SQLite (keyed by deal + workspace) and shows them on deal lookups.

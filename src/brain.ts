@@ -32,7 +32,7 @@ export interface Card {
   uploadId?: string;
   imageUrl?: string;
 }
-export interface Reply { text: string; cards?: Card[]; chips?: string[] }
+export interface Reply { text: string; cards?: Card[]; chips?: string[]; widget?: crm.Widgetable }
 
 export interface PendingAction { type: string; label: string; payload: any }
 export interface ChoiceState {
@@ -51,6 +51,8 @@ export interface Session {
   // exec-crm workspace this session works inside; null = default (nothing sent)
   workspaceId?: number | null;
   workspaceName?: string;
+  // last analysis output shaped as a pinnable widget ("pin this as a widget")
+  lastWidgetable?: crm.Widgetable;
 }
 
 // A photo uploaded through /api/upload, resolved session-side.
@@ -1049,22 +1051,23 @@ async function dispatch(session: Session, intent: Intent, opts: MessageOpts): Pr
     case "pipeline": return pipelineReply();
     case "deals": return dealsReply(s.stage, s.search, s.stage_name);
     case "deal_detail": return dealDetailReply(session, s.query);
-    case "kpis": return kpisReply();
+    case "kpis": return withWidget(session, kpisReply());
     case "tasks": return tasksReply(s.filter, s.search);
     case "contacts": return contactsReply(s.search);
     case "companies": return companiesReply(s.search);
     case "brief": return briefReply();
-    case "hygiene": return hygieneReply();
+    case "hygiene": return withWidget(session, hygieneReply());
     case "prep_brief": return prepBriefForName(session, s.name);
     case "analyze_pipeline": return analyzePipelineReply();
     case "forecast": return forecastReply();
     case "plan_day": return planDayReply();
     case "plan_week": return planWeekReply();
     case "plan_breakdown": return planBreakdownReply(session, s.goal || "");
-    case "sales_cycle": return salesCycleReply();
-    case "top_deals": return topDealsReply();
-    case "campaign_stats": return campaignStatsReply();
-    case "closing_soon": return closingSoonReply();
+    case "sales_cycle": return withWidget(session, salesCycleReply());
+    case "top_deals": return withWidget(session, topDealsReply());
+    case "campaign_stats": return withWidget(session, campaignStatsReply());
+    case "closing_soon": return withWidget(session, closingSoonReply());
+    case "pin_widget": return pinWidgetReply(session);
     case "contact_detail": return contactDetailReply(session, s.query || "");
     case "search": return searchReply(s.query || "");
     case "activities": return activitiesReply();
@@ -1366,6 +1369,37 @@ async function dealDetailReply(session: Session, query: string): Promise<Reply> 
   return need.reply!;
 }
 
+// ---- milton widgets -----------------------------------------------------------
+// Analysis replies that yield structured data attach a widget payload; the
+// dispatcher stashes it on the session so "pin this as a widget" can POST it
+// to exec-crm's /api/milton/widgets (rendered on exec-crm's Milton tab).
+async function withWidget(session: Session, replyP: Promise<Reply>): Promise<Reply> {
+  const reply = await replyP;
+  if (reply.widget) session.lastWidgetable = reply.widget;
+  return reply;
+}
+async function pinWidgetReply(session: Session): Promise<Reply> {
+  const w = session.lastWidgetable;
+  if (!w) {
+    return {
+      text: "Nothing to pin yet — ask me for something structured first, like “top deals”, “kpis”, “campaign stats”, “closing soon”, or “pipeline hygiene”, then say “pin this as a widget”.",
+      chips: ["Top deals", "KPIs", "Closing soon"],
+    };
+  }
+  try {
+    const created = await crm.pinWidget(w);
+    return {
+      text: `Pinned “${created?.title || w.title}” to your Milton tab 📌`,
+      chips: ["Top deals", "KPIs", "Closing soon"],
+    };
+  } catch (e: any) {
+    return {
+      text: `Couldn't reach exec-crm to pin the widget: ${String(e?.message || e).slice(0, 180)}`,
+      chips: ["Top deals"],
+    };
+  }
+}
+
 async function kpisReply(): Promise<Reply> {
   const k = await crm.getKpis();
   const stats = [
@@ -1378,10 +1412,19 @@ async function kpisReply(): Promise<Reply> {
   for (const [key, v] of extra) {
     if (typeof v === "number" || typeof v === "string") stats.push({ label: key.replace(/_/g, " "), value: String(v) });
   }
+  const winRateStat = stats.find((s) => /win rate/i.test(s.label));
+  const widget: crm.Widgetable | undefined = stats.length ? {
+    kind: "stat", title: "KPIs", source: "milton:kpis",
+    payload: {
+      value: stats[0].value, label: stats[0].label,
+      ...(winRateStat && winRateStat !== stats[0] ? { delta: `Win rate ${winRateStat.value}` } : {}),
+    },
+  } : undefined;
   return {
     text: stats.length ? "Here's how the business looks right now:" : "KPIs (raw):",
     cards: [{ kind: "kpis", title: "KPIs", stats: stats.length ? stats : [{ label: "raw", value: JSON.stringify(k).slice(0, 200) }] }],
     chips: ["Show pipeline", "Morning brief"],
+    widget,
   };
 }
 
@@ -1515,10 +1558,20 @@ async function hygieneReply(): Promise<Reply> {
   if (!findings.length) {
     return { text: "Pipeline is clean — every open deal has a close date, a contact, and recent activity. Nice.", chips: ["Show pipeline", "Morning brief"] };
   }
+  const hygieneWidget: crm.Widgetable = {
+    kind: "list", title: "Pipeline hygiene", source: "milton:hygiene",
+    payload: {
+      items: findings.slice(0, 15).map((f) => ({
+        text: `${f.icon} ${f.text}`,
+        ...(f.fix ? { sub: f.fix } : {}),
+      })),
+    },
+  };
   return {
     text: `Found ${findings.length} thing${findings.length === 1 ? "" : "s"} worth fixing:`,
     cards: [{ kind: "findings", title: "Pipeline hygiene", items: findings }],
     chips: ["Show pipeline", "My tasks"],
+    widget: hygieneWidget,
   };
 }
 
@@ -1547,6 +1600,13 @@ async function salesCycleReply(): Promise<Reply> {
   return {
     text: lines.filter((l) => l !== "").join("\n").replace(/\n{3,}/g, "\n\n"),
     chips: ["Analyze my pipeline", "What needs attention", "Show pipeline"],
+    widget: sc.avgDays !== null ? {
+      kind: "stat", title: "Sales cycle", source: "milton:sales-cycle",
+      payload: {
+        value: `${sc.avgDays}d`, label: "Avg sales cycle",
+        ...(sc.stalest ? { delta: `Stalest: ${sc.stalest.label} (${sc.stalest.medianDwell}d)` } : {}),
+      },
+    } : undefined,
   };
 }
 
@@ -1563,6 +1623,16 @@ async function topDealsReply(): Promise<Reply> {
     text: `🏆 **Top ${top.length} open deal${top.length === 1 ? "" : "s"}** by value:\n${lines.join("\n")}`,
     cards: [{ kind: "deals", title: "Top deals", items: top }],
     chips: ["Show pipeline", "Closing soon", "Sales cycle"],
+    widget: {
+      kind: "table", title: "Top deals", source: "milton:top-deals",
+      payload: {
+        headers: ["Deal", "Stage", "Value", "Updated"],
+        rows: top.map((d) => [
+          d.title, stageLabel(d.stage), fmtMoney(d.value),
+          (d.updated_at || "").slice(0, 10) || "—",
+        ]),
+      },
+    },
   };
 }
 
@@ -1580,6 +1650,13 @@ async function campaignStatsReply(): Promise<Reply> {
   return {
     text: `📣 **Campaign performance** (ranked by open pipeline):\n${lines.join("\n")}`,
     chips: ["Analyze my pipeline", "Show pipeline"],
+    widget: {
+      kind: "bars", title: "Campaign performance", source: "milton:campaign-stats",
+      payload: {
+        items: stats.slice(0, 10).map((c) => ({ label: c.name, value: c.openValue })),
+        format: "currency",
+      },
+    },
   };
 }
 
@@ -1604,6 +1681,15 @@ async function closingSoonReply(): Promise<Reply> {
     text: `📅 **Closing in the next 30 days** — ${hits.length} deal${hits.length === 1 ? "" : "s"} · ${fmtMoney(total)} pipeline → **${fmtMoney(wsum)}** weighted:\n${lines.join("\n")}\n_Weights: deal probability when set, else stage defaults (prospecting 10%, qualification 25%, proposal 50%, negotiation 75%)._`,
     cards: [{ kind: "deals", title: "Closing soon", items: hits.map((x) => x.d) }],
     chips: ["Forecast", "Show pipeline", "Plan my day"],
+    widget: {
+      kind: "list", title: "Closing soon", source: "milton:closing-soon",
+      payload: {
+        items: hits.slice(0, 15).map(({ d, n }) => ({
+          text: d.title,
+          sub: `closes ${d.expected_close} (${when(n)}) · ${fmtMoney(d.value)} · ${stageLabel(d.stage)}`,
+        })),
+      },
+    },
   };
 }
 
