@@ -4,6 +4,7 @@
 import * as crm from "./crm";
 import * as mer from "./meridian";
 import { parseIntent, helpText, HELP_CHIPS, parseStage, parseMoney, parseDate, parseReminderTime, formatWhen, parseCapture, type Intent } from "./intents";
+import { parseIntentFuzzy, type DisambigOption } from "./fuzzy";
 import { ocrUpload, type HandMetrics } from "./ocr";
 import { parseVcards, preferredPhone, preferredEmail, type ParsedVCard } from "./vcard";
 import * as an from "./analyst";
@@ -36,7 +37,7 @@ export interface Reply { text: string; cards?: Card[]; chips?: string[]; widget?
 
 export interface PendingAction { type: string; label: string; payload: any }
 export interface ChoiceState {
-  kind: "deal" | "contact" | "company" | "task" | "workspace" | "stage" | "recon" | "prep";
+  kind: "deal" | "contact" | "company" | "task" | "workspace" | "stage" | "recon" | "prep" | "intent";
   options: { id: number | string; n?: number; label: string; sub?: string }[];
   then: { action: string; payload: any };
 }
@@ -217,7 +218,7 @@ export async function handleMessage(session: Session, raw: string, opts: Message
 }
 
 async function handleMessageScoped(session: Session, raw: string, opts: MessageOpts = {}): Promise<Reply> {
-  const intent = parseIntent(raw);
+  const intent = parseIntentFuzzy(raw);
 
   // 1) resolve an outstanding disambiguation choice
   if (session.choice && intent.name === "choose_number") {
@@ -226,6 +227,21 @@ async function handleMessageScoped(session: Session, raw: string, opts: MessageO
     if (!opt) return { text: `Pick one of ${session.choice.options.map((o) => o.n).join(", ")}.`, chips: session.choice.options.map((o) => String(o.n)) };
     const ch = session.choice; session.choice = undefined;
     return dispatchChoice(session, ch, opt.id);
+  }
+  // 1b) fuzzy near-tie: the top candidate intents scored within a hair of
+  // each other — ask with the existing numbered choice flow.
+  if (intent.name === "disambiguate_intent") {
+    const options = JSON.parse(intent.slots.options) as DisambigOption[];
+    session.choice = {
+      kind: "intent",
+      options: options.map((o, i) => ({ id: i, n: i + 1, label: o.label, sub: o.command })),
+      then: { action: "pick_intent", payload: { commands: options.map((o) => o.command) } },
+    };
+    return {
+      text: `Did you mean:\n${options.map((o, i) => `${i + 1}) ${o.label} — \`${o.command}\``).join("\n")}`,
+      cards: [{ kind: "choices", options: session.choice.options }],
+      chips: options.map((_, i) => String(i + 1)),
+    };
   }
   // 2a) resolve a pending save-note: the reply names the deal
   if (session.pending?.type === "save_note" && intent.name !== "confirm_yes" && intent.name !== "confirm_no") {
@@ -348,6 +364,16 @@ async function dispatchChoice(session: Session, ch: ChoiceState, id: number | st
       return { text: "I lost track of that choice — try the command again." };
     }
     return prepBriefReply(session, p.type, p.id);
+  }
+  if (ch.kind === "intent") {
+    // fuzzy near-tie resolution: re-run the chosen canonical command.
+    const cmd = ch.then.payload?.commands?.[id];
+    if (typeof cmd !== "string") return { text: "I lost track of that choice — try the command again." };
+    const intent2 = parseIntent(cmd);
+    if (intent2.name === "unknown" || intent2.name === "disambiguate_intent") {
+      return { text: "I lost track of that choice — try the command again." };
+    }
+    return dispatch(session, intent2, { raw: cmd });
   }
   return { text: "I lost track of that choice — try the command again." };
 }

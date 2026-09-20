@@ -52,6 +52,8 @@ If the model endpoint is misconfigured (wrong model name, unreachable host), Mil
 
 ## What Milton can do
 
+**Fuzzy language** — Milton understands commands with typos, paraphrases, shuffled word order, and filler: `shwo my daels` · `clsoe the acme deal as won` · `ad a new deal acme 50k` · `what opportunities are closing soon` · `hey milton could you please show me my top deals thanks`. It's fully deterministic and runs with zero dependencies and no LLM: normalized keyword scoring with bounded Damerau-Levenshtein typo tolerance (transpositions like `shwo`→`show` count as one edit), phrase bonuses, and confidence thresholds. When the top interpretations score within a hair of each other you get a numbered pick-list instead of a coin flip; gibberish and small talk (`tell me a joke about crm`) stay `unknown` and fall through to the LLM fallback. The exact command parser always runs first, so precise commands behave exactly as before.
+
 **Look & feel** — Tokyo day/night theme: follows your OS automatically, or tap 🌓 in the topbar to cycle Auto → Light → Dark.
 
 **Look things up** — `show pipeline` · `kpis` · `show deal Acme` · `list deals in negotiation` · `show negotiation deals` · `find contacts named jane` · `who is Jane Doe` · `search acme` · `my tasks` · `recent activity` · `webhooks` · `delivery log`

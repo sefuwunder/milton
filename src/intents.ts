@@ -24,6 +24,7 @@ export type IntentName =
   | "list_recons" | "meridian_dossier" | "meridian_entities" | "meridian_request"
   | "list_stages" | "add_stage" | "rename_stage" | "delete_stage" | "move_stage"
   | "confirm_yes" | "confirm_no" | "choose_number"
+  | "disambiguate_intent" // fuzzy near-tie: numbered choice between candidate intents
   | "unknown";
 
 export interface Intent {
@@ -31,6 +32,7 @@ export interface Intent {
   raw: string;
   text: string; // normalized
   slots: Record<string, string>;
+  fuzzy?: boolean; // set when the fuzzy interpreter (not the exact regexes) resolved this
 }
 
 const STAGE_ALIASES: Record<string, string> = {
