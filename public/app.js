@@ -481,6 +481,18 @@
         if (!autoView.hidden && autoTab === "runs") refreshAutoTab();
       } catch { /* ignore malformed */ }
     });
+    es.addEventListener("enrichment-done", (ev) => {
+      try {
+        const done = JSON.parse(ev.data);
+        if (done.session_id === sid) {
+          addMsg("milton", done.reply);
+          setChips(done.reply.chips || []);
+          scroll();
+        } else {
+          toast(`🔍 Enrichment finished for ${done.target_name || "a company"}`);
+        }
+      } catch { /* ignore malformed */ }
+    });
   }
 
   async function send(text) {

@@ -133,6 +133,73 @@ export async function requestReconRun(
   }
 }
 
+// ---- enrichment jobs (the one async write: company + principal lookup) --------
+// POST /api/enrich -> 201 { job_id, status: "running" }; the scrape can take
+// longer than a few seconds, so the job runs in Meridian's background and
+// Milton polls GET /api/enrich/:id.
+
+export interface EnrichCompany {
+  name: string; domain: string;
+  description?: string; founded?: string; employees?: string;
+}
+export interface EnrichPrincipal {
+  name: string; title: string; email?: string; source_url: string;
+}
+export interface EnrichJob {
+  id: string; query: string; status: string;
+  progress: { done: number; total: number; current?: string };
+  error: string | null;
+  company: EnrichCompany | null; principals: EnrichPrincipal[] | null;
+  notes: string[]; nodes: any[]; edges: any[];
+  created_at: number; updated_at: number;
+}
+
+export type EnrichRequestResult =
+  | { ok: true; job_id: string; status: string }
+  | { ok: false; error: string; unreachable: boolean };
+
+/** Start a company enrichment job in Meridian. */
+export async function requestEnrich(query: string): Promise<EnrichRequestResult> {
+  try {
+    const res = await fetch(meridianBase() + "/api/enrich", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (res.status !== 201) {
+      let detail = res.statusText;
+      try { detail = JSON.stringify(await res.json()); } catch { /* keep statusText */ }
+      return { ok: false, error: `status ${res.status}: ${String(detail).slice(0, 200)}`, unreachable: false };
+    }
+    const j: any = await res.json();
+    if (!j?.job_id) return { ok: false, error: "bad response: no job_id", unreachable: false };
+    return { ok: true, job_id: String(j.job_id), status: String(j.status || "running") };
+  } catch (e) {
+    return { ok: false, error: String(e instanceof Error ? e.message : e), unreachable: true };
+  }
+}
+
+/** Poll one enrichment job — or null when Meridian is unreachable / unknown id. */
+export async function getEnrichJob(id: string): Promise<EnrichJob | null> {
+  const j = await get<any>(`/api/enrich/${encodeURIComponent(id)}`);
+  // Meridian returns the job at the top level (fullEnrichJob); tolerate a
+  // { job } wrapper too.
+  const r = j?.job ?? j;
+  if (!r || r.id == null) return null;
+  return {
+    id: String(r.id), query: String(r.query || ""), status: String(r.status || "?"),
+    progress: r.progress && typeof r.progress === "object" ? r.progress : { done: 0, total: 0 },
+    error: r.error ?? null,
+    company: r.company ?? null,
+    principals: Array.isArray(r.principals) ? r.principals : null,
+    notes: Array.isArray(r.notes) ? r.notes : [],
+    nodes: Array.isArray(r.nodes) ? r.nodes : [],
+    edges: Array.isArray(r.edges) ? r.edges : [],
+    created_at: Number(r.created_at || 0), updated_at: Number(r.updated_at || 0),
+  };
+}
+
 // ---- fuzzy matching (same scoring as crm.ts matchByName / workspace.ts) --------------
 function scoreName(name: string, query: string): number {
   const n = name.toLowerCase(), q = query.toLowerCase().trim();

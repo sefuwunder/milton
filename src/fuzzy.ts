@@ -702,6 +702,25 @@ const MORE: FuzzMatcher[] = [
     },
   },
   {
+    intent: "meridian_enrich", label: "enrich company", need: 4, pri: 71, remBonus: 0.5, noRemBonus: 0,
+    kw: [...K("meridian", 2), ...K("enrich", 3.5, "enrichment", "lookup", "profile")],
+    ph: [],
+    build: (t) => {
+      if (t.includes("status")) return null;
+      const core = drop(t, ["meridian", "enrich", "enrichment", "lookup", "profile", ...ART]);
+      return core.length ? `meridian enrich ${core.join(" ")}` : null;
+    },
+  },
+  {
+    intent: "meridian_enrich_status", label: "enrichment status", need: 4, pri: 72, remBonus: 0, noRemBonus: 0,
+    kw: [...K("enrichment", 3, "enrich"), ...K("status", 2.5), ...K("check", 1), ...K("progress", 1.5)],
+    ph: [],
+    build: (t) => {
+      if (!t.some((x) => ["status", "progress"].includes(x)) && !t.includes("check")) return null;
+      return "enrichment status";
+    },
+  },
+  {
     intent: "analyze_pipeline", label: "analyze pipeline", need: 3, pri: 45, remBonus: 0, noRemBonus: 0,
     kw: [...K("analyze", 3, "analyse"), ...K("analysis", 2.5), ...K("pipeline", 2), ...K("stats", 1.5), ...K("report", 1)],
     ph: [P("analyze my pipeline", 4), P("pipeline analysis", 3.5)],

@@ -47,8 +47,26 @@ export interface Reply {
 }
 
 export interface PendingAction { type: string; label: string; payload: any }
+/** In-flight Meridian enrichment job (async scrape — poll via `enrichment status`). */
+export interface EnrichJobState {
+  job_id: string; targetType: "contact" | "company";
+  targetId: number; targetName: string; at: number;
+}
+/** Custom-field name the enrichment dossier is written to in exec-crm. */
+export const ENRICH_DOSSIER_FIELD = "Enrichment dossier";
+/** A job still "running" after this long is treated as stalled (Meridian caps jobs at ~60s). */
+export const ENRICH_JOB_TIMEOUT_MS = 10 * 60 * 1000;
+/** Pure decision for the 30s enrichment tick: keep polling, or deliver. */
+export function enrichTickDecision(
+  job: EnrichJobState, status: string, nowMs: number,
+): "keep" | "done" | "failed" | "stale" {
+  if (status === "done") return "done";
+  if (status === "failed") return "failed";
+  if (nowMs - job.at > ENRICH_JOB_TIMEOUT_MS) return "stale";
+  return "keep";
+}
 export interface ChoiceState {
-  kind: "deal" | "contact" | "company" | "task" | "workspace" | "session" | "stage" | "recon" | "prep" | "intent" | "field";
+  kind: "deal" | "contact" | "company" | "task" | "workspace" | "session" | "stage" | "recon" | "prep" | "intent" | "field" | "enrich_target";
   options: { id: number | string; n?: number; label: string; sub?: string }[];
   then: { action: string; payload: any };
 }
@@ -58,6 +76,7 @@ export interface Session {
   chatName?: string; // user-facing name of this chat session ("General", …)
   pending?: PendingAction;
   choice?: ChoiceState;
+  enrichJob?: EnrichJobState; // in-flight Meridian enrichment (see `enrichment status`)
   history: { role: "user" | "milton"; text: string }[];
   lastOcr?: { text: string; uploadId: string };
   notes?: SavedNote[];
@@ -89,7 +108,13 @@ export function stageLabel(s: string): string {
   return crm.STAGE_LABELS[s] || s;
 }
 export function todayStr(ref: Date = new Date()): string {
-  return ref.toISOString().slice(0, 10);
+  // Local calendar day, NOT UTC: the exec-crm widget computes "today" with
+  // local getFullYear/getMonth/getDate, and daysUntil() pins both sides to
+  // local midnight. Using toISOString() here made chat's overdue / due-today
+  // filters disagree with the widget (and with duePhrase) whenever the UTC
+  // date differed from the local date.
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${ref.getFullYear()}-${p(ref.getMonth() + 1)}-${p(ref.getDate())}`;
 }
 export function daysUntil(dateStr: string, ref: Date = new Date()): number | null {
   // Pure calendar-day arithmetic in local time: both sides pinned to local
@@ -444,8 +469,14 @@ async function handleMessageScoped(session: Session, raw: string, opts: MessageO
       session.pending = undefined;
       return { text: "Cancelled — nothing changed.", chips: HELP_CHIPS.slice(0, 3) };
     }
-    // anything else cancels the pending action (but still process the new message)
-    session.pending = undefined;
+    // An enrichment offer card can arrive via the background tick, and the
+    // launch reply tells the user to say `enrichment status` to check on the
+    // job — that status check is part of the same flow and must not kill the
+    // parked save. (meridianEnrichStatusReply re-presents the offer below.)
+    // Anything else cancels the pending action (but still processes the new message).
+    if (!(session.pending.type === "enrich_save" && intent.name === "meridian_enrich_status")) {
+      session.pending = undefined;
+    }
   }
 
   session.history.push({ role: "user", text: raw });
@@ -510,6 +541,18 @@ async function dispatchChoice(session: Session, ch: ChoiceState, id: number | st
     if (!r) return { text: "That recon seems to be gone — say `meridian recons` to see the current list." };
     if (action === "meridian_entities") return entitiesReplyFor(r, payload.etype);
     return dossierReplyFor(r);
+  }
+  if (ch.kind === "enrich_target") {
+    const [type, idStr] = String(id).split(":");
+    const eid = Number(idStr);
+    if (type === "company") {
+      const co = (await crm.getCompanies()).find((c) => c.id === eid);
+      if (!co) return { text: "That company seems to be gone — try the enrichment again.", chips: ["Help"] };
+      return launchEnrich(session, enrichTargetOf("company", co));
+    }
+    const ct = (await crm.getContacts()).find((c) => c.id === eid);
+    if (!ct) return { text: "That contact seems to be gone — try the enrichment again.", chips: ["Help"] };
+    return launchEnrich(session, enrichTargetOf("contact", ct));
   }
   if (ch.kind === "prep") {
     const p = ch.then.payload?.sel?.[id];
@@ -576,6 +619,27 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
   }
   if (p.type === "capture") return captureSave(session, p.payload as CapturePayload);
   if (p.type === "plan_tasks") return planTasksSave(session, p.payload as { goal: string; steps: string[] });
+  if (p.type === "enrich_save") {
+    // The dossier write-back: gated behind the user's explicit Yes on the
+    // offer card. It lands in exec-crm itself, in an "Enrichment dossier"
+    // text custom field on the contact/company (created on first use), with
+    // earlier dossiers preserved underneath. Pure HTTP — never exec-crm's DB.
+    const { targetType, targetId, targetName, dossier } = p.payload as {
+      targetType: "contact" | "company"; targetId: number; targetName: string; dossier: string;
+    };
+    const saved = await saveEnrichmentDossier(targetType, targetId, targetName, dossier);
+    if (!saved.ok) {
+      return {
+        text: `I couldn't save the dossier to exec-crm: ${saved.error}. The enrichment results are still in this chat — say \`enrich ${targetName}\` to run it again.`,
+        chips: ["Help"],
+      };
+    }
+    const noun = targetType === "company" ? "company" : "contact";
+    return {
+      text: `Saved the dossier to the **${ENRICH_DOSSIER_FIELD}** field on the ${noun} **${targetName}** in exec-crm${saved.appended ? " (added to the earlier dossier)" : ""} — it shows under their custom fields whenever you look them up.`,
+      chips: [`Show custom fields for ${noun} ${targetName}`, "Morning brief"],
+    };
+  }
   if (p.type === "vcard_import") {
     return vcardImportRun(session, p.payload.cards as ParsedVCard[]);
   }
@@ -1339,6 +1403,224 @@ async function meridianRequestReply(session: Session, city: string): Promise<Rep
   };
 }
 
+// ---- meridian enrichment: company profile + principal contacts ------------------
+// "meridian enrich Acme" / "enrich Acme": fuzzy-match across exec-crm contacts
+// AND companies, POST /api/enrich, then poll GET /api/enrich/:id via
+// `enrichment status`. The scrape can take longer than a few seconds, so the
+// job is async — the chat never blocks on it. Nothing is written anywhere
+// until the user says Yes on the offer card.
+
+interface EnrichTarget {
+  type: "contact" | "company"; id: number; name: string;
+  website: string | null; lookupName: string;
+}
+
+function enrichTargetOf(
+  type: "contact" | "company", item: crm.Contact | crm.Company,
+): EnrichTarget {
+  if (type === "company") {
+    const co = item as crm.Company;
+    return { type, id: co.id, name: co.name, website: co.website || null, lookupName: co.website || co.name };
+  }
+  const c = item as crm.Contact;
+  return { type, id: c.id, name: c.name, website: null, lookupName: c.company_name || c.name };
+}
+
+/** Fuzzy-match the query across contacts and companies; disambiguate when close. */
+async function meridianEnrichReply(session: Session, query: string): Promise<Reply> {
+  query = query.trim();
+  if (!query) {
+    return { text: "Enrich which company? Try `enrich Acme`.", chips: ["Help"] };
+  }
+  let contacts: crm.Match<crm.Contact>[] = [], companies: crm.Match<crm.Company>[] = [];
+  try {
+    [contacts, companies] = await Promise.all([crm.resolveContact(query), crm.resolveCompany(query)]);
+  } catch {
+    return { text: `I can't reach exec-crm at ${crm.crmBase()} to look up "${query}". Is it running?`, chips: ["Help"] };
+  }
+  const opts = [
+    ...companies.map((m) => ({ m, type: "company" as const })),
+    ...contacts.map((m) => ({ m, type: "contact" as const })),
+  ];
+  if (!opts.length) {
+    return {
+      text: `I couldn't find any contact or company matching "${query}". Add it first with \`add company ${query}\`, then say \`enrich ${query}\` again.`,
+      chips: ["Help"],
+    };
+  }
+  const [top, second] = [opts[0], opts[1]];
+  if (top.m.score >= 70 && (!second || top.m.score - second.m.score >= 20)) {
+    return launchEnrich(session, enrichTargetOf(top.type, top.m.item));
+  }
+  const options = opts.slice(0, 5).map((o, i) => ({
+    id: `${o.type}:${o.m.item.id}`, n: i + 1, label: o.m.item.name,
+    sub: o.type === "company" ? "company"
+      : `contact${(o.m.item as crm.Contact).company_name ? " · " + (o.m.item as crm.Contact).company_name : ""}`,
+  }));
+  session.choice = {
+    kind: "enrich_target", options,
+    then: { action: "meridian_enrich_launch", payload: {} },
+  };
+  return {
+    text: `A few match "${query}" — which one should I enrich?`,
+    cards: [{ kind: "choices", options }],
+    chips: options.map((o) => String(o.n)),
+  };
+}
+
+/** Start the Meridian job and park it on the session for status polling. */
+async function launchEnrich(session: Session, target: EnrichTarget): Promise<Reply> {
+  const res = await mer.requestEnrich(target.website || target.lookupName);
+  if (!res.ok) {
+    if (res.unreachable) return meridianDown();
+    return { text: `Meridian wouldn't start the enrichment: ${res.error}`, chips: ["Meridian recons"] };
+  }
+  session.enrichJob = {
+    job_id: res.job_id, targetType: target.type, targetId: target.id,
+    targetName: target.name, at: Date.now(),
+  };
+  const short = res.job_id.length > 8 ? res.job_id.slice(0, 8) : res.job_id;
+  return {
+    text: `🔍 Enriching **${target.name}** — scraping their public site for the company profile and principal contacts (job \`${short}\`). It can take a while; I'll check on it every 30 seconds and drop the results here when it's done, or say \`enrichment status\` any time.`,
+    chips: ["Enrichment status", "Meridian recons"],
+  };
+}
+
+/** One poll of the parked job: progress, the offer card, or a plain failure. */
+async function meridianEnrichStatusReply(session: Session): Promise<Reply> {
+  // The 30s tick may already have delivered the offer card and parked the
+  // save — the job is done, so don't report "nothing running"; re-present
+  // the pending question instead (the pending survives this intent, see the
+  // enrich_save carve-out in handleMessage).
+  if (session.pending?.type === "enrich_save") {
+    const p = session.pending.payload as { targetType: string; targetName: string };
+    return {
+      text: `The dossier for **${p.targetName}** is ready and waiting — save it to the **${ENRICH_DOSSIER_FIELD}** field on the ${p.targetType} in exec-crm?`,
+      cards: [{ kind: "confirm", options: [{ n: 1, label: "Yes, save it" }, { n: 2, label: "Cancel" }] }],
+      chips: ["Yes", "No"],
+    };
+  }
+  const job = session.enrichJob;
+  if (!job) {
+    return { text: "No enrichment is running right now. Say `enrich Acme` to start one.", chips: ["Help"] };
+  }
+  const r = await mer.getEnrichJob(job.job_id);
+  if (!r) return meridianDown();
+  if (r.status === "running") {
+    const p = r.progress || { done: 0, total: 0 };
+    const pct = p.total ? ` — ${p.done}/${p.total}` : "";
+    const cur = p.current ? ` (${p.current})` : "";
+    const ageMin = Math.round((Date.now() - job.at) / 60000);
+    const stale = ageMin >= 20
+      ? ` It's been ${ageMin} minutes, which is unusually long — the job may be stuck; its id is \`${job.job_id}\`.`
+      : "";
+    return {
+      text: `Still running${pct}${cur}.${stale} Say \`enrichment status\` again to check.`,
+      chips: ["Enrichment status"],
+    };
+  }
+  session.enrichJob = undefined;
+  return enrichTerminalReply(session, job, r);
+}
+
+/**
+ * Build the chat reply for a terminal enrichment job. Exported so the 30s
+ * background tick can deliver the same offer card / failure note without a
+ * user message. On `done` with principals, parks an `enrich_save` pending
+ * action — nothing is written to exec-crm until the user says Yes.
+ */
+export function enrichTerminalReply(session: Session, job: EnrichJobState, r: mer.EnrichJob): Reply {
+  if (r.status === "failed") {
+    return {
+      text: `The enrichment for **${job.targetName}** failed: ${r.error || "unknown error"}.`,
+      chips: ["Meridian recons"],
+    };
+  }
+  return enrichOfferReply(session, job, r);
+}
+
+/** Plain-text dossier for the exec-crm custom field (rendered as plain text there). */
+function enrichDossierPlainText(job: mer.EnrichJob): string {
+  const c = job.company!;
+  const lines = [`${c.name}${c.domain ? ` (${c.domain})` : ""}`];
+  const bits = [
+    c.description,
+    c.founded ? `founded ${c.founded}` : "",
+    c.employees ? `${c.employees} employees` : "",
+  ].filter(Boolean);
+  if (bits.length) lines.push(bits.join(" · "));
+  lines.push("", "Principals");
+  for (const p of job.principals || []) {
+    lines.push(`- ${p.name} — ${p.title}${p.email ? ` · ${p.email}` : ""}`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Write the dossier to exec-crm's "Enrichment dossier" text custom field on
+ * the contact/company, creating the field on first use and preserving any
+ * earlier dossier underneath a separator. HTTP only — never exec-crm's DB.
+ */
+export async function saveEnrichmentDossier(
+  targetType: "contact" | "company", targetId: number, _targetName: string, dossier: string,
+): Promise<{ ok: boolean; appended: boolean; error?: string }> {
+  try {
+    const fields = await crm.getCustomFields(targetType);
+    let field = fields.find((f) => f.name.toLowerCase() === ENRICH_DOSSIER_FIELD.toLowerCase());
+    if (!field) field = await crm.addCustomField(targetType, ENRICH_DOSSIER_FIELD, "text");
+    const vals = await crm.getCustomFieldValues(targetType, targetId);
+    const old = (vals.find((f) => f.id === field!.id)?.value || "").trim();
+    const stamp = todayStr(); // local calendar day
+    const entry = `Enriched ${stamp}:\n${dossier}`;
+    const merged = old ? `${old}\n\n---\n\n${entry}` : entry;
+    await crm.setCustomFieldValue(field.id, targetId, merged);
+    return { ok: true, appended: old.length > 0 };
+  } catch (e: any) {
+    return { ok: false, appended: false, error: String(e?.message || e).slice(0, 160) };
+  }
+}
+
+function enrichDossierText(job: mer.EnrichJob): string {
+  const c = job.company!;
+  const lines = [`**${c.name}**${c.domain ? ` (${c.domain})` : ""}`];
+  const bits = [
+    c.description,
+    c.founded ? `founded ${c.founded}` : "",
+    c.employees ? `${c.employees} employees` : "",
+  ].filter(Boolean);
+  if (bits.length) lines.push(bits.join(" · "));
+  lines.push("", "**Principals**");
+  for (const p of job.principals || []) {
+    lines.push(`- ${p.name} — ${p.title}${p.email ? ` · ${p.email}` : ""}`);
+  }
+  return lines.join("\n");
+}
+
+/** Job done: offer card with the dossier; Yes writes it to exec-crm. */
+function enrichOfferReply(session: Session, job: EnrichJobState, r: mer.EnrichJob): Reply {
+  const principals = r.principals || [];
+  if (!r.company || !principals.length) {
+    const why = (r.notes || []).length ? ` (${r.notes.join("; ")})` : "";
+    return {
+      text: `The enrichment for **${job.targetName}** finished, but I couldn't find any principals on their public pages${why}.`,
+      chips: ["Meridian recons"],
+    };
+  }
+  const dossier = enrichDossierText(r);
+  session.pending = {
+    type: "enrich_save", label: job.targetName,
+    payload: {
+      targetType: job.targetType, targetId: job.targetId,
+      targetName: job.targetName, dossier: enrichDossierPlainText(r),
+    },
+  };
+  return {
+    text: `${dossier}\n\nSave this dossier to the **${ENRICH_DOSSIER_FIELD}** field on the ${job.targetType} **${job.targetName}** in exec-crm?`,
+    cards: [{ kind: "confirm", options: [{ n: 1, label: "Yes, save it" }, { n: 2, label: "Cancel" }] }],
+    chips: ["Yes", "No"],
+  };
+}
+
 // ---- incoming Meridian completion callback -----------------------------------------
 // POST /api/hooks/meridian receives Meridian's run-completion POST
 // { run_id, city, label, status, nodes, edges, result_url, export_url }.
@@ -1386,6 +1668,8 @@ async function dispatchMeridian(session: Session, slots: Record<string, string>,
     case "meridian_dossier": return meridianDossierReply(session, raw);
     case "meridian_entities": return meridianEntitiesReply(session, slots, raw);
     case "meridian_request": return meridianRequestReply(session, slots.city || "");
+    case "meridian_enrich": return meridianEnrichReply(session, slots.query || "");
+    case "meridian_enrich_status": return meridianEnrichStatusReply(session);
   }
   return { text: "Nothing to do." };
 }
@@ -1497,6 +1781,8 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
     case "meridian_dossier":
     case "meridian_entities":
     case "meridian_request":
+    case "meridian_enrich":
+    case "meridian_enrich_status":
       try {
         return await dispatchMeridian(session, s, intent.name, opts.raw || "");
       } catch (e: any) {
@@ -2095,14 +2381,20 @@ async function tasksReply(filter?: string, search?: string): Promise<Reply> {
   if (search) {
     const q = search.toLowerCase();
     tasks = tasks.filter((t) => t.title.toLowerCase().includes(q));
+  } else if (filter === "overdue") {
+    const today = todayStr(); // local calendar day, same rule as the exec-crm widget
+    tasks = tasks.filter((t) => !t.done && t.due_date && t.due_date < today);
   } else if (filter !== "done") {
     tasks = tasks.filter((t) => !t.done);
   } else {
     tasks = tasks.filter((t) => t.done);
   }
   tasks.sort((a, b) => (a.due_date || "9999").localeCompare(b.due_date || "9999"));
-  if (!tasks.length) return { text: filter === "done" ? "No completed tasks yet." : "All clear — no open tasks.", chips: ["Morning brief"] };
-  const label = filter === "done" ? "Completed tasks" : search ? `Tasks matching "${search}"` : "Open tasks";
+  if (!tasks.length) return {
+    text: filter === "done" ? "No completed tasks yet." : filter === "overdue" ? "No overdue tasks — nothing past due." : "All clear — no open tasks.",
+    chips: ["Morning brief"],
+  };
+  const label = filter === "done" ? "Completed tasks" : filter === "overdue" ? "Overdue tasks" : search ? `Tasks matching "${search}"` : "Open tasks";
   return {
     text: `${label} — ${tasks.length}:`,
     cards: [{ kind: "tasks", title: label, items: tasks.slice(0, 25) }],
@@ -2859,9 +3151,10 @@ async function planWeekReply(): Promise<Reply> {
   const p = await gatherPlanData();
   const today = todayStr();
   const days: string[] = [];
+  const dayBase = new Date(); dayBase.setHours(0, 0, 0, 0); // local midnight: day buckets must match gatherPlanData's local "today"
   for (let i = 0; i < 7; i++) {
-    const d = new Date(); d.setDate(d.getDate() + i);
-    days.push(d.toISOString().slice(0, 10));
+    const d = new Date(dayBase); d.setDate(d.getDate() + i);
+    days.push(todayStr(d));
   }
   const lines = [`🗓️ **Plan for the week**`, ""];
   if (p.overdue.length) lines.push(`**Overdue — clear first:**\n${p.overdue.map(taskLine).join("\n")}`, "");

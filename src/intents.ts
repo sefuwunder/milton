@@ -23,6 +23,7 @@ export type IntentName =
   | "list_workspaces" | "switch_workspace" | "current_workspace"
   | "chat_session" // named chat sessions; slots.action = new|list|switch|rename|delete|current
   | "list_recons" | "meridian_dossier" | "meridian_entities" | "meridian_request"
+  | "meridian_enrich" | "meridian_enrich_status"
   | "list_stages" | "add_stage" | "rename_stage" | "delete_stage" | "move_stage"
   | "add_custom_field" | "set_custom_field" | "show_custom_fields" | "delete_custom_field"
   | "confirm_yes" | "confirm_no" | "choose_number"
@@ -67,6 +68,7 @@ export const INTENT_NAMES: IntentName[] = [
   "list_workspaces", "switch_workspace", "current_workspace",
   "chat_session",
   "list_recons", "meridian_dossier", "meridian_entities", "meridian_request",
+  "meridian_enrich", "meridian_enrich_status",
   "list_stages", "add_stage", "rename_stage", "delete_stage", "move_stage",
   "add_custom_field", "set_custom_field", "show_custom_fields", "delete_custom_field",
   "confirm_yes", "confirm_no", "choose_number",
@@ -112,7 +114,7 @@ const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "frida
 
 export function parseDate(s: string, ref: Date = new Date()): string | null {
   const t = s.toLowerCase().trim();
-  const fmt = (d: Date) => d.toISOString().slice(0, 10);
+  const fmt = (d: Date) => { const p = (n: number) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; }; // local calendar day, not UTC
   if (/^today$/.test(t)) return fmt(ref);
   if (/^tomorrow$/.test(t)) { const d = new Date(ref); d.setDate(d.getDate() + 1); return fmt(d); }
   if (/^next week$/.test(t)) { const d = new Date(ref); d.setDate(d.getDate() + 7); return fmt(d); }
@@ -355,6 +357,9 @@ export function parseIntent(raw: string): Intent {
   // "meridian recon Austin" requests a NEW run; "meridian recon(s)" lists sprints.
   else if (/^meridian recons?$/.test(text)) set("list_recons");
   else if ((m = cased.match(/^meridian (?:recon|run) (.+)$/i))) set("meridian_request", { city: m[1].trim() });
+  else if ((m = cased.match(/^meridian enrich (.+)$/i))) set("meridian_enrich", { query: m[1].trim() });
+  else if ((m = cased.match(/^enrich (.+)$/i))) set("meridian_enrich", { query: m[1].trim() });
+  else if (/^(enrichment status|check enrichment)$/i.test(text)) set("meridian_enrich_status");
   else if ((m = text.match(/^meridian dossier (.+)$/))) set("meridian_dossier", { query: m[1].trim() });
   else if ((m = text.match(/^meridian entities (.+)$/))) {
     // Optional trailing type filter: "meridian entities austin company".
@@ -415,6 +420,7 @@ export function parseIntent(raw: string): Intent {
   else if ((m = text.match(/^(?:list |show |get |all )?companies?(?: (?:named|called|like|for) (.+))?$/))) set("companies", m[1] ? { search: m[1] } : {});
   else if (/^(tasks?|to-?dos?|my tasks?|open tasks?|pending tasks?|what'?s (on|due)|due (today|tomorrow|this week))$/.test(text)) set("tasks");
   else if (/^(completed tasks?|done tasks?|finished tasks?)$/.test(text)) set("tasks", { filter: "done" });
+  else if (/^(overdue|overdue tasks?|my overdue tasks?|show overdue( tasks?)?|list overdue( tasks?)?|get overdue( tasks?)?|what'?s overdue|what is overdue)$/.test(text)) set("tasks", { filter: "overdue" });
   else if (/^(deals?|opportunities|open deals?|all deals?|my deals?)$/.test(text)) set("deals");
   else if ((m = text.match(/^deals from (.+)$/))) set("deals_by_source", { source: m[1].trim() });
   else if (/^(?:show|list|find|check)(?: me)? duplicates$/.test(text)) set("duplicates");
@@ -604,7 +610,7 @@ export const HELP_LEVELS: HelpLevel[] = [
     title: "🟢 Beginner — everyday commands",
     rows: [
       { cmds: [["morning brief", "brief"]], note: "today's digest: pipeline, closing soon, tasks, activity" },
-      { cmds: [["my tasks", "tasks"], ["kpis", "kpis"], ["list deals in negotiation", "deals"], ["show negotiation deals", "deals"], ["show deal Acme", "deal_detail"]], note: "" },
+      { cmds: [["my tasks", "tasks"], ["overdue tasks", "tasks"], ["kpis", "kpis"], ["list deals in negotiation", "deals"], ["show negotiation deals", "deals"], ["show deal Acme", "deal_detail"]], note: "" },
       { cmds: [["deal journey Acme", "deal_journey"], ["deals from Referral", "deals_by_source"]], note: "stage-history timeline and source-filtered deals" },
       { cmds: [["what's blocking the launch", "task_blockers"], ["show duplicates", "duplicates"]], note: "task blockers; find duplicate contacts & companies" },
       { cmds: [["new deal", "wizard_start"], ["new contact", "wizard_start"], ["new company", "wizard_start"], ["new task", "wizard_start"]], note: "guided setup — one question at a time, skip or cancel anytime" },
@@ -641,6 +647,7 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["add custom field Renewal date to contacts", "add_custom_field"], ["set Renewal date to 2026-10-01 for contact Amara", "set_custom_field"]], note: "custom fields on contacts, companies, campaigns & tasks" },
       { cmds: [["show custom fields for contacts", "show_custom_fields"], ["remove custom field Renewal date from contacts", "delete_custom_field"]], note: "" },
       { cmds: [["meridian recon Austin", "meridian_request"]], note: "request a new Meridian recon — I report back when it finishes" },
+      { cmds: [["meridian enrich Acme", "meridian_enrich"], ["enrichment status", "meridian_enrich_status"]], note: "enrich a company: public profile + principal contacts from its own site, then save the dossier to my notes" },
       { cmds: [["meridian entities Austin company", "meridian_entities"]], note: "its orgs, filtered by type" },
       { cmds: [["analyze my pipeline", "analyze_pipeline"], ["forecast", "forecast"]], note: "pipeline stats & weighted forecast — deterministic, plus analyst-model insights when set" },
       { cmds: [["plan my day", "plan_day"], ["plan my week", "plan_week"]], note: "prioritized plan from tasks, closing deals, stale deals" },

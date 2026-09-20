@@ -3,6 +3,7 @@
 import { describe, test, expect, beforeAll } from "bun:test";
 import { Database } from "bun:sqlite";
 import { handleMessage, type Session } from "../src/brain";
+import * as mer from "../src/meridian";
 import { parseIntent } from "../src/intents";
 import { parseIntentFuzzy } from "../src/fuzzy";
 import {
@@ -319,6 +320,7 @@ describe("new lesson spot checks", () => {
     const s = freshSession();
     await handleMessage(s, "tutorial");
     for (let i = 0; i < 8; i++) await handleMessage(s, "skip"); // land on meridian (step 9)
+    mer.clearReconCache(); // a warm recon-list cache from an earlier file would mask "unreachable"
     const r = await handleMessage(s, "meridian recons");
     expect(s.tutorial).toMatchObject({ active: true, step: 9 });
     expect(r.text).toMatch(/can't reach meridian/i);

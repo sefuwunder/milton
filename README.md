@@ -58,7 +58,7 @@ If the model endpoint is misconfigured (wrong model name, unreachable host), Mil
 
 **Tutorial mode** — say `tutorial` (or `teach me milton`) for a guided walkthrough: 6 short steps from reading the pipeline (`top deals`) through deal details, notes, analysis, and `pin this as a widget`, up to routines and automations. Typos and paraphrases count — the tutorial accepts any phrasing the normal parser would. Controls: `skip` / `next`, `back`, `tutorial status`, `exit tutorial`, `restart tutorial`. Off-script commands work normally mid-tutorial and you're never trapped; progress is kept in your session, so re-entering resumes where you left off.
 
-**Look things up** — `show pipeline` · `kpis` · `show deal Acme` · `list deals in negotiation` · `show negotiation deals` · `find contacts named jane` · `who is Jane Doe` · `search acme` · `my tasks` · `recent activity` · `webhooks` · `delivery log`
+**Look things up** — `show pipeline` · `kpis` · `show deal Acme` · `list deals in negotiation` · `show negotiation deals` · `find contacts named jane` · `who is Jane Doe` · `search acme` · `my tasks` · `overdue tasks` · `recent activity` · `webhooks` · `delivery log`
 
 **Analysis (all offline, deterministic)** — `sales cycle` (average creation-to-won + where deals stall) · `top deals` (biggest open deals) · `campaign stats` (open/won/win rate per campaign) · `closing soon` (30-day closes with weighted values) · `stale deals` (30d+ untouched, oldest first)
 

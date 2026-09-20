@@ -2,7 +2,8 @@
 // Bun + zero dependencies + SQLite. Everything stays on your machine.
 
 import { Database } from "bun:sqlite";
-import { handleMessage, tickAutomation, handleWebhookEvent, handleMeridianCallback, type Session, type Reply, type UploadRef } from "./brain";
+import { handleMessage, tickAutomation, handleWebhookEvent, handleMeridianCallback, enrichTerminalReply, enrichTickDecision, type Session, type Reply, type UploadRef, type EnrichJobState } from "./brain";
+import { getEnrichJob } from "./meridian";
 import { ping, crmBase } from "./crm";
 import { helpText } from "./intents";
 import { detectKind } from "./ocr";
@@ -71,7 +72,7 @@ function loadSession(id: string): Session {
   if (row) {
     try {
       const st = JSON.parse(row.state);
-      s = { id, pending: st.pending, choice: st.choice, history: st.history || [], lastOcr: st.lastOcr, notes: st.notes || [], lastWidgetable: st.lastWidgetable, tutorial: st.tutorial };
+      s = { id, pending: st.pending, choice: st.choice, enrichJob: st.enrichJob, history: st.history || [], lastOcr: st.lastOcr, notes: st.notes || [], lastWidgetable: st.lastWidgetable, tutorial: st.tutorial };
     } catch {
       s = { id, history: [], notes: [] };
       db.query("UPDATE sessions SET state = ? WHERE id = ?").run(JSON.stringify({ history: [], notes: [] }), id);
@@ -89,7 +90,7 @@ function loadSession(id: string): Session {
 
 function saveSession(s: Session) {
   db.query("UPDATE sessions SET state = ?, updated_at = datetime('now') WHERE id = ?")
-    .run(JSON.stringify({ pending: s.pending, choice: s.choice, history: s.history.slice(-40), lastOcr: s.lastOcr, notes: (s.notes || []).slice(-20), lastWidgetable: s.lastWidgetable, tutorial: s.tutorial }), s.id);
+    .run(JSON.stringify({ pending: s.pending, choice: s.choice, enrichJob: s.enrichJob, history: s.history.slice(-40), lastOcr: s.lastOcr, notes: (s.notes || []).slice(-20), lastWidgetable: s.lastWidgetable, tutorial: s.tutorial }), s.id);
 }
 
 function logMessage(sessionId: string, role: string, text: string) {
@@ -446,12 +447,57 @@ console.log(`LLM mode: ${embedded ? `embedded (${embedded.label})` : process.env
 console.log(`automation scheduler: every 30s${process.env.MILTON_HOOK_SECRET ? "" : " (incoming webhooks disabled: set MILTON_HOOK_SECRET)"}`);
 if (!crmOk) console.log("Hint: start exec-crm first, or set EXEC_CRM_URL (or MILTON_CRM_URL) to its address.");
 
+// ---- enrichment tick: 30s background poll of in-flight Meridian jobs --------
+// The scrape can take longer than a few seconds, so the chat never blocks on
+// it: this tick polls every parked job on the same 30s cadence as the
+// automation scheduler. On a terminal state the completion (offer card or
+// failure note) is appended to the session and pushed over SSE, so the user
+// sees it without asking. A job still "running" past ENRICH_JOB_TIMEOUT_MS
+// is treated as stalled — Meridian caps jobs at ~60s, so anything older than
+// that means Meridian died mid-job.
+async function tickEnrichment() {
+  let rows: { id: string; state: string }[] = [];
+  try { rows = db.query("SELECT id, state FROM sessions").all() as any[]; }
+  catch { return; }
+  for (const row of rows) {
+    let st: any;
+    try { st = JSON.parse(row.state); } catch { continue; }
+    const job = st.enrichJob as EnrichJobState | undefined;
+    if (!job?.job_id) continue;
+    let r;
+    try { r = await getEnrichJob(job.job_id); }
+    catch { continue; } // Meridian unreachable this round — try again next tick
+    if (!r) continue;
+    const decision = enrichTickDecision(job, r.status, Date.now());
+    if (decision === "keep") continue;
+    const session = loadSession(row.id);
+    // A chat turn may have resolved it concurrently — don't double-deliver.
+    if (session.enrichJob?.job_id !== job.job_id) continue;
+    session.enrichJob = undefined;
+    const reply: Reply = decision === "stale"
+      ? {
+        text: `The enrichment for **${job.targetName}** seems to have stalled — it's been running far longer than Meridian's ~60s job cap, so Meridian probably restarted mid-scrape. Say \`enrich ${job.targetName}\` to try again.`,
+        chips: ["Meridian recons"],
+      }
+      : enrichTerminalReply(session, job, r);
+    session.history.push({ role: "milton", text: reply.text });
+    saveSession(session);
+    logMessage(row.id, "milton", reply.text);
+    auto.broadcastSse("enrichment-done", {
+      session_id: row.id, target_name: job.targetName, decision, reply,
+    });
+  }
+}
+
 // scheduler: run due schedules every 30s (plus one sweep shortly after boot)
 let ticking = false;
 async function sweep() {
   if (ticking) return;
   ticking = true;
-  try { await tickAutomation(Date.now()); }
+  try {
+    await tickAutomation(Date.now());
+    await tickEnrichment();
+  }
   catch (e) { console.error("scheduler sweep failed:", e); }
   finally { ticking = false; }
 }
@@ -459,4 +505,4 @@ setInterval(sweep, 30000);
 setTimeout(sweep, 5000);
 
 // exported for tests (boots the server against MILTON_DATA on import)
-export { server };
+export { server, loadSession, saveSession, tickEnrichment };
