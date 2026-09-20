@@ -317,6 +317,103 @@ export function computeForecast(deals: Deal[], stages: Stage[], ref: Date = new 
   return { quarter: q, openCount: open.length, openValue: openTotal, weightedTotal, perStage, wonThisQuarter, wonThisQuarterCount: wonQ.length, topDeal, facts };
 }
 
+// ---- sales cycle & campaign performance ------------------------------------------
+// Deterministic, offline, no model. Cycle times use each closed deal's last
+// update as its close date (exec-crm records no stage history) — callers must
+// say so. Per-stage dwell is current-stage dwell: how long open deals have sat
+// untouched in the stage they're in now, a stall proxy, not true stage history.
+
+function median(nums: number[]): number | null {
+  if (!nums.length) return null;
+  const s = [...nums].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : Math.round((s[m - 1] + s[m]) / 2);
+}
+
+export interface StageDwell { slug: string; label: string; count: number; medianDwell: number | null }
+export interface SalesCycle {
+  closedWonCount: number;
+  avgDays: number | null; medianDays: number | null; minDays: number | null; maxDays: number | null;
+  perStage: StageDwell[];
+  stalest: StageDwell | null;
+  facts: string;
+}
+
+export function computeSalesCycle(deals: Deal[], stages: Stage[]): SalesCycle {
+  const labels: Record<string, string> = {};
+  for (const s of stages) labels[s.slug] = s.name;
+  const label = (slug: string) => labels[slug] || slug.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+
+  const won = deals.filter((d) => d.stage === "closed_won");
+  const cycles = won
+    .map((d) => {
+      const c = daysSinceStr(d.created_at), u = daysSinceStr(d.updated_at);
+      return c !== null && u !== null && c >= u ? c - u : null; // creation older than last update
+    })
+    .filter((n): n is number => n !== null);
+  const avgDays = cycles.length ? Math.round(cycles.reduce((a, b) => a + b, 0) / cycles.length) : null;
+
+  const open = deals.filter((d) => !d.stage.startsWith("closed_"));
+  const order = stages.length ? stages.map((s) => s.slug) : [...new Set(open.map((d) => d.stage))];
+  const perStage: StageDwell[] = order.map((slug) => {
+    const ds = open.filter((d) => d.stage === slug);
+    const dwells = ds.map((d) => daysSinceStr(d.updated_at)).filter((n): n is number => n !== null);
+    return { slug, label: label(slug), count: ds.length, medianDwell: median(dwells) };
+  });
+  const stalest = perStage
+    .filter((s) => s.count > 0 && s.medianDwell !== null)
+    .sort((a, b) => (b.medianDwell as number) - (a.medianDwell as number))[0] || null;
+
+  const facts = [
+    cycles.length
+      ? `Sales cycle (creation to close, close = last update): ${cycles.length} closed-won deals, avg ${avgDays}d, median ${median(cycles)}d, range ${Math.min(...cycles)}-${Math.max(...cycles)}d.`
+      : "No closed-won deals with usable dates — no cycle average.",
+    ...perStage.filter((s) => s.count > 0 && s.medianDwell !== null)
+      .map((s) => `${s.label}: ${s.count} open deals, median ${s.medianDwell}d current-stage dwell.`),
+    stalest ? `Stalest stage: ${stalest.label} (median ${stalest.medianDwell}d).` : "",
+  ].filter(Boolean).join("\n");
+
+  return {
+    closedWonCount: cycles.length, avgDays, medianDays: median(cycles),
+    minDays: cycles.length ? Math.min(...cycles) : null,
+    maxDays: cycles.length ? Math.max(...cycles) : null,
+    perStage, stalest, facts,
+  };
+}
+
+export interface CampaignPerf {
+  id: number; name: string;
+  openCount: number; openValue: number;
+  wonCount: number; wonValue: number; lostCount: number;
+  winRate: number | null;
+}
+
+export function computeCampaignStats(deals: Deal[], campaigns: { id: number; name: string }[]): CampaignPerf[] {
+  const nameOf = new Map(campaigns.map((c) => [c.id, c.name]));
+  const agg = new Map<number, CampaignPerf>();
+  for (const d of deals) {
+    const cid = d.campaign_id;
+    if (typeof cid !== "number") continue;
+    let e = agg.get(cid);
+    if (!e) {
+      e = {
+        id: cid, name: nameOf.get(cid) || `Campaign #${cid}`,
+        openCount: 0, openValue: 0, wonCount: 0, wonValue: 0, lostCount: 0, winRate: null,
+      };
+      agg.set(cid, e);
+    }
+    if (d.stage === "closed_won") { e.wonCount++; e.wonValue += d.value || 0; }
+    else if (d.stage === "closed_lost") { e.lostCount++; }
+    else { e.openCount++; e.openValue += d.value || 0; }
+  }
+  for (const e of agg.values()) {
+    const decided = e.wonCount + e.lostCount;
+    e.winRate = decided ? e.wonCount / decided : null;
+  }
+  // ranked by open pipeline value
+  return [...agg.values()].sort((a, b) => b.openValue - a.openValue);
+}
+
 // ---- prompt discipline ----------------------------------------------------------
 // Small models do best with a tight role, a demand for short structured output,
 // and facts only — no raw records, no room to ramble.

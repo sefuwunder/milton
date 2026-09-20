@@ -4,6 +4,7 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { initAutomationDb } from "../src/automation";
+import { initDealNotesDb } from "../src/deal_notes";
 import { parseIntent } from "../src/intents";
 import * as an from "../src/analyst";
 import { handleMessage, runRoutineUnattended, type Session } from "../src/brain";
@@ -101,6 +102,7 @@ beforeEach(() => {
   for (const k of ENV_KEYS) delete process.env[k];
   (globalThis as any).fetch = stubFetch;
   initAutomationDb(new Database(":memory:"));
+  initDealNotesDb(new Database(":memory:"));
   an.setEmbeddedEndpoint(null);
   calls.length = 0;
   llmMode = "ok";
@@ -335,14 +337,19 @@ describe("plan my day / plan my week", () => {
 });
 
 describe("break down", () => {
-  test("without LLM -> clean needs-model message, no writes", async () => {
+  test("without LLM -> deterministic template, still confirms before writing", async () => {
     const s = sess();
     const r = await handleMessage(s, "break down launch event");
-    expect(r.text).toContain("needs the analyst model");
-    expect(r.text).toContain("MILTON_LLM_URL");
-    expect(r.text).toContain("MILTON_ANALYST_MODEL");
-    expect(s.pending).toBeUndefined();
+    expect(r.text).toContain("Here's a plan");
+    expect(r.text).toContain("generated offline from a template");
+    expect(r.text).toContain("analyst model will make these smarter");
+    expect(r.cards?.[0]?.kind).toBe("confirm");
+    expect(s.pending?.type).toBe("plan_tasks");
     expect(calls.some((c) => c.method === "POST")).toBe(false);
+    const steps = (s.pending as any).payload.steps as string[];
+    const r2 = await handleMessage(s, "yes");
+    expect(r2.text).toContain(`Created ${steps.length} tasks`);
+    expect(calls.filter((c) => c.method === "POST" && c.url.includes("/api/tasks")).length).toBe(steps.length);
   });
   test("with LLM -> confirm card, yes creates tasks", async () => {
     process.env.MILTON_LLM_URL = LLM_URL;

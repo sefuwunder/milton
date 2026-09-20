@@ -97,6 +97,12 @@ export async function getCampaigns(): Promise<Campaign[]> {
   const j = await req("/api/campaigns");
   return j.campaigns || [];
 }
+/** exec-crm requires a valid company_id for new campaigns (400 otherwise) and
+ *  autopopulates its standard sales-workflow tasks on creation. */
+export async function createCampaign(c: { name: string; company_id: number }): Promise<Campaign> {
+  const j = await req("/api/campaigns", "POST", c);
+  return j.campaign;
+}
 
 export async function createDeal(d: Partial<Deal>): Promise<Deal> {
   const j = await req("/api/deals", "POST", d);

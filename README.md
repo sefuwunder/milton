@@ -54,9 +54,13 @@ If the model endpoint is misconfigured (wrong model name, unreachable host), Mil
 
 **Look & feel** — Tokyo day/night theme: follows your OS automatically, or tap 🌓 in the topbar to cycle Auto → Light → Dark.
 
-**Look things up** — `show pipeline` · `kpis` · `show deal Acme` · `list deals in negotiation` · `find contacts named jane` · `my tasks` · `recent activity` · `webhooks` · `delivery log`
+**Look things up** — `show pipeline` · `kpis` · `show deal Acme` · `list deals in negotiation` · `show negotiation deals` · `find contacts named jane` · `who is Jane Doe` · `search acme` · `my tasks` · `recent activity` · `webhooks` · `delivery log`
 
-**Work the pipeline** — `add deal Website redesign for Acme worth 50k close friday` · `move Acme deal to negotiation` · `mark Acme deal as won` · `set Acme deal value to 75k` · `delete deal Old Opp` (asks first)
+**Analysis (all offline, deterministic)** — `sales cycle` (average creation-to-won + where deals stall) · `top deals` (biggest open deals) · `campaign stats` (open/won/win rate per campaign) · `closing soon` (30-day closes with weighted values) · `stale deals` (30d+ untouched, oldest first)
+
+**Work the pipeline** — `add deal Website redesign for Acme worth 50k close friday` · `move Acme deal to negotiation` · `mark Acme deal as won` (asks first, like lost) · `set Acme deal value to 75k` · `note on Acme: called today, wants the proposal` · `new campaign Q4 Push for Acme` · `delete deal Old Opp` (asks first)
+
+**Deal notes** — exec-crm has no deal-notes endpoint, so `note on <deal> <text>` pins notes in Milton's own SQLite (keyed by deal + workspace) and shows them on deal lookups.
 
 **People & tasks** — `add contact Jane Doe at Acme jane@acme.com` · `add company Globex` · `add task Call Acme tomorrow` · `remind me to send the proposal friday` · `complete task 3`
 
@@ -69,7 +73,7 @@ A small LLM (self-contained sidecar or your `MILTON_LLM_URL`) turns your CRM dat
 - `analyze my pipeline` — per-stage counts/totals, average days since update, win rate, stale deals (30d+), top campaigns by open value; the analyst adds a short "so what" read
 - `forecast` — weighted forecast from deal probabilities (falling back to stage weights: prospecting 10%, qualification 25%, proposal 50%, negotiation 75%), closed-won this quarter, largest-deal concentration; the analyst adds a risk read
 - `plan my day` / `plan my week` — overdue first, then due today / this week, deals closing soon, stale deals needing attention; the analyst optionally time-blocks the day
-- `break down launch event` — the analyst turns a goal into numbered steps and asks before creating them as tasks (requires the model; never writes without confirmation)
+- `break down launch event` — an offline built-in template turns a goal into research, milestone, execution, and review steps and asks before creating them as tasks (the analyst model will make breakdowns smarter when it returns)
 
 Related env: `MILTON_ANALYST_MODEL` (default `MILTON_LLM_MODEL`, then `local-model`), `MILTON_LLM_TIMEOUT_MS` (default `90000`). If the model is unreachable Milton keeps the deterministic brief and adds a one-line note — including a `NO_PROXY=localhost,127.0.0.1` hint when a proxy looks like it's intercepting loopback traffic.
 

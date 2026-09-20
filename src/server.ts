@@ -9,6 +9,7 @@ import { detectKind } from "./ocr";
 import * as auto from "./automation";
 import { initWorkspaceDb, listWorkspaces, getSessionWorkspace, setSessionWorkspace } from "./workspace";
 import { initReconRunsDb } from "./recon_runs";
+import { initDealNotesDb } from "./deal_notes";
 import { hookSecret, verifyHookSecret } from "./hookauth";
 import { embeddedDecision, startEmbedded, type EmbeddedServer } from "./embedded";
 import { llmEndpointBase, analystModel } from "./analyst";
@@ -45,6 +46,7 @@ db.exec(`
 auto.initAutomationDb(db);
 initWorkspaceDb(db);
 initReconRunsDb(db);
+initDealNotesDb(db);
 
 // Incoming webhooks share one auth pattern: 503 when MILTON_HOOK_SECRET isn't
 // configured, 401 on a bad X-Milton-Secret (constant-time comparison).

@@ -10,6 +10,7 @@ import * as an from "./analyst";
 import * as auto from "./automation";
 import * as wss from "./workspace";
 import * as reconRuns from "./recon_runs";
+import * as dealNotes from "./deal_notes";
 import { hookSecret } from "./hookauth";
 
 export interface Card {
@@ -256,6 +257,19 @@ async function handleMessageScoped(session: Session, raw: string, opts: MessageO
   if (session.pending?.type === "capture" && intent.name !== "confirm_yes" && intent.name !== "confirm_no") {
     return captureCorrectReply(session, raw);
   }
+  // 2e) resolve a pending campaign company: the reply names the company the
+  // new campaign belongs to (exec-crm requires one).
+  if (session.pending?.type === "add_campaign_company" && intent.name !== "confirm_no") {
+    const p = session.pending; session.pending = undefined;
+    const ms = await crm.resolveCompany(raw);
+    if (!ms.length) {
+      return {
+        text: `No company matching "${raw}" — add it first with \`add company ${raw}\`, then say \`new campaign ${p.payload.name}\` again.`,
+        chips: ["Help"],
+      };
+    }
+    return createCampaignReply(p.payload.name, ms[0].item.id, ms[0].item.name);
+  }
   if (session.pending) {
     if (intent.name === "confirm_yes") {
       const p = session.pending; session.pending = undefined;
@@ -296,6 +310,12 @@ async function dispatchChoice(session: Session, ch: ChoiceState, id: number | st
     const deal = deals.find((d) => d.id === id);
     if (!deal) return { text: "That deal seems to be gone — try again." };
     return dealAction(session, action, deal, payload);
+  }
+  if (ch.kind === "contact") {
+    const contacts = await crm.getContacts();
+    const c = contacts.find((x) => x.id === id);
+    if (!c) return { text: "That contact seems to be gone — try again." };
+    return contactDetailCard(session, c);
   }
   if (ch.kind === "task") {
     const tasks = await crm.getTasks();
@@ -339,6 +359,10 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
     const deal = await crm.patchDeal(p.payload.id, { stage: "closed_lost" });
     return { text: `Marked "${deal.title}" as lost.`, cards: [dealCard(deal)], chips: ["Show pipeline", "Morning brief"] };
   }
+  if (p.type === "close_won") {
+    const deal = await crm.patchDeal(p.payload.id, { stage: "closed_won", probability: 100 });
+    return { text: `🎉 "${deal.title}" is **won** — ${fmtMoney(deal.value)} in the books.`, cards: [dealCard(deal)], chips: ["Show pipeline", "Morning brief"] };
+  }
   if (p.type === "delete_task") {
     await crm.deleteTask(p.payload.id);
     return { text: `Deleted task "${p.label}".`, chips: ["My tasks"] };
@@ -371,11 +395,11 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
 // ---- automations: routines, schedules, triggers ------------------------------------
 // Intents that currently ask for confirmation before acting. Routine steps resolving
 // to these never auto-confirm: interactive runs ask once up front, unattended runs skip.
-const DESTRUCTIVE_PENDING = new Set(["delete_deal", "delete_task", "close_lost", "delete_stage"]);
+const DESTRUCTIVE_PENDING = new Set(["delete_deal", "delete_task", "close_lost", "close_won", "delete_stage"]);
 
 function isDestructiveIntent(intent: Intent): boolean {
   if (intent.name === "delete_deal" || intent.name === "delete_task" || intent.name === "delete_stage") return true;
-  if (intent.name === "close_deal" && intent.slots.result === "lost") return true;
+  if (intent.name === "close_deal") return true; // won and lost both move money / pipeline state
   return false;
 }
 
@@ -1023,7 +1047,7 @@ async function dispatch(session: Session, intent: Intent, opts: MessageOpts): Pr
   switch (intent.name) {
     case "help": return { text: helpText(), chips: HELP_CHIPS };
     case "pipeline": return pipelineReply();
-    case "deals": return dealsReply(s.stage, s.search);
+    case "deals": return dealsReply(s.stage, s.search, s.stage_name);
     case "deal_detail": return dealDetailReply(session, s.query);
     case "kpis": return kpisReply();
     case "tasks": return tasksReply(s.filter, s.search);
@@ -1037,6 +1061,12 @@ async function dispatch(session: Session, intent: Intent, opts: MessageOpts): Pr
     case "plan_day": return planDayReply();
     case "plan_week": return planWeekReply();
     case "plan_breakdown": return planBreakdownReply(session, s.goal || "");
+    case "sales_cycle": return salesCycleReply();
+    case "top_deals": return topDealsReply();
+    case "campaign_stats": return campaignStatsReply();
+    case "closing_soon": return closingSoonReply();
+    case "contact_detail": return contactDetailReply(session, s.query || "");
+    case "search": return searchReply(s.query || "");
     case "activities": return activitiesReply();
     case "webhooks": return webhooksReply();
     case "hooks": return hooksReply();
@@ -1090,6 +1120,8 @@ async function dispatch(session: Session, intent: Intent, opts: MessageOpts): Pr
     case "close_deal": return dealByName(session, s.query, "close_deal", { result: s.result });
     case "delete_deal": return dealByName(session, s.query, "delete_deal", {});
     case "set_deal_field": return dealByName(session, s.query, "set_deal_field", { field: s.field, value: s.value });
+    case "add_note": return addNoteReply(session, s);
+    case "add_campaign": return addCampaignReply(session, s);
 
     case "list_stages": return stagesReply();
     case "add_stage": return addStageReply(session, s);
@@ -1276,16 +1308,40 @@ async function pipelineReply(): Promise<Reply> {
   };
 }
 
-async function dealsReply(stage?: string, search?: string): Promise<Reply> {
+async function dealsReply(stage?: string, search?: string, stageName?: string): Promise<Reply> {
   let deals = await crm.getDeals();
-  if (stage) deals = deals.filter((d) => d.stage === stage);
+  let label = "All deals";
+  if (stage) {
+    deals = deals.filter((d) => d.stage === stage);
+    label = `Deals in ${stageLabel(stage)}`;
+  } else if (stageName) {
+    // Editable/custom stages: match against the workspace's real pipeline,
+    // normalizing punctuation so "pre negotiation" finds "Pre-Negotiation".
+    // Unambiguous normalized match wins; anything ambiguous stays honest.
+    const stages = await crm.getStages();
+    const norm = (s: string) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const qn = norm(stageName);
+    let st = stages.find((x) => norm(x.slug) === qn || norm(x.name) === qn);
+    if (!st) {
+      const toks = stageName.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+      const cands = stages.filter((x) =>
+        toks.length > 0 && toks.every((t) => norm(x.name).includes(t) || norm(x.slug).includes(t)));
+      if (cands.length === 1) st = cands[0];
+    }
+    if (!st) {
+      const names = stages.map((s) => s.name).join(", ");
+      return { text: `I couldn't find a stage called "${stageName}". Current stages: ${names || "none yet"}.`, chips: ["Stages", "Show pipeline"] };
+    }
+    deals = deals.filter((d) => d.stage === st.slug);
+    label = `Deals in ${st.name}`;
+  }
   if (search) {
     const q = search.toLowerCase();
     deals = deals.filter((d) => d.title.toLowerCase().includes(q) || (d.company_name || "").toLowerCase().includes(q));
+    label = `Deals matching "${search}"`;
   }
   deals.sort((a, b) => (b.value || 0) - (a.value || 0));
   if (!deals.length) return { text: "No deals match.", chips: ["Show pipeline"] };
-  const label = stage ? `Deals in ${stageLabel(stage)}` : search ? `Deals matching "${search}"` : "All deals";
   return {
     text: `${label} — ${deals.length} deal${deals.length === 1 ? "" : "s"}, ${fmtMoney(deals.reduce((a, d) => a + (d.value || 0), 0))} total.`,
     cards: [{ kind: "deals", title: label, items: deals.slice(0, 20) }],
@@ -1296,9 +1352,12 @@ async function dealsReply(stage?: string, search?: string): Promise<Reply> {
 async function dealDetailReply(session: Session, query: string): Promise<Reply> {
   if (!query) return { text: "Which deal? Try `show deal Acme`." };
   const { deal, matches } = await pickDeal(query);
-  if (deal) return { text: `"${deal.title}" at a glance:`, cards: [dealCard(deal)], chips: [`Move ${deal.title} to negotiation`, `Set ${deal.title} value to …`, "Show pipeline"] };
+  if (deal) {
+    const lines = [`"${deal.title}" at a glance:`, ...dealNotesLines(deal, session)];
+    return { text: lines.join("\n"), cards: [dealCard(deal)], chips: [`Move ${deal.title} to negotiation`, `Set ${deal.title} value to …`, "Show pipeline"] };
+  }
   const need = await needOne(matches, "deal", (d) => d.title, (d) => `${stageLabel(d.stage)} · ${fmtMoney(d.value)}`, { action: "deal_detail", payload: {} }, "deal");
-  if (need.item) return { text: `"${need.item.title}" at a glance:`, cards: [dealCard(need.item)] };
+  if (need.item) return dealAction(session, "deal_detail", need.item as crm.Deal, {});
   session.choice = {
     kind: "deal",
     options: matches.slice(0, 5).map((m, i) => ({ id: m.item.id, n: i + 1, label: m.item.title, sub: `${stageLabel(m.item.stage)} · ${fmtMoney(m.item.value)}` })),
@@ -1443,8 +1502,12 @@ async function hygieneReply(): Promise<Reply> {
   const findings: { icon: string; text: string; fix?: string }[] = [];
   const noClose = open.filter((d) => !d.expected_close);
   if (noClose.length) findings.push({ icon: "📅", text: `${noClose.length} deal${noClose.length === 1 ? "" : "s"} with no expected close date: ${noClose.slice(0, 4).map((d) => d.title).join(", ")}${noClose.length > 4 ? "…" : ""}`, fix: `Set ${noClose[0].title} close date to …` });
-  const stale = open.filter((d) => { const n = daysUntil(d.updated_at.slice(0, 10)); return n !== null && n < -30; });
-  if (stale.length) findings.push({ icon: "🕸️", text: `${stale.length} stale deal${stale.length === 1 ? "" : "s"} untouched for 30+ days: ${stale.slice(0, 4).map((d) => d.title).join(", ")}${stale.length > 4 ? "…" : ""}` });
+  const noValue = open.filter((d) => !d.value);
+  if (noValue.length) findings.push({ icon: "💰", text: `${noValue.length} deal${noValue.length === 1 ? "" : "s"} with no value set: ${noValue.slice(0, 4).map((d) => d.title).join(", ")}${noValue.length > 4 ? "…" : ""}`, fix: `Set ${noValue[0].title} value to …` });
+  const stale = open
+    .filter((d) => { const n = daysUntil(d.updated_at.slice(0, 10)); return n !== null && n < -30; })
+    .sort((a, b) => a.updated_at.localeCompare(b.updated_at)); // oldest first
+  if (stale.length) findings.push({ icon: "🕸️", text: `${stale.length} stale deal${stale.length === 1 ? "" : "s"} untouched for 30+ days (oldest first): ${stale.slice(0, 4).map((d) => d.title).join(", ")}${stale.length > 4 ? "…" : ""}` });
   const noContact = open.filter((d) => !d.contact_id);
   if (noContact.length) findings.push({ icon: "👤", text: `${noContact.length} deal${noContact.length === 1 ? "" : "s"} with no contact attached: ${noContact.slice(0, 4).map((d) => d.title).join(", ")}${noContact.length > 4 ? "…" : ""}` });
   const overdue = tasks.filter((t) => !t.done && t.due_date && t.due_date < today);
@@ -1457,6 +1520,273 @@ async function hygieneReply(): Promise<Reply> {
     cards: [{ kind: "findings", title: "Pipeline hygiene", items: findings }],
     chips: ["Show pipeline", "My tasks"],
   };
+}
+
+// ---- sales cycle, top deals, campaigns, closing soon -----------------------------------
+// Read-only, deterministic, offline. Every figure below is computed from the
+// CRM records in this workspace — no model involved.
+
+async function salesCycleReply(): Promise<Reply> {
+  const [deals, stages] = await Promise.all([crm.getDeals(), crm.getStages()]);
+  const sc = an.computeSalesCycle(deals, stages);
+  const lines = [
+    `⏱️ **Sales cycle**`,
+    "",
+    sc.avgDays !== null
+      ? `**Average: ${sc.avgDays} days** from creation to won (${sc.closedWonCount} closed-won deal${sc.closedWonCount === 1 ? "" : "s"}) · median ${sc.medianDays}d · range ${sc.minDays}–${sc.maxDays}d`
+      : "No closed-won deals with usable dates yet — nothing to average.",
+    `_Close dates use each deal's last update; exec-crm doesn't record stage history, so treat cycle times as approximations._`,
+    "",
+    `**Current-stage dwell** — how long open deals have sat untouched in the stage they're in now (a stall proxy, not true per-stage history):`,
+    ...sc.perStage.filter((s) => s.count > 0).map((s) =>
+      `• **${s.label}** — ${s.count} deal${s.count === 1 ? "" : "s"} · median ${s.medianDwell}d in stage`),
+    sc.stalest
+      ? `\n🐌 **Stalest stage: ${sc.stalest.label}** — deals sitting a median ${sc.stalest.medianDwell} days. Worth a push.`
+      : "",
+  ];
+  return {
+    text: lines.filter((l) => l !== "").join("\n").replace(/\n{3,}/g, "\n\n"),
+    chips: ["Analyze my pipeline", "What needs attention", "Show pipeline"],
+  };
+}
+
+async function topDealsReply(): Promise<Reply> {
+  const deals = await crm.getDeals();
+  const open = deals.filter((d) => !d.stage.startsWith("closed_")).sort((a, b) => (b.value || 0) - (a.value || 0));
+  if (!open.length) return { text: "No open deals.", chips: ["Show pipeline"] };
+  const top = open.slice(0, 10);
+  const lines = top.map((d, i) => {
+    const n = daysSince(d.updated_at);
+    return `${i + 1}. **${d.title}** — ${stageLabel(d.stage)} · ${fmtMoney(d.value)}${n !== null ? ` · ${n}d since update` : ""}`;
+  });
+  return {
+    text: `🏆 **Top ${top.length} open deal${top.length === 1 ? "" : "s"}** by value:\n${lines.join("\n")}`,
+    cards: [{ kind: "deals", title: "Top deals", items: top }],
+    chips: ["Show pipeline", "Closing soon", "Sales cycle"],
+  };
+}
+
+async function campaignStatsReply(): Promise<Reply> {
+  const [deals, campaigns] = await Promise.all([
+    crm.getDeals(), crm.getCampaigns().catch(() => [] as crm.Campaign[]),
+  ]);
+  const stats = an.computeCampaignStats(deals, campaigns);
+  if (!stats.length) {
+    return { text: "No campaigns with deals on record yet.", chips: ["Analyze my pipeline", "Show pipeline"] };
+  }
+  const lines = stats.map((c) =>
+    `• **${c.name}** — ${c.openCount} open (${fmtMoney(c.openValue)}) · ${c.wonCount} won (${fmtMoney(c.wonValue)}) · ${c.lostCount} lost` +
+    (c.winRate !== null ? ` · **win rate ${Math.round(c.winRate * 100)}%**` : ""));
+  return {
+    text: `📣 **Campaign performance** (ranked by open pipeline):\n${lines.join("\n")}`,
+    chips: ["Analyze my pipeline", "Show pipeline"],
+  };
+}
+
+async function closingSoonReply(): Promise<Reply> {
+  const deals = await crm.getDeals();
+  const hits = deals
+    .filter((d) => !d.stage.startsWith("closed_") && d.expected_close)
+    .map((d) => ({ d, n: daysUntil(d.expected_close) }))
+    .filter((x): x is { d: crm.Deal; n: number } => x.n !== null && x.n >= 0 && x.n <= 30)
+    .sort((a, b) => a.n - b.n);
+  if (!hits.length) {
+    return { text: "Nothing scheduled to close in the next 30 days.", chips: ["Show pipeline", "Forecast"] };
+  }
+  const total = hits.reduce((a, x) => a + (x.d.value || 0), 0);
+  const wsum = Math.round(hits.reduce((a, x) => a + (x.d.value || 0) * an.dealWeight(x.d), 0));
+  const when = (n: number) => n === 0 ? "today" : n === 1 ? "tomorrow" : `in ${n}d`;
+  const lines = hits.map(({ d, n }) => {
+    const w = Math.round((d.value || 0) * an.dealWeight(d));
+    return `• **${d.title}** — closes ${d.expected_close} (${when(n)}) · ${fmtMoney(d.value)} → **${fmtMoney(w)}** weighted · ${stageLabel(d.stage)}`;
+  });
+  return {
+    text: `📅 **Closing in the next 30 days** — ${hits.length} deal${hits.length === 1 ? "" : "s"} · ${fmtMoney(total)} pipeline → **${fmtMoney(wsum)}** weighted:\n${lines.join("\n")}\n_Weights: deal probability when set, else stage defaults (prospecting 10%, qualification 25%, proposal 50%, negotiation 75%)._`,
+    cards: [{ kind: "deals", title: "Closing soon", items: hits.map((x) => x.d) }],
+    chips: ["Forecast", "Show pipeline", "Plan my day"],
+  };
+}
+
+// ---- contact detail + cross-entity search -------------------------------------------------
+
+function dealNotesLines(deal: crm.Deal, session: Session): string[] {
+  const notes = dealNotes.getDealNotes(deal.id, session.workspaceId ?? null);
+  if (!notes.length) return [];
+  return [
+    "",
+    `**Notes on this deal (${notes.length}):**`,
+    ...notes.slice(-5).reverse().map((n) => `• ${n.text} _(${(n.at || "").slice(0, 10)})_`),
+  ];
+}
+
+async function contactDetailReply(session: Session, query: string): Promise<Reply> {
+  if (!query) return { text: "Which contact? Try `who is Jane Doe`.", chips: ["List contacts"] };
+  const matches = await crm.resolveContact(query);
+  const need = await needOne(matches, "contact",
+    (c) => c.name, (c) => c.company_name || c.email || "",
+    { action: "contact_detail", payload: {} }, "contact");
+  if (need.item) return contactDetailCard(session, need.item as crm.Contact);
+  session.choice = {
+    kind: "contact",
+    options: matches.slice(0, 5).map((m, i) => ({ id: m.item.id, n: i + 1, label: m.item.name, sub: m.item.company_name || m.item.email || "" })),
+    then: { action: "contact_detail", payload: {} },
+  };
+  return need.reply!;
+}
+
+async function contactDetailCard(session: Session, c: crm.Contact): Promise<Reply> {
+  const [deals, companies, tasks] = await Promise.all([crm.getDeals(), crm.getCompanies(), crm.getTasks()]);
+  const company = c.company_id ? companies.find((x) => x.id === c.company_id) : undefined;
+  const linked = deals
+    .filter((d) => !d.stage.startsWith("closed_") && (d.contact_id === c.id || (company != null && d.company_id === company.id)))
+    .sort((a, b) => (b.value || 0) - (a.value || 0));
+  const dealIds = new Set(linked.map((d) => d.id));
+  const linkedTasks = tasks.filter((t) => !t.done && t.deal_id != null && dealIds.has(t.deal_id));
+  const openValue = linked.reduce((a, d) => a + (d.value || 0), 0);
+  // exec-crm's activity feed carries no contact linkage, so "last touch" is
+  // the most recent update across their linked deals — labeled honestly.
+  const lastTouch = linked.map((d) => d.updated_at).filter(Boolean).sort().pop();
+
+  const contactLine = [c.email ? `📧 ${c.email}` : "", c.phone ? `📞 ${c.phone}` : ""].filter(Boolean).join(" · ")
+    || "_No email or phone on file._";
+  const lines = [
+    `👤 **${c.name}**${c.title ? ` — ${c.title}` : ""}`,
+    contactLine,
+    company ? `🏢 **${company.name}**${company.industry ? ` — ${company.industry}` : ""}` : (c.company_name ? `🏢 ${c.company_name}` : "_No company linked._"),
+    c.notes ? `📝 ${c.notes.slice(0, 300)}` : "",
+    "",
+    linked.length
+      ? `**Open deals (${linked.length}, ${fmtMoney(openValue)}):**\n${linked.map((d) => `• **${d.title}** — ${stageLabel(d.stage)} · ${fmtMoney(d.value)}`).join("\n")}`
+      : "No open deals linked.",
+    linkedTasks.length ? `**Open tasks:** ${linkedTasks.map((t) => t.title).join("; ")}` : "",
+    lastTouch ? `**Last touch:** ${lastTouch.slice(0, 10)} (most recent linked-deal update)` : "",
+  ];
+  return {
+    text: lines.filter((l) => l !== "").join("\n").replace(/\n{3,}/g, "\n\n"),
+    cards: [
+      ...(linked.length ? [{ kind: "deals" as const, title: "Open deals", items: linked }] : []),
+      ...(linkedTasks.length ? [{ kind: "tasks" as const, title: "Open tasks", items: linkedTasks }] : []),
+    ],
+    chips: ["Show pipeline", "My tasks", "Morning brief"],
+  };
+}
+
+async function searchReply(query: string): Promise<Reply> {
+  const q = (query || "").trim().toLowerCase();
+  if (!q) return { text: "Search for what? Try `search acme`.", chips: ["Help"] };
+  const [deals, contacts, companies, tasks] = await Promise.all([
+    crm.getDeals(), crm.getContacts(), crm.getCompanies(), crm.getTasks(),
+  ]);
+  const dHits = deals.filter((d) => d.title.toLowerCase().includes(q) || (d.company_name || "").toLowerCase().includes(q));
+  const cHits = contacts.filter((c) =>
+    c.name.toLowerCase().includes(q) || (c.email || "").toLowerCase().includes(q) || (c.company_name || "").toLowerCase().includes(q));
+  const coHits = companies.filter((c) => c.name.toLowerCase().includes(q));
+  const tHits = tasks.filter((t) => t.title.toLowerCase().includes(q));
+  const total = dHits.length + cHits.length + coHits.length + tHits.length;
+  if (!total) {
+    return { text: `Nothing matched "${query}" — no deals, contacts, companies, or tasks.`, chips: ["Show pipeline", "Help"] };
+  }
+  const grp = (icon: string, label: string, rows: string[]) => rows.length
+    ? {
+      icon,
+      text: `**${label} (${rows.length})**\n${rows.slice(0, 5).map((r) => `• ${r}`).join("\n")}${rows.length > 5 ? `\n• …and ${rows.length - 5} more` : ""}`,
+    }
+    : null;
+  const items = [
+    grp("💼", "Deals", dHits.map((d) => `**${d.title}** — ${stageLabel(d.stage)} · ${fmtMoney(d.value)}`)),
+    grp("👤", "Contacts", cHits.map((c) => `**${c.name}**${c.company_name ? ` — ${c.company_name}` : ""}${c.email ? ` · ${c.email}` : ""}`)),
+    grp("🏢", "Companies", coHits.map((c) => `**${c.name}**${c.industry ? ` — ${c.industry}` : ""}`)),
+    grp("✅", "Tasks", tHits.map((t) => `**${t.title}** — ${t.done ? "done" : duePhrase(t.due_date)}`)),
+  ].filter((x): x is { icon: string; text: string } => x !== null);
+  return {
+    text: `🔎 **Search "${query}"** — ${total} hit${total === 1 ? "" : "s"}:`,
+    cards: [{ kind: "findings", title: "Search results", items }],
+    chips: ["Show pipeline", "My tasks"],
+  };
+}
+
+// ---- deal notes + campaigns ------------------------------------------------------------------
+// exec-crm has no deal-notes endpoint, so notes persist in Milton's own SQLite
+// (src/deal_notes.ts), keyed by (deal_id, workspace_id), and surface on deal
+// lookups. Campaign creation needs a company (exec-crm 400s without one); the
+// company is asked for on the next turn when "for <company>" is missing.
+
+async function addNoteReply(session: Session, s: Record<string, string>): Promise<Reply> {
+  if (s.query && s.text) return dealByName(session, s.query, "add_note", { text: s.text });
+  const rest = (s.rest || "").trim();
+  if (!rest) return { text: "Note on which deal? Try `note on Acme: called today, wants the proposal`.", chips: ["List deals"] };
+  // Space form: the longest known deal title that prefixes the message wins;
+  // whatever follows it is the note text.
+  const deals = await crm.getDeals();
+  const low = rest.toLowerCase();
+  const hit = deals
+    .filter((d) => low.startsWith(d.title.toLowerCase()))
+    .sort((a, b) => b.title.length - a.title.length)[0];
+  if (!hit) {
+    return {
+      text: `I couldn't tell which deal you meant by "${rest}". Try \`note on <deal>: <text>\` with a colon between them.`,
+      chips: ["List deals"],
+    };
+  }
+  const text = rest.slice(hit.title.length).trim();
+  if (!text) return { text: `What should I note on "${hit.title}"? Try \`note on ${hit.title}: <text>\`.` };
+  return dealAction(session, "add_note", hit, { text });
+}
+
+async function addCampaignReply(session: Session, s: Record<string, string>): Promise<Reply> {
+  const name = (s.name || "").trim();
+  if (!name) return { text: "What should the campaign be called? Try `new campaign Q4 Push for Acme`." };
+  if (s.company) {
+    const ms = await crm.resolveCompany(s.company);
+    if (!ms.length) {
+      return {
+        text: `No company matching "${s.company}" — add it first with \`add company ${s.company}\`, then try again.`,
+        chips: ["List companies"],
+      };
+    }
+    return createCampaignReply(name, ms[0].item.id, ms[0].item.name);
+  }
+  session.pending = { type: "add_campaign_company", label: name, payload: { name } };
+  return { text: `Which company is **${name}** for?`, chips: ["Cancel"] };
+}
+
+async function createCampaignReply(name: string, companyId: number, companyName: string): Promise<Reply> {
+  try {
+    const c = await crm.createCampaign({ name, company_id: companyId });
+    return {
+      text: `Created campaign **"${c.name}"** for **${companyName}** — exec-crm also added its standard workflow tasks.`,
+      chips: ["Analyze my pipeline", "Campaign stats", "Show pipeline"],
+    };
+  } catch (e: any) {
+    const msg = String(e?.message || e);
+    const m = msg.match(/-> (\d+) (.*)$/);
+    return { text: m ? `Couldn't create the campaign: ${m[2]}` : `Couldn't create the campaign: ${msg.slice(0, 200)}`, chips: ["Help"] };
+  }
+}
+
+// ---- deterministic goal breakdown ------------------------------------------------------------
+// LLM integration is parked, so "break down <goal>" no longer refuses: a
+// built-in template derives numbered steps from the goal text (milestones,
+// research, execution pieces, review), then the existing confirmation →
+// task-creation flow. The analyst model will make breakdowns smarter when it
+// returns — planBreakdownReply still prefers it when configured.
+
+function deterministicBreakdown(goal: string): string[] {
+  const g = goal.trim().replace(/\s+/g, " ");
+  const parts = g.split(/\s+and\s+|,\s*|;\s*/).map((p) => p.trim()).filter((p) => p && p.toLowerCase() !== g.toLowerCase());
+  const steps = [
+    `Define what "done" looks like for ${g} — the success criteria and a deadline`,
+    `List the unknowns in ${g} and research the top three`,
+  ];
+  const execParts = parts.slice(0, 3);
+  if (execParts.length) {
+    for (const p of execParts) steps.push(`Execute the "${p}" piece of ${g}`);
+  } else {
+    steps.push(`Take the first concrete action toward ${g}`);
+    steps.push(`Work through ${g} in order of biggest risk first`);
+  }
+  steps.push(`Review ${g} against the success criteria and close out ${g}`);
+  return steps;
 }
 
 // ---- meeting prep brief -----------------------------------------------------------------
@@ -1815,9 +2145,14 @@ async function planBreakdownReply(session: Session, goal: string): Promise<Reply
   const g = (goal || "").trim();
   if (!g) return { text: "What should I break down? Try `break down launch event`.", chips: ["Help"] };
   if (!an.analystConfigured()) {
+    // LLM integration is parked: use the deterministic built-in template.
+    const steps = deterministicBreakdown(g);
+    session.pending = { type: "plan_tasks", label: g, payload: { goal: g, steps } };
+    const lines = steps.map((s, i) => `${i + 1}. ${s}`);
     return {
-      text: `Breaking down "${g}" needs the analyst model, and I don't see one configured — set \`MILTON_LLM_URL\` (and optionally \`MILTON_ANALYST_MODEL\`) and try again. I won't guess at steps without it.`,
-      chips: ["Help"],
+      text: `Here's a plan for **"${g}"** — research, milestones, execution, review (generated offline from a template; the analyst model will make these smarter when it returns):\n${lines.join("\n")}\nShould I create these ${steps.length} as tasks?`,
+      cards: [{ kind: "confirm", options: [{ n: 1, label: "Yes, create tasks" }, { n: 2, label: "Cancel" }] }],
+      chips: ["Yes", "No"],
     };
   }
   const r = await an.askAnalyst({ system: an.BREAKDOWN_SYSTEM, facts: `Goal: ${g}` });
@@ -1975,17 +2310,16 @@ async function dealAction(session: Session, action: string, deal: crm.Deal, payl
   }
   if (action === "close_deal") {
     const won = payload.result === "won";
-    if (!won) {
-      // confirm destructive-ish: mark lost
-      session.pending = { type: "close_lost", label: deal.title, payload: { id: deal.id } };
-      return {
-        text: `Mark "${deal.title}" as **lost**?`,
-        cards: [{ kind: "confirm", options: [{ n: 1, label: "Yes, mark lost" }, { n: 2, label: "Cancel" }] }],
-        chips: ["Yes", "No"],
-      };
-    }
-    const d = await crm.patchDeal(deal.id, { stage: "closed_won", probability: 100 });
-    return { text: `🎉 "${d.title}" is **won** — ${fmtMoney(d.value)} in the books.`, cards: [dealCard(d)], chips: ["Show pipeline", "Morning brief"] };
+    // Both directions ask first: closing moves pipeline state and money.
+    // Unattended runs skip these (DESTRUCTIVE_PENDING / isDestructiveIntent).
+    session.pending = { type: won ? "close_won" : "close_lost", label: deal.title, payload: { id: deal.id } };
+    return {
+      text: won
+        ? `Mark "${deal.title}" as **won** (${fmtMoney(deal.value)})?`
+        : `Mark "${deal.title}" as **lost**?`,
+      cards: [{ kind: "confirm", options: [{ n: 1, label: won ? "Yes, mark won" : "Yes, mark lost" }, { n: 2, label: "Cancel" }] }],
+      chips: ["Yes", "No"],
+    };
   }
   if (action === "delete_deal") {
     session.pending = { type: "delete_deal", label: deal.title, payload: { id: deal.id } };
@@ -2038,7 +2372,19 @@ async function dealAction(session: Session, action: string, deal: crm.Deal, payl
     };
   }
   if (action === "deal_detail") {
-    return { text: `"${deal.title}" at a glance:`, cards: [dealCard(deal)] };
+    const lines = [`"${deal.title}" at a glance:`, ...dealNotesLines(deal, session)];
+    return { text: lines.join("\n"), cards: [dealCard(deal)] };
+  }
+  if (action === "add_note") {
+    const text = String(payload.text || "").trim().slice(0, 2000);
+    if (!text) return { text: `What should I note on "${deal.title}"? Try \`note on ${deal.title}: <text>\`.` };
+    dealNotes.addDealNote(deal.id, text, session.workspaceId ?? null);
+    const n = dealNotes.countDealNotes(deal.id, session.workspaceId ?? null);
+    return {
+      text: `📝 Noted on **"${deal.title}"** — "${text.length > 120 ? text.slice(0, 120) + "…" : text}" (${n} note${n === 1 ? "" : "s"} on this deal).`,
+      cards: [dealCard(deal)],
+      chips: [`Show deal ${deal.title}`, "Morning brief"],
+    };
   }
   if (action === "add_task_deal") {
     const t = await crm.createTask({ title: payload.title, due_date: payload.due || "", deal_id: deal.id });

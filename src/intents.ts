@@ -14,6 +14,8 @@ export type IntentName =
   | "ocr_read" | "handwriting" | "save_note"
   | "prep_brief"
   | "analyze_pipeline" | "forecast" | "plan_day" | "plan_week" | "plan_breakdown"
+  | "sales_cycle" | "top_deals" | "campaign_stats" | "closing_soon"
+  | "contact_detail" | "search" | "add_note" | "add_campaign"
   | "save_routine" | "run_routine" | "list_routines" | "delete_routine" | "show_routine"
   | "schedule_add" | "list_schedules" | "unschedule" | "pause_schedule" | "resume_schedule"
   | "trigger_add" | "list_triggers" | "delete_trigger" | "trigger_help" | "list_runs"
@@ -43,6 +45,13 @@ export function parseStage(s: string): string | null {
   const t = s.toLowerCase().trim();
   return STAGE_ALIASES[t] || null;
 }
+
+// Longest-first alternation of every stage alias, for matchers like
+// "show negotiation deals" / "won deals".
+const STAGE_WORDS = Object.keys(STAGE_ALIASES)
+  .sort((a, b) => b.length - a.length)
+  .map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+  .join("|");
 
 export function parseMoney(s: string): number | null {
   const m = s.replace(/,/g, "").match(/\$?\s*(\d+(?:\.\d+)?)\s*([kmb])?/i);
@@ -303,6 +312,10 @@ export function parseIntent(raw: string): Intent {
   // Before the reads: "analyze my pipeline" must not fall through to "pipeline".
   else if (/^(analyze( my)? pipeline|pipeline stats|pipeline analysis|how'?s my pipeline|pipeline report)$/.test(text)) set("analyze_pipeline");
   else if (/^(forecast|sales forecast|revenue forecast|what will close this quarter|quarterly forecast|this quarter'?s forecast)$/.test(text)) set("forecast");
+  else if (/^(sales cycle|deal velocity|sales velocity|pipeline velocity|average sales cycle|cycle time|where do deals stall)$/.test(text)) set("sales_cycle");
+  else if (/^(top deals|biggest deals|largest deals|leaderboard)$/.test(text)) set("top_deals");
+  else if (/^(campaign performance|campaign roi|campaign stats|campaign report)$/.test(text)) set("campaign_stats");
+  else if (/^(closing soon|closing this month|upcoming closes|deals closing soon)$/.test(text)) set("closing_soon");
   else if (/^(plan my day|daily plan|plan today|today'?s plan)$/.test(text)) set("plan_day");
   else if (/^(plan my week|weekly plan|plan this week|this week'?s plan)$/.test(text)) set("plan_week");
   else if ((m = cased.match(/^break down (.+)$/i))) set("plan_breakdown", { goal: m[1].trim() });
@@ -310,7 +323,7 @@ export function parseIntent(raw: string): Intent {
 
   // ---- routines ---------------------------------------------------------------
   else if (/\b(morning brief|daily brief|brief me|briefing)\b/.test(text)) set("brief");
-  else if (/\b(pipeline hygiene|hygiene|health check|cleanup|stale deals)\b/.test(text)) set("hygiene");
+  else if (/\b(pipeline hygiene|hygiene|health check|cleanup|stale deals|what needs attention|needs attention)\b/.test(text)) set("hygiene");
 
   // ---- reads ------------------------------------------------------------------
   else if (/^(show |get |display )?(pipeline|funnel|board)( summary)?$/.test(text)) set("pipeline");
@@ -323,15 +336,28 @@ export function parseIntent(raw: string): Intent {
   else if (/^(tasks?|to-?dos?|my tasks?|open tasks?|pending tasks?|what'?s (on|due)|due (today|tomorrow|this week))$/.test(text)) set("tasks");
   else if (/^(completed tasks?|done tasks?|finished tasks?)$/.test(text)) set("tasks", { filter: "done" });
   else if (/^(deals?|opportunities|open deals?|all deals?|my deals?)$/.test(text)) set("deals");
+  else if ((m = text.match(new RegExp(`^(?:show |list |get )?(${STAGE_WORDS}) deals?$`)))) set("deals", { stage: parseStage(m[1])! });
   else if ((m = text.match(new RegExp(`^(?:list |show |get |all )?${DEAL_WORD}s? in (\\w[\\w ]*)$`)))) {
+    // hardcoded aliases resolve here; custom/editable stages resolve in
+    // brain.ts via crm.resolveStage (exec-crm lets users edit the pipeline).
     const st = parseStage(m[1]);
-    if (st) set("deals", { stage: st }); else set("deals", { search: m[1] });
+    if (st) set("deals", { stage: st }); else set("deals", { stage_name: m[1] });
+  }
+  // "show <stage> deals" for editable stages: "show pre negotiation deals".
+  // Hardcoded aliases are caught by the STAGE_WORDS matcher above.
+  else if ((m = text.match(/^(?:show |list |get )(.+?) deals?$/))) {
+    const st = parseStage(m[1]);
+    if (/^(all|my|open)$/.test(m[1])) set("deals");
+    else if (st) set("deals", { stage: st });
+    else set("deals", { stage_name: m[1] });
   }
   else if ((m = text.match(/^(?:list |show |get |find |search )?contacts?(?: (?:named|called|like|for) (.+))?$/))) set("contacts", m[1] ? { search: m[1] } : {});
   else if ((m = text.match(new RegExp(`^(?:show|get|open|display|tell me about) ${DEAL_WORD} (.+)$`)))) set("deal_detail", { query: m[1] });
-  else if ((m = text.match(/^(?:show|get|find|lookup|tell me about) contact (.+)$/))) set("contacts", { search: m[1] });
+  else if ((m = text.match(/^(?:show|get|find|lookup|tell me about) contact (.+)$/))) set("contact_detail", { query: m[1] });
+  else if ((m = text.match(/^(?:who is|who'?s) (.+)$/))) set("contact_detail", { query: m[1] });
   else if ((m = text.match(/^(?:show|get|find) company (.+)$/))) set("companies", { search: m[1] });
   else if ((m = text.match(/^(?:show|get|list) tasks?(?: for| about| on)? (.+)$/))) set("tasks", { search: m[1] });
+  else if ((m = text.match(/^search (.+)$/))) set("search", { query: m[1] });
 
   // ---- camera / OCR -------------------------------------------------------------
   else if (/^(read this|read the photo|read it|what does this say|what'?s in (this|the) (photo|picture|image)|transcribe (this|it|the photo|the image))$/.test(text)) set("ocr_read");
@@ -347,6 +373,11 @@ export function parseIntent(raw: string): Intent {
     if (st) set("move_deal", { query: stripDealWord(m[1]), stage: st });
   }
   else if ((m = text.match(new RegExp(`^delete ${DEAL_WORD} (.+)$`)))) set("delete_deal", { query: m[1] });
+  // Deal notes live in Milton's own SQLite (exec-crm has no deal-notes
+  // endpoint). Colon form is explicit; the space form splits on the longest
+  // known deal title in brain.ts.
+  else if ((m = text.match(/^(?:add )?note (?:on|to) (.+?)\s*:\s*(.+)$/))) set("add_note", { query: m[1].trim(), text: m[2].trim() });
+  else if ((m = text.match(/^(?:add )?note (?:on|to) (.+)$/))) set("add_note", { rest: m[1].trim() });
   else if ((m = text.match(/^(?:update |set )(?:deal )?(.+?) (value|worth|amount|probability|chance|close date|expected close|owner|contact|company) (?:to )?(.+)$/))) {
     set("set_deal_field", { query: stripDealWord(m[1]), field: m[2], value: m[3] });
   }
@@ -377,6 +408,14 @@ export function parseIntent(raw: string): Intent {
     set("add_contact", { name: rest.replace(/\s+/g, " ").trim(), company, email, phone });
   }
   else if ((m = text.match(/^(?:add|create|new)(?: a| an)? company (.+)$/))) set("add_company", { name: m[1] });
+  // Campaigns require a company in exec-crm; "for <company>" is optional here
+  // and asked for on the next turn when missing. Names keep their case.
+  else if ((m = cased.match(/^(?:add|create|new)(?: a| an)? campaign (.+)$/i))) {
+    let rest = m[1]; let company = "";
+    const fm = rest.match(/\sfor\s(.+)$/i);
+    if (fm) { company = fm[1].trim(); rest = rest.slice(0, fm.index).trim(); }
+    set("add_campaign", { name: rest, company });
+  }
   else if (/^import (?:these |the |my )?contacts?$/.test(text)) set("import_contacts");
   else if (/^import (?:the )?vcf(?: file)?$/.test(text)) set("import_contacts");
   else if (/^import vcard(?: file)?$/.test(text)) set("import_contacts");
@@ -425,7 +464,12 @@ export const HELP_LEVELS: HelpLevel[] = [
     title: "🟢 Beginner — everyday commands",
     rows: [
       { cmds: [["morning brief", "brief"]], note: "today's digest: pipeline, closing soon, tasks, activity" },
-      { cmds: [["my tasks", "tasks"], ["kpis", "kpis"], ["list deals in negotiation", "deals"], ["show deal Acme", "deal_detail"]], note: "" },
+      { cmds: [["my tasks", "tasks"], ["kpis", "kpis"], ["list deals in negotiation", "deals"], ["show negotiation deals", "deals"], ["show deal Acme", "deal_detail"]], note: "" },
+      { cmds: [["sales cycle", "sales_cycle"], ["top deals", "top_deals"], ["closing soon", "closing_soon"]], note: "where deals stall, biggest open deals, closes in the next 30 days" },
+      { cmds: [["campaign stats", "campaign_stats"], ["stale deals", "hygiene"], ["what needs attention", "hygiene"]], note: "campaign win rates & pipeline hygiene" },
+      { cmds: [["who is Jane Doe", "contact_detail"], ["search acme", "search"]], note: "contact detail cards and cross-entity search" },
+      { cmds: [["note on Acme: called today, wants the proposal", "add_note"]], note: "pin a note to a deal — kept in Milton, shown on deal lookup" },
+      { cmds: [["new campaign Q4 Push for Acme", "add_campaign"]], note: "campaigns need a company — I'll ask if you skip it" },
       { cmds: [["move Acme deal to negotiation", "move_deal"]], note: "" },
       { cmds: [["add contact Jane Doe at Acme jane@acme.com", "add_contact"]], note: "" },
       { cmds: [["add task Call Acme tomorrow", "add_task"]], note: "" },
@@ -450,7 +494,7 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["meridian entities Austin company", "meridian_entities"]], note: "its orgs, filtered by type" },
       { cmds: [["analyze my pipeline", "analyze_pipeline"], ["forecast", "forecast"]], note: "pipeline stats & weighted forecast — deterministic, plus analyst-model insights when set" },
       { cmds: [["plan my day", "plan_day"], ["plan my week", "plan_week"]], note: "prioritized plan from tasks, closing deals, stale deals" },
-      { cmds: [["break down launch event", "plan_breakdown"]], note: "the analyst model proposes steps — I ask before creating them as tasks" },
+      { cmds: [["break down launch event", "plan_breakdown"]], note: "numbered steps from a built-in template — I ask before creating them as tasks; the analyst model will make them smarter when it returns" },
     ],
   },
   {
@@ -461,6 +505,7 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["trigger help", "trigger_help"]], note: "every supported event" },
       { cmds: [["delete stage Discovery", "delete_stage"]], note: "asks first, moves its deals somewhere safe" },
       { cmds: [["delete deal Old Opp", "delete_deal"]], note: "destructive — always confirms first" },
+      { cmds: [["close Acme deal as won", "close_deal"], ["mark Acme deal as lost", "close_deal"]], note: "closing a deal asks first too" },
       { cmds: [["read this", "ocr_read"], ["analyze handwriting", "handwriting"]], note: "after 📷-snapping text" },
       { cmds: [], note: "Webhooks in: `POST /api/hooks/exec-crm` · `POST /api/hooks/meridian` (header `X-Milton-Secret` from `MILTON_HOOK_SECRET`)" },
       { cmds: [["automation runs", "list_runs"]], note: "history, 🔔 bell, and live toasts in the ⚙️ Automations panel" },

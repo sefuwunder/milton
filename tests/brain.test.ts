@@ -3,16 +3,17 @@ import { describe, test, expect, beforeAll, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { handleMessage, type Session } from "../src/brain";
 import * as auto from "../src/automation";
+import { initDealNotesDb } from "../src/deal_notes";
 
-beforeAll(() => { auto.initAutomationDb(new Database(":memory:")); });
+beforeAll(() => { auto.initAutomationDb(new Database(":memory:")); initDealNotesDb(new Database(":memory:")); });
 
 // ---- stub exec-crm ------------------------------------------------------------
 const calls: { method: string; path: string; body?: any }[] = [];
 
 const stubDeals = [
-  { id: 1, title: "Acme Website", company_id: 1, contact_id: 1, company_name: "Acme", contact_name: "Jane Doe", value: 50000, stage: "proposal", probability: 60, expected_close: "2026-09-25", owner: "", created_at: "2026-09-01", updated_at: "2026-09-18" },
-  { id: 2, title: "Acme Retainer", company_id: 1, contact_id: 1, company_name: "Acme", contact_name: "Jane Doe", value: 20000, stage: "negotiation", probability: 80, expected_close: "", owner: "", created_at: "2026-09-05", updated_at: "2026-08-01" },
-  { id: 3, title: "Globex Audit", company_id: 2, contact_id: null, company_name: "Globex", contact_name: null, value: 120000, stage: "qualification", probability: 30, expected_close: "2026-10-15", owner: "", created_at: "2026-09-10", updated_at: "2026-09-19" },
+  { id: 1, title: "Acme Website", company_id: 1, contact_id: 1, campaign_id: 1, company_name: "Acme", contact_name: "Jane Doe", value: 50000, stage: "proposal", probability: 60, expected_close: "2026-09-25", owner: "", created_at: "2026-09-01", updated_at: "2026-09-18" },
+  { id: 2, title: "Acme Retainer", company_id: 1, contact_id: 1, campaign_id: 1, company_name: "Acme", contact_name: "Jane Doe", value: 20000, stage: "negotiation", probability: 80, expected_close: "", owner: "", created_at: "2026-09-05", updated_at: "2026-08-01" },
+  { id: 3, title: "Globex Audit", company_id: 2, contact_id: null, campaign_id: 2, company_name: "Globex", contact_name: null, value: 120000, stage: "qualification", probability: 30, expected_close: "2026-10-15", owner: "", created_at: "2026-09-10", updated_at: "2026-09-19" },
 ];
 const stubContacts = [
   { id: 1, name: "Jane Doe", email: "jane@acme.com", phone: "", company_id: 1, company_name: "Acme", title: "", notes: "" },
@@ -61,6 +62,8 @@ function stubFetch(input: any, init: any = {}): Promise<Response> {
     return ok({ deal: { ...d, ...body } });
   }
   if (dealPatch && method === "DELETE") return ok({ ok: true });
+  if (method === "GET" && path === "/api/campaigns") return ok({ campaigns: [{ id: 1, name: "Q4 Push" }, { id: 2, name: "Summer Blast" }] });
+  if (method === "POST" && path === "/api/campaigns") return ok({ campaign: { id: 9, name: body.name, company_id: body.company_id } }, 201);
   if (method === "POST" && path === "/api/contacts") return ok({ contact: { id: 9, ...body } }, 201);
   if (method === "POST" && path === "/api/companies") return ok({ company: { id: 9, ...body } }, 201);
   if (method === "POST" && path === "/api/tasks") return ok({ task: { id: 9, done: 0, ...body } }, 201);
@@ -141,10 +144,15 @@ describe("deal writes", () => {
     // option 1 is "Acme Retainer" (id 2): tied fuzzy scores break alphabetically
     expect(calls.some((c) => c.method === "PATCH" && c.path === "/api/deals/2" && c.body.stage === "negotiation")).toBe(true);
   });
-  test("mark won", async () => {
-    const r = await handleMessage(freshSession(), "mark globex audit as won");
-    expect(r.text).toContain("won");
-    expect(calls.some((c) => c.method === "PATCH" && c.body.stage === "closed_won")).toBe(true);
+  test("mark won asks for confirmation, then closes on yes", async () => {
+    const s = freshSession();
+    const r1 = await handleMessage(s, "mark globex audit as won");
+    expect(r1.text).toContain("won");
+    expect(r1.cards?.[0].kind).toBe("confirm");
+    expect(calls.some((c) => c.method === "PATCH")).toBe(false);
+    const r2 = await handleMessage(s, "yes");
+    expect(r2.text).toContain("won");
+    expect(calls.some((c) => c.method === "PATCH" && c.body.stage === "closed_won" && c.body.probability === 100)).toBe(true);
   });
   test("mark lost asks for confirmation", async () => {
     const s = freshSession();
