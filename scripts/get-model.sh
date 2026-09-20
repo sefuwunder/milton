@@ -71,7 +71,8 @@ for d in json.load(sys.stdin):
 fi
 
 # ---- model -----------------------------------------------------------------------
-MODEL_URL="${MILTON_MODEL_URL:-https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf}"
+# Qwen's official GGUF repo only ships Q8_0; the Q4_K_M quant lives at unsloth.
+MODEL_URL="${MILTON_MODEL_URL:-https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf}"
 MODEL_FILE="$MODEL_DIR/$(basename "$MODEL_URL" | cut -d'?' -f1)"
 if [ -f "$MODEL_FILE" ] && [ "$FORCE" -eq 0 ]; then
   echo "model already present: $MODEL_FILE (use --force to re-fetch)"
