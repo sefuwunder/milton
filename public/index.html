@@ -59,6 +59,8 @@ try {
   <form id="composer" class="composer" autocomplete="off">
     <button type="button" id="cam-btn" class="cam" aria-label="Attach a photo or contacts file" title="Attach a photo or contacts file">📷</button>
     <input id="photo-input" type="file" accept="image/*,.vcf" hidden>
+    <button type="button" id="vcf-btn" class="cam" aria-label="Import contacts from a vCard file" title="Import contacts (.vcf)">📇</button>
+    <input id="vcf-input" type="file" accept=".vcf" hidden>
     <input id="input" type="text" placeholder="Ask Milton… e.g. &quot;morning brief&quot; or &quot;move Acme deal to negotiation&quot;" maxlength="2000" aria-label="Message Milton">
     <button type="submit" class="send" aria-label="Send">↑</button>
   </form>

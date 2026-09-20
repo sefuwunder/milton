@@ -7,7 +7,7 @@ function mkEl(tag: string): any {
     tag, children: [] as any[], innerHTML: "", textContent: "", value: "", className: "",
     appendChild(c: any) { this.children.push(c); return c; },
     insertAdjacentHTML(_p: string, h: string) { this.innerHTML += h; },
-    addEventListener() {}, remove() {}, focus() {}, scrollTop: 0, scrollHeight: 100,
+    addEventListener(t, h) { (this._l ||= {})[t] = h; }, remove() {}, focus() {}, scrollTop: 0, scrollHeight: 100,
     closest() { return null; }, getAttribute() { return null; },
     querySelector() { return null; }, querySelectorAll() { return []; },
     classList: { toggle() {}, add() {}, remove() {}, contains() { return false; } },
@@ -21,7 +21,7 @@ let els: Record<string, any>;
 beforeAll(async () => {
   els = {};
   ["chat", "chips", "composer", "input", "status-dot", "status-text", "help-btn",
-   "cam-btn", "photo-input", "tray", "bell-btn", "bell-badge", "auto-btn",
+   "cam-btn", "photo-input", "vcf-btn", "vcf-input", "tray", "bell-btn", "bell-badge", "auto-btn",
    "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "ws-select"].forEach((id) => (els[id] = mkEl("div")));
   (globalThis as any).document = {
     getElementById: (id: string) => els[id] || null,
@@ -223,5 +223,56 @@ describe("analyst replies", () => {
     const html = T.cardHTML({ kind: "confirm", options: [{ n: 1, label: "Yes, create 3 tasks" }, { n: 2, label: "Cancel" }] });
     expect(html).toContain("Yes, create 3 tasks");
     expect(html).toContain("data-confirm");
+  });
+});
+
+describe("vcf import button", () => {
+  function fire(el: any, type: string, ev: any = {}) {
+    const h = el._l && el._l[type];
+    expect(typeof h).toBe("function");
+    h(ev);
+  }
+
+  test("vcf button is wired next to the camera button", () => {
+    expect(els["vcf-btn"]).toBeTruthy();
+    expect(els["vcf-input"]).toBeTruthy();
+    expect(typeof els["vcf-btn"]._l?.click).toBe("function");
+    expect(typeof els["vcf-input"]._l?.change).toBe("function");
+  });
+
+  test("clicking the vcf button opens the vcf file picker", () => {
+    let picked = false;
+    els["vcf-input"].click = () => { picked = true; };
+    fire(els["vcf-btn"], "click");
+    expect(picked).toBe(true);
+  });
+
+  test("choosing a .vcf stages it as a contacts file chip", () => {
+    (globalThis as any).XMLHttpRequest = class {
+      upload = { addEventListener() {} };
+      open() {}
+      addEventListener() {}
+      send() {}
+    };
+    els["tray"].children.length = 0;
+    els["vcf-input"].files = [{ name: "team.vcf", type: "text/vcard", size: 512 }];
+    fire(els["vcf-input"], "change");
+    const item = els["tray"].children[els["tray"].children.length - 1];
+    expect(item.innerHTML).toContain("file-chip");
+    expect(item.innerHTML).toContain("📇");
+    expect(item.innerHTML).toContain("team.vcf");
+    expect(els["vcf-input"].value).toBe("");
+  });
+
+  test("oversize .vcf is rejected with a contacts-file message", () => {
+    const before = els["chat"].children.length;
+    els["tray"].children.length = 0;
+    els["vcf-input"].files = [{ name: "huge.vcf", type: "text/vcard", size: 11 * 1024 * 1024 }];
+    fire(els["vcf-input"], "change");
+    expect(els["tray"].children.length).toBe(0);
+    const html = els["chat"].children.slice(before).map((c: any) => c.innerHTML).join("\n");
+    expect(html).toContain("huge.vcf");
+    expect(html).toContain("10 MB");
+    expect(html).toContain("contacts file");
   });
 });

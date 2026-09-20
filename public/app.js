@@ -9,6 +9,8 @@
   const statusText = document.getElementById("status-text");
   const camBtn = document.getElementById("cam-btn");
   const photoInput = document.getElementById("photo-input");
+  const vcfBtn = document.getElementById("vcf-btn");
+  const vcfInput = document.getElementById("vcf-input");
   const tray = document.getElementById("tray");
   const bellBtn = document.getElementById("bell-btn");
   const bellBadge = document.getElementById("bell-badge");
@@ -270,16 +272,26 @@
     });
   }
 
-  camBtn.addEventListener("click", () => photoInput.click());
-  photoInput.addEventListener("change", () => {
-    Array.from(photoInput.files || []).slice(0, 4).forEach((f) => {
+  // Stage picked files for upload (shared by the photo and vCard pickers).
+  function stageFiles(files, what) {
+    Array.from(files || []).slice(0, 4).forEach((f) => {
       if (f.size > 10 * 1024 * 1024) {
-        addMsg("milton", { text: `"${f.name}" is over the 10 MB limit — pick a smaller photo.` });
+        addMsg("milton", { text: `"${f.name}" is over the 10 MB limit — pick a smaller ${what}.` });
         return;
       }
       addTrayItem(f);
     });
+  }
+
+  camBtn.addEventListener("click", () => photoInput.click());
+  photoInput.addEventListener("change", () => {
+    stageFiles(photoInput.files, "photo");
     photoInput.value = "";
+  });
+  vcfBtn.addEventListener("click", () => vcfInput.click());
+  vcfInput.addEventListener("change", () => {
+    stageFiles(vcfInput.files, "contacts file");
+    vcfInput.value = "";
   });
 
   function clearTray() {

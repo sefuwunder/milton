@@ -47,7 +47,7 @@ afterAll(() => {
 beforeAll(async () => {
   els = {};
   ["chat", "chips", "composer", "input", "status-dot", "status-text", "help-btn",
-   "cam-btn", "photo-input", "tray", "bell-btn", "bell-badge", "auto-btn",
+   "cam-btn", "photo-input", "vcf-btn", "vcf-input", "tray", "bell-btn", "bell-badge", "auto-btn",
    "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "ws-select"].forEach((id) => (els[id] = mkEl("div")));
   // mirror the HTML: panel starts hidden, chat starts visible
   els["auto-view"].hidden = true;

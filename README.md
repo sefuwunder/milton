@@ -64,6 +64,8 @@ If the model endpoint is misconfigured (wrong model name, unreachable host), Mil
 
 **People & tasks** — `add contact Jane Doe at Acme jane@acme.com` · `add company Globex` · `add task Call Acme tomorrow` · `remind me to send the proposal friday` · `complete task 3`
 
+**vCard import** — tap 📇 in the chat bar to pick a `.vcf` file; Milton lists every contact inside and imports after you confirm (dedupes by email, flags nameless entries).
+
 **Routines** — `morning brief` (open pipeline, closing this week, overdue/due-today tasks, latest activity) · `pipeline hygiene` (missing close dates, stale deals, deals without contacts, overdue tasks)
 
 ### Analyst & planner
