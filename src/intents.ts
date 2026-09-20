@@ -656,9 +656,9 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["delete stage Discovery", "delete_stage"]], note: "asks first, moves its deals somewhere safe" },
       { cmds: [["delete deal Old Opp", "delete_deal"]], note: "destructive — always confirms first" },
       { cmds: [["close Acme deal as won", "close_deal"], ["mark Acme deal as lost", "close_deal"]], note: "closing a deal asks first too" },
-      { cmds: [["read this", "ocr_read"], ["analyze handwriting", "handwriting"]], note: "after 📷-snapping text" },
+      { cmds: [["read this", "ocr_read"], ["analyze handwriting", "handwriting"]], note: "after snapping text with the camera button" },
       { cmds: [], note: "Webhooks in: `POST /api/hooks/exec-crm` · `POST /api/hooks/meridian` (header `X-Milton-Secret` from `MILTON_HOOK_SECRET`)" },
-      { cmds: [["automation runs", "list_runs"]], note: "history, 🔔 bell, and live toasts in the ⚙️ Automations panel" },
+      { cmds: [["automation runs", "list_runs"]], note: "history, the bell, and live toasts in the Automations panel" },
     ],
   },
 ];

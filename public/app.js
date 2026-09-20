@@ -33,12 +33,31 @@
   let sid = localStorage.getItem("milton_sid");
   if (!sid) { sid = "s-" + Math.random().toString(36).slice(2, 10); localStorage.setItem("milton_sid", sid); }
 
+  // ---- icons: Switchboard-style inline line marks (24x24, stroke=currentColor) ----
+  const SVG_OPEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">';
+  const ICONS = {
+    camera: SVG_OPEN + '<path d="M4 8h3l2-2.5h6L17 8h3a1.5 1.5 0 0 1 1.5 1.5V18a1.5 1.5 0 0 1-1.5 1.5H4A1.5 1.5 0 0 1 2.5 18V9.5A1.5 1.5 0 0 1 4 8z"/><circle cx="12" cy="13.5" r="3.5"/></svg>',
+    contacts: SVG_OPEN + '<rect x="3" y="5" width="18" height="14" rx="2.5"/><circle cx="9" cy="11" r="2"/><path d="M5.6 16.6c.6-1.9 1.9-2.9 3.4-2.9s2.8 1 3.4 2.9"/><path d="M15 9.5h4M15 12.5h2.5"/></svg>',
+    bell: SVG_OPEN + '<path d="M6 9.5a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6z"/><path d="M10 20a2.2 2.2 0 0 0 4 0"/></svg>',
+    gear: SVG_OPEN + '<circle cx="12" cy="12" r="3.2"/><path d="M12 4v2.2M12 17.8V20M4 12h2.2M17.8 12H20M6.3 6.3l1.6 1.6M16.1 16.1l1.6 1.6M17.7 6.3l-1.6 1.6M7.9 16.1l-1.6 1.6"/></svg>',
+    plus: SVG_OPEN + '<path d="M12 5v14M5 12h14"/></svg>',
+    x: SVG_OPEN + '<path d="M6 6l12 12M18 6L6 18"/></svg>',
+    send: SVG_OPEN + '<path d="M21 3L10.5 13.5"/><path d="M21 3l-7 18-3.5-7.5L3 10l18-7z"/></svg>',
+    check: SVG_OPEN + '<path d="M4.5 12.5l5 5 10-11"/></svg>',
+    alert: SVG_OPEN + '<path d="M12 3.5L22 20H2L12 3.5z"/><path d="M12 10v4.5"/><path d="M12 17.3v.3"/></svg>',
+    skip: SVG_OPEN + '<path d="M5 5l8 7-8 7V5z"/><path d="M15 5v14"/></svg>',
+    box: SVG_OPEN + '<rect x="4" y="4" width="16" height="16" rx="4"/></svg>',
+    boxCheck: SVG_OPEN + '<rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8.5 12.5l2.5 2.5 5-6"/></svg>',
+    half: SVG_OPEN + '<circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none"/></svg>',
+    sun: SVG_OPEN + '<circle cx="12" cy="12" r="4"/><path d="M12 2.5V5M12 19v2.5M2.5 12H5M19 12h2.5M5 5l1.8 1.8M17.2 17.2L19 19M19 5l-1.8 1.8M6.8 17.2L5 19"/></svg>',
+    moon: SVG_OPEN + '<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5z"/></svg>',
+  };
   // ---- theme: auto (follows OS) / light / dark ----------------------------------
   // Auto = no data-theme on <html>; CSS picks the palette from prefers-color-scheme.
   // Explicit light/dark set data-theme and are stored in localStorage ("milton_theme").
   const THEME_KEY = "milton_theme";
   const THEME_ORDER = ["auto", "light", "dark"];
-  const THEME_ICON = { auto: "🌓", light: "☀️", dark: "🌙" };
+  const THEME_ICON = { auto: ICONS.half, light: ICONS.sun, dark: ICONS.moon };
   const THEME_LABEL = { auto: "Auto (follows system)", light: "Light", dark: "Dark" };
   const themeBtn = document.getElementById("theme-btn");
   const rootEl = document.documentElement || null;
@@ -53,7 +72,7 @@
       else rootEl.setAttribute("data-theme", mode);
     }
     if (themeBtn) {
-      themeBtn.textContent = THEME_ICON[mode];
+      themeBtn.innerHTML = THEME_ICON[mode];
       themeBtn.title = "Theme: " + THEME_LABEL[mode] + " — click to change";
       themeBtn.setAttribute("aria-label", "Theme: " + THEME_LABEL[mode]);
     }
@@ -117,7 +136,7 @@
         break;
       case "tasks":
         h += (card.items || []).map((t) =>
-          `<div class="row"><span>${t.done ? "✅" : "⬜"} ${esc(t.title)}</span><span class="v">${esc(t.due_date || "no due date")}</span></div>`).join("");
+          `<div class="row"><span><span class="taskbox${t.done ? " done" : ""}">${t.done ? ICONS.boxCheck : ICONS.box}</span> ${esc(t.title)}</span><span class="v">${esc(t.due_date || "no due date")}</span></div>`).join("");
         break;
       case "contacts":
         h += (card.items || []).map((c) =>
@@ -181,7 +200,7 @@
     const div = document.createElement("div");
     div.className = "msg " + role;
     (reply.photos || []).forEach((p) => { div.insertAdjacentHTML("beforeend", `<img class="thumb" src="${esc(p)}" alt="Uploaded photo">`); });
-    (reply.files || []).forEach((n) => { div.insertAdjacentHTML("beforeend", `<span class="file-chip">📇 ${esc(n)}</span>`); });
+    (reply.files || []).forEach((n) => { div.insertAdjacentHTML("beforeend", `<span class="file-chip">${ICONS.contacts} ${esc(n)}</span>`); });
     div.innerHTML += md(reply.text || "");
     (reply.cards || []).forEach((c) => { div.insertAdjacentHTML("beforeend", cardHTML(c)); });
     chat.appendChild(div);
@@ -229,7 +248,7 @@
     const objUrl = isVcf ? null : URL.createObjectURL(file);
     item.innerHTML =
       (isVcf
-        ? `<span class="file-chip">📇 ${esc(file.name || "contacts.vcf")}</span>`
+        ? `<span class="file-chip">${ICONS.contacts} ${esc(file.name || "contacts.vcf")}</span>`
         : `<img src="${esc(objUrl)}" alt="Photo to send">`) +
       `<div class="prog"><div class="bar"></div></div>` +
       `<button type="button" class="rm" aria-label="Remove attachment">×</button>`;
@@ -320,7 +339,7 @@
 
   // ---- automations view ------------------------------------------------------------
   let autoTab = "routines";
-  const statusIcon = (st) => st === "ok" ? "✅" : st === "partial" ? "⚠️" : st === "skipped" ? "⏭️" : "❌";
+  const statusIcon = (st) => st === "ok" ? `<span class="st st-ok" title="ok">${ICONS.check}</span>` : st === "partial" ? `<span class="st st-warn" title="partial">${ICONS.alert}</span>` : st === "skipped" ? `<span class="st st-skip" title="skipped">${ICONS.skip}</span>` : `<span class="st st-bad" title="failed">${ICONS.x}</span>`;
 
   function routineRow(r) {
     return `<div class="arow"><span><b>${esc(r.name)}</b><br><small style="color:var(--muted)">${r.steps.length} step${r.steps.length === 1 ? "" : "s"}: ${esc(r.steps.join("; ").slice(0, 80))}</small></span>` +
@@ -618,7 +637,7 @@
       (hist.messages || []).forEach((m) => addMsg(m.role === "user" ? "user" : "milton", { text: m.text }));
     } catch { /* fresh start */ }
     if (!chat.children.length) {
-      addMsg("milton", { text: "Hey, I'm **Milton** — your copilot inside exec-crm. Ask for a **morning brief**, check the **pipeline**, move a deal — or tap 📷 to snap a photo of text and I'll read it. What are we working on?" });
+      addMsg("milton", { text: "Hey, I'm **Milton** — your copilot inside exec-crm. Ask for a **morning brief**, check the **pipeline**, move a deal — or tap the camera button to snap a photo of text and I'll read it. What are we working on?" });
       setChips(["Morning brief", "Show pipeline", "My tasks", "Help"]);
     }
     scroll();

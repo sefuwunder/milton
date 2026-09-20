@@ -1,4 +1,5 @@
-// theme.test.ts — DOM-stubbed checks for the auto light/dark Tokyo theme in public/app.js.
+// theme.test.ts — DOM-stubbed checks for the auto light/dark Solarized theme
+// (Switchboard sibling) and the Switchboard-style inline SVG icon set in public/app.js.
 // Follows the Bun quirks in ~/AGENTS.md: stubs ride in on custom __stub* globals and
 // are (re)installed in beforeEach, because Bun resets well-known globals between
 // beforeAll and the first beforeEach.
@@ -89,7 +90,7 @@ function boot() {
   // async IIFE whose own "})();" would catch a naive first-occurrence replace and
   // defer the export until after the first await.
   let src = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
-  src = src.replace(/\}\)\(\);[ \t]*\n?$/, ";globalThis.__theme={getTheme,setTheme,applyTheme};})();\n");
+  src = src.replace(/\}\)\(\);[ \t]*\n?$/, ";globalThis.__theme={getTheme,setTheme,applyTheme,ICONS,statusIcon};})();\n");
   eval(src);
   const T = (globalThis as any).__theme;
   delete (globalThis as any).__theme; // never leak a stale export into the next boot
@@ -146,18 +147,19 @@ describe("theme toggle cycling", () => {
     click(); expect(T.getTheme()).toBe("dark"); expect(rootEl.getAttribute("data-theme")).toBe("dark");
     click(); expect(T.getTheme()).toBe("auto"); expect(rootEl.hasAttribute("data-theme")).toBe(false);
   });
-  test("button icon and label reflect the current mode", () => {
+  test("button icon and label reflect the current mode (inline SVG icons)", () => {
     const T = boot();
     const btn = els["theme-btn"];
-    expect(btn.textContent).toBe("🌓");
+    expect(btn.innerHTML).toContain("<svg");
+    expect(btn.innerHTML).not.toContain("🌓");
     T.setTheme("light");
-    expect(btn.textContent).toBe("☀️");
+    expect(btn.innerHTML).toContain("<svg");
     expect(btn.title).toContain("Light");
     T.setTheme("dark");
-    expect(btn.textContent).toBe("🌙");
+    expect(btn.innerHTML).toContain("<svg");
     expect(btn.title).toContain("Dark");
     T.setTheme("auto");
-    expect(btn.textContent).toBe("🌓");
+    expect(btn.innerHTML).toContain("<svg");
     expect(btn.getAttribute("aria-label")).toContain("Auto");
   });
 });
@@ -201,8 +203,8 @@ describe("theme CSS + pre-paint markup", () => {
     const bg = (b: string) => /--bg0:\s*(#[0-9a-f]{6})/i.exec(b)![1];
     const lb = bg(light), db = bg(dark);
     expect(lb).not.toBe(db);
-    expect(lum(lb)).toBeGreaterThan(0.7); // washi paper is light
-    expect(lum(db)).toBeLessThan(0.15);   // ink night is dark
+    expect(lum(lb)).toBeGreaterThan(0.7); // solarized parchment is light
+    expect(lum(db)).toBeLessThan(0.15);   // solarized deep blue is dark
   });
   test("both palettes set text, accent and bubble variables", () => {
     for (const v of ["--text", "--muted", "--accent", "--user-bubble", "--milton-bubble", "--danger"]) {
@@ -228,5 +230,69 @@ describe("theme CSS + pre-paint markup", () => {
   });
   test("theme button exists in the topbar", () => {
     expect(html).toContain('id="theme-btn"');
+  });
+});
+
+describe("switchboard design tokens", () => {
+  const css = readFileSync(new URL("../public/styles.css", import.meta.url), "utf8");
+  test("solarized base tokens are present in both palettes", () => {
+    expect(css).toContain("--bg0: #fdf6e3");   // light parchment
+    expect(css).toContain("--bg0: #002b36");   // dark base
+    expect(css).toContain("--accent: #268bd2"); // switchboard blue (light)
+    expect(css).toContain("--accent2: #859900"); // solarized green (light)
+    expect(css).toContain("--radius: 18px");   // switchboard radius
+  });
+  test("urgency uses muted terracotta, red is reserved for destructive/errors", () => {
+    expect(css).toContain("--urgent: #b5543f");
+    expect(css).toContain("--urgent: #d98a6f");
+    expect(css).toContain("--danger: #dc322f");
+  });
+  test("glass surfaces use backdrop blur like switchboard", () => {
+    expect(css).toContain("backdrop-filter: blur(");
+  });
+  test("background gradients echo switchboard's accent washes", () => {
+    expect(css).toContain("color-mix(in srgb, var(--accent) 8%, transparent)");
+  });
+});
+
+describe("switchboard-style icon set", () => {
+  const src = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+  const html = readFileSync(new URL("../public/index.html", import.meta.url), "utf8");
+  test("ICONS map uses 24x24 stroke=currentColor line marks", () => {
+    expect(src).toContain('viewBox="0 0 24 24"');
+    expect(src).toContain('stroke="currentColor"');
+    for (const name of ["camera", "contacts", "bell", "gear", "send", "check", "alert", "x", "skip", "box", "boxCheck", "half", "sun", "moon"]) {
+      expect(src).toContain(name + ": SVG_OPEN");
+    }
+  });
+  test("chrome buttons in index.html are SVG, not emoji", () => {
+    for (const id of ["cam-btn", "vcf-btn", "bell-btn", "auto-btn", "theme-btn"]) {
+      const seg = html.split(`id="${id}"`)[1].split("</button>")[0];
+      expect(seg).toContain("<svg");
+    }
+    const camSeg = html.split('id="cam-btn"')[1].split("</button>")[0];
+    expect(camSeg).not.toContain("📷");
+    const vcfSeg = html.split('id="vcf-btn"')[1].split("</button>")[0];
+    expect(vcfSeg).not.toContain("📇");
+  });
+  test("statusIcon renders classed SVG status marks, not emoji", () => {
+    installStubs();
+    let s = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+    s = s.replace(/\}\)\(\);[ \t]*\n?$/, ";globalThis.__theme={getTheme,setTheme,applyTheme,ICONS,statusIcon};})();\n");
+    eval(s);
+    const { statusIcon } = (globalThis as any).__theme;
+    delete (globalThis as any).__theme;
+    expect(statusIcon("ok")).toContain('class="st st-ok"');
+    expect(statusIcon("ok")).toContain("<svg");
+    expect(statusIcon("partial")).toContain('class="st st-warn"');
+    expect(statusIcon("skipped")).toContain('class="st st-skip"');
+    expect(statusIcon("boom")).toContain('class="st st-bad"');
+    for (const out of [statusIcon("ok"), statusIcon("partial"), statusIcon("skipped"), statusIcon("x")]) {
+      expect(out).not.toMatch(/[✅⚠️⏭️❌]/);
+    }
+  });
+  test("greeting references the camera button by name, not emoji", () => {
+    expect(src).toContain("tap the camera button to snap a photo");
+    expect(src).not.toContain("tap 📷");
   });
 });

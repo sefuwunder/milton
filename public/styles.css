@@ -1,114 +1,122 @@
-/* Milton theme: Tokyo day (light) / Tokyo night (dark).
+/* Milton theme: Solarized light/dark glass — sibling of Switchboard's theme.
    data-theme="light"|"dark" on <html> forces a palette; with no data-theme the
    OS prefers-color-scheme picks (auto mode). Native controls follow color-scheme. */
 :root, :root[data-theme="light"] {
   color-scheme: light;
-  /* washi paper, sumi ink, torii-red sunset + indigo accents */
-  --bg0: #f1ece0; --bg1: #faf6ec;
-  --app-bg: rgba(255,252,245,.66);
-  --glass: rgba(38,40,46,.055);
-  --glass-border: rgba(38,40,46,.16);
-  --glass-hover: rgba(38,40,46,.10);
-  --text: #272a31; --muted: #6e747e;
-  --accent: #4256b8; --grad-end: #8f7bff;          /* ai indigo -> periwinkle */
-  --accent-glow: rgba(66,86,184,.25);
-  --accent2: #2e7d52;                               /* moss green */
-  --user-bubble: #e0e7ff; --milton-bubble: rgba(255,255,255,.7);
-  --card-bg: rgba(255,255,255,.62); --stat-bg: rgba(38,40,46,.05);
-  --row-border: rgba(38,40,46,.09);
-  --code-bg: rgba(38,40,46,.08);
-  --opt-bg: rgba(66,86,184,.08); --opt-border: rgba(66,86,184,.38); --opt-hover: rgba(66,86,184,.16);
-  --pill-bg: rgba(66,86,184,.13); --pill-text: #35428f;
-  --pill-won-bg: rgba(46,125,82,.13); --pill-won-text: #276a45;
-  --pill-lost-bg: rgba(185,60,50,.12); --pill-lost-text: #a83428;
-  --danger: #c0392b; --danger-text: #a83428; --danger-border: rgba(192,57,43,.4);
-  --warn: #a86e00;
+  /* solarized light: parchment bg, blue->cyan accent, glass surfaces */
+  --bg0: #fdf6e3; --bg1: #faf5e6;
+  --app-bg: rgba(250,245,230,.72);
+  --glass: rgba(101,123,131,.07);
+  --glass-border: rgba(101,123,131,.22);
+  --glass-hover: rgba(101,123,131,.14);
+  --text: #657b83; --strong: #073642; --muted: #93a1a1;
+  --accent: #268bd2; --grad-end: #2aa198;               /* solarized blue -> cyan */
+  --accent-glow: rgba(38,139,210,.22);
+  --violet: #6c71c4;                                     /* solarized violet */
+  --tip-shadow: 0 4px 14px rgba(0,0,0,.2);
+  --accent2: #859900;                                   /* solarized green */
+  --user-bubble: #eee8d5; --milton-bubble: rgba(250,245,230,.8);
+  --card-bg: rgba(250,245,230,.66); --stat-bg: rgba(101,123,131,.08);
+  --row-border: rgba(224,214,184,.9);
+  --code-bg: rgba(101,123,131,.12);
+  --opt-bg: rgba(38,139,210,.08); --opt-border: rgba(38,139,210,.38); --opt-hover: rgba(38,139,210,.16);
+  --pill-bg: rgba(38,139,210,.13); --pill-text: #1f6fa8;
+  --pill-won-bg: rgba(133,153,0,.14); --pill-won-text: #6b7d00;
+  --pill-lost-bg: rgba(203,75,22,.12); --pill-lost-text: #a03d12;   /* terracotta, not red */
+  --danger: #dc322f; --danger-text: #b02623; --danger-border: rgba(220,50,47,.4);
+  --warn: #b58900; --urgent: #b5543f;                    /* muted terracotta = urgency; red stays destructive */
   --on-accent: #ffffff;
-  --ocr-bg: rgba(38,40,46,.045);
-  --confbar-track: rgba(38,40,46,.12);
-  --toast-bg: rgba(255,252,245,.95);
-  --toast-shadow: 0 8px 30px rgba(60,50,30,.18);
-  --glow-a: rgba(66,86,184,.12); --glow-b: rgba(199,62,58,.08);
-  --select-option: #272a31;
+  --ocr-bg: rgba(101,123,131,.07);
+  --confbar-track: rgba(101,123,131,.18);
+  --toast-bg: rgba(250,245,230,.95);
+  --toast-shadow: 0 8px 30px rgba(88,110,117,.18);
+  --glow-a: rgba(38,139,210,.10); --glow-b: rgba(108,113,196,.08);
+  --select-option: #657b83;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
     color-scheme: dark;
-    /* deep ink night, neon-sign accents */
-    --bg0: #0a0d16; --bg1: #10141f;
-    --app-bg: rgba(10,13,22,.58);
+    /* solarized dark */
+    --bg0: #002b36; --bg1: #073642;
+    --app-bg: rgba(7,54,66,.66);
     --glass: rgba(255,255,255,.055);
     --glass-border: rgba(255,255,255,.13);
     --glass-hover: rgba(255,255,255,.12);
-    --text: #eef1f6; --muted: #9aa3b2;
-    --accent: #7c9cff; --grad-end: #9b7cff;          /* periwinkle identity */
-    --accent-glow: rgba(124,156,255,.35);
-    --accent2: #57d9a3;                             /* neon mint */
-    --user-bubble: #2b3a5e; --milton-bubble: rgba(255,255,255,.07);
+    --text: #839496; --strong: #fdf6e3; --muted: #586e75;
+    --accent: #4fa3dd; --grad-end: #2aa198;             /* lifted blue reads on dark */
+    --accent-glow: rgba(79,163,221,.30);
+  --violet: #6c71c4;
+  --tip-shadow: 0 4px 14px rgba(0,0,0,.35);
+    --accent2: #9db33c;                                 /* lifted solarized green */
+    --user-bubble: #0e3d4a; --milton-bubble: rgba(255,255,255,.06);
     --card-bg: rgba(255,255,255,.045); --stat-bg: rgba(255,255,255,.05);
-    --row-border: rgba(255,255,255,.07);
+    --row-border: rgba(255,255,255,.08);
     --code-bg: rgba(255,255,255,.10);
-    --opt-bg: rgba(124,156,255,.10); --opt-border: rgba(124,156,255,.30); --opt-hover: rgba(124,156,255,.20);
-    --pill-bg: rgba(124,156,255,.18); --pill-text: #c9d6ff;
-    --pill-won-bg: rgba(87,217,163,.18); --pill-won-text: #a9e9cd;
-    --pill-lost-bg: rgba(255,107,107,.16); --pill-lost-text: #ffb3b3;
-    --danger: #ff6b6b; --danger-text: #ffb3b3; --danger-border: rgba(255,107,107,.4);
-    --warn: #ffb020;
+    --opt-bg: rgba(79,163,221,.10); --opt-border: rgba(79,163,221,.32); --opt-hover: rgba(79,163,221,.20);
+    --pill-bg: rgba(79,163,221,.16); --pill-text: #a8cbe4;
+    --pill-won-bg: rgba(157,179,60,.16); --pill-won-text: #c2d189;
+    --pill-lost-bg: rgba(217,138,111,.14); --pill-lost-text: #e0a183;
+    --danger: #e0665e; --danger-text: #f0938a; --danger-border: rgba(224,102,94,.4);
+    --warn: #d9a41b; --urgent: #d98a6f;
     --on-accent: #ffffff;
     --ocr-bg: rgba(0,0,0,.25);
     --confbar-track: rgba(255,255,255,.08);
-    --toast-bg: rgba(20,26,38,.92);
+    --toast-bg: rgba(4,42,52,.94);
     --toast-shadow: 0 8px 30px rgba(0,0,0,.45);
-    --glow-a: rgba(124,156,255,.14); --glow-b: rgba(87,217,163,.10);
-    --select-option: #eef1f6;
+    --glow-a: rgba(38,139,210,.12); --glow-b: rgba(108,113,196,.10);
+    --select-option: #839496;
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg0: #0a0d16; --bg1: #10141f;
-  --app-bg: rgba(10,13,22,.58);
+  --bg0: #002b36; --bg1: #073642;
+  --app-bg: rgba(7,54,66,.66);
   --glass: rgba(255,255,255,.055);
   --glass-border: rgba(255,255,255,.13);
   --glass-hover: rgba(255,255,255,.12);
-  --text: #eef1f6; --muted: #9aa3b2;
-  --accent: #7c9cff; --grad-end: #9b7cff;
-  --accent-glow: rgba(124,156,255,.35);
-  --accent2: #57d9a3;
-  --user-bubble: #2b3a5e; --milton-bubble: rgba(255,255,255,.07);
+  --text: #839496; --strong: #fdf6e3; --muted: #586e75;
+  --accent: #4fa3dd; --grad-end: #2aa198;
+  --accent-glow: rgba(79,163,221,.30);
+  --violet: #6c71c4;
+  --tip-shadow: 0 4px 14px rgba(0,0,0,.35);
+  --accent2: #9db33c;
+  --user-bubble: #0e3d4a; --milton-bubble: rgba(255,255,255,.06);
   --card-bg: rgba(255,255,255,.045); --stat-bg: rgba(255,255,255,.05);
-  --row-border: rgba(255,255,255,.07);
+  --row-border: rgba(255,255,255,.08);
   --code-bg: rgba(255,255,255,.10);
-  --opt-bg: rgba(124,156,255,.10); --opt-border: rgba(124,156,255,.30); --opt-hover: rgba(124,156,255,.20);
-  --pill-bg: rgba(124,156,255,.18); --pill-text: #c9d6ff;
-  --pill-won-bg: rgba(87,217,163,.18); --pill-won-text: #a9e9cd;
-  --pill-lost-bg: rgba(255,107,107,.16); --pill-lost-text: #ffb3b3;
-  --danger: #ff6b6b; --danger-text: #ffb3b3; --danger-border: rgba(255,107,107,.4);
-  --warn: #ffb020;
+  --opt-bg: rgba(79,163,221,.10); --opt-border: rgba(79,163,221,.32); --opt-hover: rgba(79,163,221,.20);
+  --pill-bg: rgba(79,163,221,.16); --pill-text: #a8cbe4;
+  --pill-won-bg: rgba(157,179,60,.16); --pill-won-text: #c2d189;
+  --pill-lost-bg: rgba(217,138,111,.14); --pill-lost-text: #e0a183;
+  --danger: #e0665e; --danger-text: #f0938a; --danger-border: rgba(224,102,94,.4);
+  --warn: #d9a41b; --urgent: #d98a6f;
   --on-accent: #ffffff;
   --ocr-bg: rgba(0,0,0,.25);
   --confbar-track: rgba(255,255,255,.08);
-  --toast-bg: rgba(20,26,38,.92);
+  --toast-bg: rgba(4,42,52,.94);
   --toast-shadow: 0 8px 30px rgba(0,0,0,.45);
-  --glow-a: rgba(124,156,255,.14); --glow-b: rgba(87,217,163,.10);
-  --select-option: #eef1f6;
+  --glow-a: rgba(38,139,210,.12); --glow-b: rgba(108,113,196,.10);
+  --select-option: #839496;
 }
-:root { --radius: 16px; } /* theme-independent */
+:root { --radius: 18px; } /* theme-independent; matches Switchboard */
 * { box-sizing: border-box; }
 /* the hidden attribute must win over component display rules (e.g. .auto-view/.chat set display:flex) */
 [hidden] { display: none !important; }
 html, body { height: 100%; }
 body {
   margin: 0; color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Segoe UI", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Segoe UI", Roboto, sans-serif;
   background: var(--bg0); overflow: hidden;
   transition: background-color .25s ease, color .25s ease;
 }
 .bg {
   position: fixed; inset: 0; z-index: -1;
   background:
-    radial-gradient(600px 400px at 15% 10%, var(--glow-a), transparent 60%),
-    radial-gradient(700px 500px at 85% 80%, var(--glow-b), transparent 60%),
+    radial-gradient(640px 420px at 10% -6%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 70%),
+    radial-gradient(720px 480px at 96% 4%, color-mix(in srgb, var(--grad-end) 7%, transparent), transparent 70%),
+    radial-gradient(900px 600px at 50% 115%, color-mix(in srgb, var(--violet) 6%, transparent), transparent 70%),
     var(--bg0);
+  background-attachment: fixed;
 }
 .app {
   height: 100dvh; max-width: 860px; margin: 0 auto;
@@ -130,13 +138,44 @@ body {
 }
 .name { font-weight: 650; font-size: 17px; }
 .sub { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); display: inline-block; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--urgent); display: inline-block; }
 .dot.ok { background: var(--accent2); } .dot.bad { background: var(--danger); }
 .ghost {
   width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--glass-border);
   background: var(--glass); color: var(--text); font-size: 16px; cursor: pointer;
+  display: grid; place-items: center;
 }
 .ghost:hover { background: var(--glass-hover); }
+.ghost:focus-visible, .cam:focus-visible, .send:focus-visible, .tab:focus-visible, .opt:focus-visible, .chip:focus-visible, .mini:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.ghost svg { width: 18px; height: 18px; }
+
+/* inline line icons (Switchboard-style: 24x24, stroke=currentColor) */
+.cam svg, .send svg { width: 22px; height: 22px; }
+.file-chip svg { width: 15px; height: 15px; flex: 0 0 auto; }
+.st { display: inline-grid; place-items: center; width: 18px; height: 18px; vertical-align: -3px; }
+.st svg { width: 16px; height: 16px; }
+.st-ok { color: var(--accent2); } .st-warn { color: var(--urgent); }
+.st-bad { color: var(--danger); } .st-skip { color: var(--muted); }
+.taskbox { display: inline-grid; place-items: center; width: 18px; height: 18px; vertical-align: -3px; color: var(--muted); }
+.taskbox.done { color: var(--accent2); }
+.taskbox svg { width: 16px; height: 16px; }
+
+/* hover tooltips via data-tip (Switchboard-style) */
+[data-tip] { position: relative; }
+[data-tip]::after {
+  content: attr(data-tip);
+  position: absolute; left: 50%; bottom: calc(100% + 9px);
+  transform: translateX(-50%) translateY(3px);
+  background: var(--strong); color: var(--bg0);
+  font-size: 11.5px; font-weight: 500; letter-spacing: 0.01em;
+  padding: 5px 10px; border-radius: 8px; white-space: nowrap;
+  pointer-events: none; opacity: 0; z-index: 60;
+  box-shadow: var(--tip-shadow);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+[data-tip]:hover::after, [data-tip]:focus-visible::after { opacity: 1; transform: translateX(-50%) translateY(0); }
 .ws-select {
   height: 34px; max-width: 150px; border-radius: 17px; border: 1px solid var(--glass-border);
   background: var(--glass); color: var(--text); font-size: 13px; padding: 0 10px; cursor: pointer;
@@ -219,6 +258,7 @@ body {
   width: 46px; height: 46px; border-radius: 50%; border: 0; cursor: pointer; flex: 0 0 auto;
   background: linear-gradient(135deg, var(--accent), var(--grad-end)); color: var(--on-accent); font-size: 20px;
   box-shadow: 0 4px 16px var(--accent-glow);
+  display: grid; place-items: center;
 }
 .send:hover { filter: brightness(1.1); }
 

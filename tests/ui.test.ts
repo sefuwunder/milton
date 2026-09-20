@@ -135,10 +135,11 @@ describe("automations UI", () => {
   });
   test("run row shows status icon, kind and summary", () => {
     const h = T.runRow({ status: "partial", kind: "schedule", routine_name: "eod", summary: "1/2 steps ok", ran_at: "2026-09-19 12:00:00" });
-    expect(h).toContain("⚠️");
+    expect(h).toContain('class="st st-warn"');
+    expect(h).toContain("<svg");
     expect(h).toContain("eod");
     expect(h).toContain("1/2 steps ok");
-    expect(T.runRow({ status: "ok", kind: "trigger", routine_name: "x", summary: "", ran_at: "2026-09-19 12:00:00" })).toContain("✅");
+    expect(T.runRow({ status: "ok", kind: "trigger", routine_name: "x", summary: "", ran_at: "2026-09-19 12:00:00" })).toContain('class="st st-ok"');
   });
   test("updateBadge counts runs newer than last-seen", () => {
     (globalThis as any).localStorage.setItem("milton_runs_seen", "10");
@@ -186,7 +187,7 @@ describe("vCard attachments", () => {
     T.addTrayItem({ name: "contacts.vcf", type: "text/vcard", size: 100 });
     const item = els["tray"].children[els["tray"].children.length - 1];
     expect(item.innerHTML).toContain("file-chip");
-    expect(item.innerHTML).toContain("📇");
+    expect(item.innerHTML).toContain("<svg");
     expect(item.innerHTML).toContain("contacts.vcf");
     expect(item.innerHTML).not.toContain("<img");
   });
@@ -203,7 +204,7 @@ describe("vCard attachments", () => {
   test("user message echoes vcf attachments as chips", () => {
     const div = T.addMsg("user", { text: "", photos: [], files: ["contacts.vcf"] });
     expect(div.innerHTML).toContain("file-chip");
-    expect(div.innerHTML).toContain("📇");
+    expect(div.innerHTML).toContain("<svg");
     expect(div.innerHTML).not.toContain("<img");
   });
 });
@@ -261,7 +262,7 @@ describe("vcf import button", () => {
     fire(els["vcf-input"], "change");
     const item = els["tray"].children[els["tray"].children.length - 1];
     expect(item.innerHTML).toContain("file-chip");
-    expect(item.innerHTML).toContain("📇");
+    expect(item.innerHTML).toContain("<svg");
     expect(item.innerHTML).toContain("team.vcf");
     expect(els["vcf-input"].value).toBe("");
   });

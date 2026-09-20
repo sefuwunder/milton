@@ -84,7 +84,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: "meridian",
     title: "The outside world",
-    explain: "I read Meridian's recon sprints too: `meridian recons`, then `meridian dossier <city>` or `meridian entities <city>`. Bringing contacts in? In the web chat, 📇 stages a .vcf for import (nothing imports without your Yes), 📷 runs OCR on a photo — handwriting included — or just tell me `just met James from Vertex`.",
+    explain: "I read Meridian's recon sprints too: `meridian recons`, then `meridian dossier <city>` or `meridian entities <city>`. Bringing contacts in? In the web chat, the contacts button stages a .vcf for import (nothing imports without your Yes), the camera button runs OCR on a photo — handwriting included — or just tell me `just met James from Vertex`.",
     tryThis: "meridian recons",
     expectIntents: ["list_recons"],
     hint: "If Meridian isn't reachable, I'll say so plainly — the step still counts.",
@@ -165,7 +165,7 @@ export function graduationText(): string {
     "- **Forgiving input**: typos, paraphrases, scrambled word order all work; near-misses get tappable suggestions.",
     "- **Sessions**: `sessions`, `new session <name>`, `switch session to <name>`, rename, delete — each keeps its own history, workspace, and tutorial.",
     "- **Structure**: custom fields (`add custom field …`), pipeline stages (`add/rename/move/delete stage`), workspaces (`switch to <name>`).",
-    "- **Outside world**: `meridian recons` / `meridian dossier <city>` / `meridian entities <city>`; 📇 VCF import, 📷 camera OCR + handwriting, or `just met …` capture.",
+    "- **Outside world**: `meridian recons` / `meridian dossier <city>` / `meridian entities <city>`; VCF import, camera OCR + handwriting, or `just met …` capture.",
     "- **Analysis & widgets**: `campaign stats`, `closing soon`, `sales cycle`, `pipeline hygiene` — follow any of them with `pin this as a widget`.",
     "- **Automations**: `save routine …` chains commands, `schedule …` puts them on a clock, `when … run …` fires them on CRM events. Destructive steps never auto-run.",
     "",
