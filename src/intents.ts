@@ -25,6 +25,7 @@ export type IntentName =
   | "list_stages" | "add_stage" | "rename_stage" | "delete_stage" | "move_stage"
   | "confirm_yes" | "confirm_no" | "choose_number"
   | "disambiguate_intent" // fuzzy near-tie: numbered choice between candidate intents
+  | "tutorial" // interactive tutorial mode; slots.action = start|restart|status|skip|back|exit
   | "unknown";
 
 export interface Intent {
@@ -246,8 +247,19 @@ export function parseIntent(raw: string): Intent {
   let m = text.match(/^(?:number |option |#)?([1-9])$/) || text.match(/(?:choose|pick|select|option|number)\s+([1-9])\b/);
   if (m) return { name: "choose_number", raw, text, slots: { n: m[1] } };
 
+  // ---- tutorial -----------------------------------------------------------------
+  // Before help: "start tutorial" etc. must not be swallowed by anything else.
+  // Bare skip/next/back/quit/exit only mean something inside tutorial mode;
+  // brain.ts replies with a nudge when the mode isn't active.
+  if (/^(tutorial|start tutorial|teach me milton)$/.test(text)) set("tutorial", { action: "start" });
+  else if (/^restart tutorial$/.test(text)) set("tutorial", { action: "restart" });
+  else if (/^(tutorial status|tutorial progress)$/.test(text)) set("tutorial", { action: "status" });
+  else if (/^(skip|next|skip this|skip this step|skip step)$/.test(text)) set("tutorial", { action: "skip" });
+  else if (/^(back|go back|previous|previous step)$/.test(text)) set("tutorial", { action: "back" });
+  else if (/^(exit tutorial|quit tutorial|stop tutorial|leave tutorial|quit|exit)$/.test(text)) set("tutorial", { action: "exit" });
+
   // ---- help -----------------------------------------------------------------
-  if (/^(help|what can you do|commands|how do (i|you) work|start)$/.test(text)) set("help");
+  else if (/^(help|what can you do|commands|how do (i|you) work|start)$/.test(text)) set("help");
 
   // ---- automations (routines / schedules / triggers) --------------------------------
   // Must precede the brief/hygiene/read/write matchers: "schedule morning brief …"

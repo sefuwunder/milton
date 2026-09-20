@@ -13,6 +13,7 @@ import * as wss from "./workspace";
 import * as reconRuns from "./recon_runs";
 import * as dealNotes from "./deal_notes";
 import { hookSecret } from "./hookauth";
+import { TUTORIAL_STEPS, tutorialControl, tutorialFollowup, type TutorialState, type TutorialAction } from "./tutorial";
 
 export interface Card {
   kind: "deals" | "pipeline" | "kpis" | "tasks" | "contacts" | "companies" | "activities" | "webhooks" | "choices" | "confirm" | "findings" | "transcription" | "handwriting";
@@ -54,6 +55,8 @@ export interface Session {
   workspaceName?: string;
   // last analysis output shaped as a pinnable widget ("pin this as a widget")
   lastWidgetable?: crm.Widgetable;
+  // interactive tutorial mode; persists in SQLite so progress survives reconnects
+  tutorial?: TutorialState;
 }
 
 // A photo uploaded through /api/upload, resolved session-side.
@@ -1069,7 +1072,23 @@ async function dispatchAutomation(session: Session, slots: Record<string, string
 }
 
 // ---- dispatch ----------------------------------------------------------------------
+// Tutorial control commands are intercepted here so they never reach the
+// normal intent switch; everything else runs normally and gets a follow-up.
 async function dispatch(session: Session, intent: Intent, opts: MessageOpts): Promise<Reply> {
+  if (intent.name === "tutorial") {
+    if (!session.tutorial) session.tutorial = { active: false, step: 0 };
+    const r = tutorialControl(session.tutorial, (intent.slots.action || "start") as TutorialAction);
+    return { text: r.text, chips: r.chips };
+  }
+  const reply = await dispatchInner(session, intent, opts);
+  if (session.tutorial?.active) {
+    const f = tutorialFollowup(session.tutorial, intent.name, reply.text, reply.chips);
+    return { ...reply, text: f.text, chips: f.chips ?? reply.chips };
+  }
+  return reply;
+}
+
+async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts): Promise<Reply> {
   const s = intent.slots;
   const photo = (opts.attachments && opts.attachments[0]) || opts.latestUpload || null;
   switch (intent.name) {

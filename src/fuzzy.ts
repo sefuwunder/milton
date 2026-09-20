@@ -810,6 +810,37 @@ const MORE: FuzzMatcher[] = [
       return core.length ? null : "no";
     },
   },
+  {
+    // Tutorial mode controls. "milton" is FILLER, so "teach me milton" arrives
+    // as [teach, me]. Small-talk guard: "teach me a joke" is chatter, not a
+    // tutorial — vetoed so it falls through to the LLM fallback.
+    intent: "tutorial", label: "tutorial control", need: 3, pri: 75, remBonus: 0, noRemBonus: 0,
+    veto: (toks) => toks.some((t) => CHATTER.has(t)),
+    kw: [
+      ...K("tutorial", 4, "tutorials", "tour"),
+      ...K("teach", 2.5, "teaches", "teaching", "showaround"),
+      ...K("start", 1.5, "begin", "beginning", "starting"),
+      ...K("restart", 1.5, "redo"),
+      ...K("status", 2, "progress", "going"),
+      ...K("skip", 2.5, "skipping"),
+      ...K("next", 2),
+      ...K("back", 2, "previous", "backwards"),
+      ...K("exit", 2.5, "quit", "quitting", "leave", "leaving"),
+      // "stop" is d=2 from "show" — typo-guessing it would eat "show me
+      // around" etc. Exact-only, like the confusable shorts elsewhere.
+      { a: "stop", c: "exit", w: 2.5, x: 1 }, { a: "stopping", c: "exit", w: 2.5, x: 1 },
+      ...K("step", 1, "steps", "lesson", "lessons"),
+    ],
+    ph: [P("teach me", 4), P("walk me through", 5), P("show me around", 4), P("exit tutorial", 5), P("go back", 3.5)],
+    build: (t) => {
+      if (t.some((x) => ["exit", "quit", "stop", "leave"].includes(x))) return "exit tutorial";
+      if (t.some((x) => ["skip", "next"].includes(x))) return "skip";
+      if (t.includes("back")) return "back";
+      if (t.includes("restart")) return "restart tutorial";
+      if (t.includes("status")) return "tutorial status";
+      return "tutorial";
+    },
+  },
 ];
 
 for (const m of MORE) MATCHERS.push(m);
