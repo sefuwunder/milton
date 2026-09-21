@@ -249,6 +249,11 @@ async function llmReply(question: string, history: Session["history"]): Promise<
 // Every handleMessage call runs inside the session's workspace (exec-crm's
 // ?workspace=<id> scoping) so callers never scope CRM calls by hand.
 export async function handleMessage(session: Session, raw: string, opts: MessageOpts = {}): Promise<Reply> {
+  // Slash-prefixed commands are identical to their bare form ("/help" ≡
+  // "help"): the "/" palette inserts the prefix. Normalize once here so the
+  // parser, wizard controls, and every downstream re-parse of `raw`
+  // (save-routine, workspace switch, meridian dossier/entities) all agree.
+  raw = raw.replace(/^\s*\/+/, "").trim();
   const atts = opts.attachments || [];
 
   // captionless upload -> vCard offer, or photo OCR automatically

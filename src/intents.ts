@@ -289,6 +289,11 @@ export function singCf(s: string): string {
 }
 
 export function parseIntent(raw: string): Intent {
+  // A leading slash never changes a command ("/kpis" ≡ "kpis"): the chat
+  // box's "/" command palette — and muscle memory — insert it. Strip it here
+  // so every caller (handleMessage, routine steps, confirmation gating) sees
+  // the bare command; intent.raw echoes the stripped text.
+  raw = raw.replace(/^\s*\/+/, "").trim();
   const text = norm(raw);
   const cased = raw.replace(/[?!.,;:]+$/g, "").replace(/\s+/g, " ").trim(); // no lowercasing: stage labels keep their case
   const slots: Record<string, string> = {};
@@ -694,6 +699,7 @@ export function helpText(): string {
   }
   lines.push("Anything else I don't recognize goes to your LLM if `MILTON_LLM_URL` is set.");
   lines.push("I'll ask before anything destructive, and let you pick when a name matches more than one record.");
+  lines.push("A leading slash never changes a command: `/kpis` works the same as `kpis`.");
   lines.push("Tip: type `/` in the chat box to browse every command, or say `undo` to reverse your last change.");
   return lines.join("\n");
 }

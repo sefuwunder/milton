@@ -141,6 +141,10 @@ describe("help stays in sync with the parser", () => {
         test(`help example "${cmd}" -> ${intent}`, () => {
           expect(parseIntent(cmd).name).toBe(intent);
         });
+        test(`help example "/${cmd}" -> ${intent}`, () => {
+          // a leading slash never changes the parsed intent
+          expect(parseIntent(`/${cmd}`).name).toBe(intent);
+        });
       }
     }
   }
@@ -161,6 +165,22 @@ describe("help stays in sync with the parser", () => {
         if (row.note) expect(text).toContain(row.note);
       }
     }
+  });
+});
+
+describe("leading-slash handling", () => {
+  test("slash, whitespace, and double-slash prefixes are all ignored", () => {
+    expect(parseIntent("/kpis").name).toBe("kpis");
+    expect(parseIntent("/ kpis").name).toBe("kpis");
+    expect(parseIntent("//help").name).toBe("help");
+    expect(parseIntent("  /help  ").name).toBe("help");
+  });
+  test("a lone slash is just unknown", () => {
+    expect(parseIntent("/").name).toBe("unknown");
+  });
+  test("non-slash input is unchanged", () => {
+    expect(parseIntent("kpis").name).toBe("kpis");
+    expect(parseIntent("7/8 meeting").name).not.toBe("kpis");
   });
 });
 
