@@ -384,9 +384,8 @@ describe("offer card DOM", () => {
       });
       const els: Record<string, any> = {};
       ["chat", "chips", "composer", "input", "status-dot", "status-text", "help-btn",
-       "cam-btn", "photo-input", "vcf-btn", "vcf-input", "tray", "bell-btn", "bell-badge", "auto-btn",
-       "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "ws-select", "palette",
-       "session-select", "session-new"].forEach((id) => (els[id] = mkEl("div")));
+       "cam-btn", "photo-input", "vcf-btn", "vcf-input", "tray", "auto-badge", "auto-btn",
+       "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "palette"].forEach((id) => (els[id] = mkEl("div")));
       (globalThis as any).document = {
         getElementById: (id: string) => els[id] || null,
         createElement: (t: string) => mkEl(t),

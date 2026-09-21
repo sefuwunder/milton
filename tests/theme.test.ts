@@ -61,8 +61,8 @@ function installStubs() {
   };
   els = {};
   ["chat", "chips", "composer", "input", "status-dot", "status-text", "help-btn",
-   "theme-btn", "cam-btn", "photo-input", "vcf-btn", "vcf-input", "tray", "bell-btn", "bell-badge", "auto-btn",
-   "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "ws-select", "palette"].forEach((id) => (els[id] = mkEl("div")));
+   "theme-btn", "cam-btn", "photo-input", "vcf-btn", "vcf-input", "tray", "auto-badge", "auto-btn",
+   "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "palette"].forEach((id) => (els[id] = mkEl("div")));
   rootEl = mkEl("html");
   (globalThis as any).document = {
     getElementById: (id: string) => els[id] || null,
@@ -261,12 +261,12 @@ describe("switchboard-style icon set", () => {
   test("ICONS map uses 24x24 stroke=currentColor line marks", () => {
     expect(src).toContain('viewBox="0 0 24 24"');
     expect(src).toContain('stroke="currentColor"');
-    for (const name of ["camera", "contacts", "bell", "gear", "send", "check", "alert", "x", "skip", "box", "boxCheck", "half", "sun", "moon"]) {
+    for (const name of ["camera", "contacts", "gear", "send", "check", "alert", "x", "skip", "box", "boxCheck", "half", "sun", "moon"]) {
       expect(src).toContain(name + ": SVG_OPEN");
     }
   });
   test("chrome buttons in index.html are SVG, not emoji", () => {
-    for (const id of ["cam-btn", "vcf-btn", "bell-btn", "auto-btn", "theme-btn"]) {
+    for (const id of ["cam-btn", "vcf-btn", "auto-btn", "theme-btn"]) {
       const seg = html.split(`id="${id}"`)[1].split("</button>")[0];
       expect(seg).toContain("<svg");
     }

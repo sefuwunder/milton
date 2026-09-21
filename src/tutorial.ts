@@ -92,7 +92,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: "stages",
     title: "Shaping your CRM",
-    explain: "The pipeline itself is editable from here: `add stage`, `rename stage`, `move stage`, `delete stage` (I'll ask where its deals go). And `workspaces` lists your workspaces — `switch to <name>` moves everything I do into one.",
+    explain: "The pipeline itself is editable from here: `add stage`, `rename stage`, `move stage`, `delete stage` (I'll ask where its deals go). And `workspaces` lists your workspaces — `switch to <name>` starts a fresh session inside one, since each session lives in exactly one workspace.",
     tryThis: "list stages",
     expectIntents: ["list_stages"],
     hint: "Deleting a stage with deals in it needs a destination — I won't strand them.",

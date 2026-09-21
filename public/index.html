@@ -20,22 +20,45 @@ try {
 <div class="app">
   <header class="topbar">
     <div class="brand">
-      <div class="avatar">M</div>
+      <button id="avatar-btn" class="avatar" title="Chat sessions — click to switch" aria-label="Open session picker" aria-haspopup="dialog">M</button>
       <div>
         <div class="name">Milton</div>
         <div class="sub"><span id="status-dot" class="dot"></span><span id="status-text">connecting…</span></div>
       </div>
     </div>
     <div class="top-actions">
-      <select id="session-select" class="ws-select session-select" title="Chat session"></select>
-      <button id="session-new" class="ghost" title="New chat session" aria-label="New chat session"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
-      <select id="ws-select" class="ws-select" title="Workspace" hidden></select>
-      <button id="bell-btn" class="ghost bell" title="Automation runs" aria-label="Automation runs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9.5a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6z"/><path d="M10 20a2.2 2.2 0 0 0 4 0"/></svg><span id="bell-badge" class="badge" hidden></span></button>
-      <button id="auto-btn" class="ghost" title="Automations" aria-label="Automations"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 4v2.2M12 17.8V20M4 12h2.2M17.8 12H20M6.3 6.3l1.6 1.6M16.1 16.1l1.6 1.6M17.7 6.3l-1.6 1.6M7.9 16.1l-1.6 1.6"/></svg></button>
+      <button id="auto-btn" class="ghost auto-btn" title="Automations" aria-label="Automations"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 4v2.2M12 17.8V20M4 12h2.2M17.8 12H20M6.3 6.3l1.6 1.6M16.1 16.1l1.6 1.6M17.7 6.3l-1.6 1.6M7.9 16.1l-1.6 1.6"/></svg><span id="auto-badge" class="badge" hidden></span></button>
       <button id="theme-btn" class="ghost" title="Theme: Auto (follows system)" aria-label="Theme: Auto (follows system)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none"/></svg></button>
       <button id="help-btn" class="ghost" title="What can Milton do?">?</button>
     </div>
   </header>
+
+  <!-- session picker: opened from the avatar; lists sessions with their bound workspace -->
+  <div id="session-overlay" class="overlay" hidden>
+    <div class="panel glassy" role="dialog" aria-modal="true" aria-label="Chat sessions">
+      <div class="panel-head">
+        <h3>Chat sessions</h3>
+        <button id="session-picker-close" class="ghost" title="Close (Esc)" aria-label="Close session picker">×</button>
+      </div>
+      <div id="session-list" class="session-list"></div>
+      <div class="panel-foot">
+        <button id="session-create" class="btn-accent"><span aria-hidden="true">＋</span> New session</button>
+        <button id="session-manage-link" class="btn-quiet">Manage sessions…</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- session management: inline rename, delete with confirmation -->
+  <div id="manage-overlay" class="overlay" hidden>
+    <div class="panel glassy" role="dialog" aria-modal="true" aria-label="Manage sessions">
+      <div class="panel-head">
+        <h3>Manage sessions</h3>
+        <button id="manage-close" class="ghost" title="Close (Esc)" aria-label="Close session management">×</button>
+      </div>
+      <div id="manage-list" class="session-list"></div>
+      <p class="panel-hint">Renaming is instant. Deleting a session removes its messages for good — the last session can't be deleted. Each session stays in its own workspace.</p>
+    </div>
+  </div>
 
   <main id="chat" class="chat" aria-live="polite"></main>
 

@@ -242,14 +242,31 @@ const server = Bun.serve({
 
     // ---- chat sessions: named conversations ---------------------------------------
     if (path === "/api/chat-sessions" && method === "GET") {
-      return json({ sessions: listChatSessions() });
+      return json({
+        sessions: listChatSessions().map((s) => ({
+          ...s,
+          workspace: (() => { const w = getSessionWorkspace(s.id); return { id: w.id, name: w.name }; })(),
+        })),
+      });
     }
     if (path === "/api/chat-sessions" && method === "POST") {
       let body: any = {};
       try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      // A new session is bound to exactly one workspace at creation (null =
+      // exec-crm's default). Validate before creating anything.
+      const wid = body.workspace_id == null || body.workspace_id === "" ? null : Number(body.workspace_id);
+      if (wid !== null && (!Number.isInteger(wid) || wid <= 0)) return json({ error: "bad workspace_id" }, 400);
+      let wname = "";
+      if (wid !== null) {
+        const w = (await listWorkspaces())?.find((x) => x.id === wid);
+        if (!w) return json({ error: `unknown workspace ${wid}` }, 400);
+        wname = w.name;
+      }
       const id = "s-" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
       try {
-        return json({ session: createChatSession(id, String(body.name || "")) }, 201);
+        const info = createChatSession(id, String(body.name || ""));
+        setSessionWorkspace(id, wid, wname);
+        return json({ session: { ...info, workspace: { id: wid, name: wname } } }, 201);
       } catch (e: any) { return json({ error: String(e?.message || e) }, 400); }
     }
     if (path.startsWith("/api/chat-sessions/") && (method === "PATCH" || method === "DELETE")) {
@@ -343,22 +360,35 @@ const server = Bun.serve({
       return json({ workspace_id: w.id, workspace_name: w.name });
     }
     if (path === "/api/session/workspace" && method === "POST") {
+      // One workspace per session: "switching" a session's workspace forks a
+      // FRESH session bound to the target. The old session is never re-scoped,
+      // so workspaces can't commingle. Returns the new session for the client
+      // to follow (or unchanged:true when already there).
       let body: any = {};
       try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
       const sid = String(body.session || "").slice(0, 64);
       if (!sid) return json({ error: "missing session" }, 400);
-      if (body.workspace_id == null || body.workspace_id === "") {
-        setSessionWorkspace(sid, null, "");
-        return json({ ok: true, workspace_id: null, workspace_name: "" });
+      if (!getChatSession(sid)) return json({ error: "unknown session" }, 404);
+      const id = body.workspace_id == null || body.workspace_id === "" ? null : Number(body.workspace_id);
+      if (id !== null && (!Number.isInteger(id) || id <= 0)) return json({ error: "bad workspace_id" }, 400);
+      const cur = getSessionWorkspace(sid);
+      if ((cur.id ?? null) === id) {
+        return json({ ok: true, unchanged: true, workspace_id: cur.id, workspace_name: cur.name });
       }
-      const id = Number(body.workspace_id);
-      if (!Number.isInteger(id) || id <= 0) return json({ error: "bad workspace_id" }, 400);
-      const list = await listWorkspaces();
-      const w = list?.find((x) => x.id === id);
-      if (list && !w) return json({ error: `unknown workspace ${id}` }, 400);
-      // exec-crm unreachable: accept the id on trust, name unknown
-      setSessionWorkspace(sid, id, w ? w.name : "");
-      return json({ ok: true, workspace_id: id, workspace_name: w ? w.name : "" });
+      let wname = "";
+      if (id !== null) {
+        const list = await listWorkspaces();
+        const w = list?.find((x) => x.id === id);
+        if (list && !w) return json({ error: `unknown workspace ${id}` }, 400);
+        // exec-crm unreachable: accept the id on trust, name unknown
+        wname = w ? w.name : "";
+      }
+      const nid = "s-" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+      try {
+        const info = createChatSession(nid, "");
+        setSessionWorkspace(nid, id, wname);
+        return json({ ok: true, session: { id: info.id, name: info.name }, workspace_id: id, workspace_name: wname });
+      } catch (e: any) { return json({ error: String(e?.message || e) }, 400); }
     }
 
     // ---- incoming exec-crm webhook -> triggers -----------------------------------

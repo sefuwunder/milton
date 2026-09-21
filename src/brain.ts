@@ -1017,13 +1017,27 @@ function listRunsReply(): Reply {
 
 // ---- workspaces ------------------------------------------------------------------------
 // Parse from the RAW message so names keep their original casing.
-function applyWorkspace(session: Session, w: { id: number; name: string }): Reply {
-  wss.setSessionWorkspace(session.id, w.id, w.name);
-  session.workspaceId = w.id;
-  session.workspaceName = w.name;
+//
+// One workspace per session: switching to a different workspace NEVER re-scopes
+// the current session. Instead it starts a fresh session bound to the target
+// workspace (the old session keeps its own history and workspace binding), and
+// the reply carries activeSession so the UI follows. Only a switch to the
+// workspace the session is already in is a no-op.
+function applyWorkspace(session: Session, w: { id: number | null; name: string }): Reply {
+  const cur = session.workspaceId ?? null;
+  const targetLabel = w.id == null ? "exec-crm's **default workspace**" : `workspace **${w.name}**`;
+  if (cur === w.id) {
+    return {
+      text: `Already in ${targetLabel} — nothing to switch.`,
+      chips: ["Show pipeline", "Current workspace", "Morning brief"],
+    };
+  }
+  const info = chats.createChatSession(sessionIdGen(), "");
+  wss.setSessionWorkspace(info.id, w.id, w.name);
   return {
-    text: `Switched to workspace **${w.name}**. Everything I do now — deals, tasks, routines — happens in there.`,
-    chips: ["Show pipeline", "Current workspace", "Morning brief"],
+    text: `Switching workspaces starts a fresh session — each session lives in exactly one workspace, so nothing commingles. Started **${info.name}** in ${targetLabel}; your previous session keeps its own history and workspace.`,
+    chips: ["Current workspace", "Morning brief", "Show pipeline"],
+    activeSession: { id: info.id, name: info.name },
   };
 }
 
@@ -1064,13 +1078,7 @@ async function switchWorkspaceReply(session: Session, raw: string): Promise<Repl
   const query = (m?.[1] || "").trim();
   if (!query) return { text: "Switch to which workspace? Say `workspaces` to list them.", chips: ["Workspaces"] };
   if (/^default$/i.test(query)) {
-    wss.setSessionWorkspace(session.id, null, "");
-    session.workspaceId = null;
-    session.workspaceName = "";
-    return {
-      text: "Back in exec-crm's **default workspace**.",
-      chips: ["Show pipeline", "Workspaces", "Morning brief"],
-    };
+    return applyWorkspace(session, { id: null, name: "" });
   }
   // Chat sessions take precedence: an exact session name or a session-list
   // number ("switch to 2") wins over a workspace. Force the workspace path
@@ -1148,9 +1156,13 @@ async function chatSessionReply(session: Session, intent: Intent): Promise<Reply
     const name = rawName || (intent.slots.name || "").trim();
     try {
       const info = chats.createChatSession(sessionIdGen(), name);
+      // A new session inherits the workspace of the session it was born from:
+      // one workspace per session, never commingled.
+      wss.setSessionWorkspace(info.id, session.workspaceId ?? null, session.workspaceName || "");
       session.chatName = info.name;
+      const wsBit = session.workspaceId != null ? ` in workspace **${session.workspaceName || `#${session.workspaceId}`}**` : "";
       return {
-        text: `Started **${info.name}** — a fresh conversation.`,
+        text: `Started **${info.name}** — a fresh conversation${wsBit}.`,
         chips: ["Sessions", "Morning brief", "Help"],
         activeSession: { id: info.id, name: info.name },
       };
@@ -1164,7 +1176,9 @@ async function chatSessionReply(session: Session, intent: Intent): Promise<Reply
     const lines = list.map((s, i) => {
       const mark = s.id === session.id ? " ← current" : "";
       const msgs = s.messageCount === 1 ? "1 message" : `${s.messageCount} messages`;
-      return `${i + 1}. **${s.name}** — ${msgs}, active ${chats.relTime(s.last_active_at, now)}${mark}`;
+      const w = wss.getSessionWorkspace(s.id);
+      const wsBit = w.id == null ? "" : ` · ${w.name || `#${w.id}`}`;
+      return `${i + 1}. **${s.name}** — ${msgs}${wsBit}, active ${chats.relTime(s.last_active_at, now)}${mark}`;
     });
     return {
       text: `**${list.length} chat session${list.length === 1 ? "" : "s"}:**\n${lines.join("\n")}\n\n\`switch to <name or number>\` to jump between them · \`new session <name>\` to start fresh.`,

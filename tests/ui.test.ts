@@ -21,9 +21,10 @@ let els: Record<string, any>;
 beforeAll(async () => {
   els = {};
   ["chat", "chips", "composer", "input", "status-dot", "status-text", "help-btn",
-   "cam-btn", "photo-input", "vcf-btn", "vcf-input", "tray", "bell-btn", "bell-badge", "auto-btn",
-   "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "ws-select", "palette",
-   "session-select", "session-new"].forEach((id) => (els[id] = mkEl("div")));
+   "cam-btn", "photo-input", "vcf-btn", "vcf-input", "tray", "auto-badge", "auto-btn",
+   "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "palette",
+   "avatar-btn", "session-overlay", "session-list", "session-create", "session-manage-link",
+   "session-picker-close", "manage-overlay", "manage-list", "manage-close"].forEach((id) => (els[id] = mkEl("div")));
   (globalThis as any).document = {
     getElementById: (id: string) => els[id] || null,
     createElement: (t: string) => mkEl(t),
@@ -41,7 +42,7 @@ beforeAll(async () => {
   };
   afterAll(() => { (globalThis as any).fetch = prevFetch; });
   let src = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
-  src = src.replace("})();", ";globalThis.__t={cardHTML,md,money,esc,routineRow,scheduleRow,triggerRow,runRow,updateBadge,showAuto,hideAuto,addTrayItem,addMsg};})();");
+  src = src.replace("})();", ";globalThis.__t={cardHTML,md,money,esc,routineRow,scheduleRow,triggerRow,runRow,updateBadge,showAuto,hideAuto,addTrayItem,addMsg,switchSession,openPicker,closePicker};})();");
   eval(src);
   await new Promise((r) => setTimeout(r, 50));
   T = (globalThis as any).__t;
@@ -145,11 +146,11 @@ describe("automations UI", () => {
     (globalThis as any).localStorage.setItem("milton_runs_seen", "10");
     const n = T.updateBadge([{ id: 9 }, { id: 11 }, { id: 12 }]);
     expect(n).toBe(2);
-    expect(els["bell-badge"].hidden).toBe(false);
-    expect(els["bell-badge"].textContent).toBe("2");
+    expect(els["auto-badge"].hidden).toBe(false);
+    expect(els["auto-badge"].textContent).toBe("2");
     const n2 = T.updateBadge([{ id: 5 }]);
     expect(n2).toBe(0);
-    expect(els["bell-badge"].hidden).toBe(true);
+    expect(els["auto-badge"].hidden).toBe(true);
   });
   test("showAuto/hideAuto toggle the views", () => {
     T.showAuto("runs");
@@ -280,18 +281,18 @@ describe("vcf import button", () => {
   });
 });
 
-describe("session switcher", () => {
+describe("session picker", () => {
   const outerFetch = (globalThis as any).fetch;
   const SESSIONS = [
-    { id: "s-a", name: "General", created_at: "", last_active_at: "", messageCount: 1 },
-    { id: "s-b", name: "Pipeline", created_at: "", last_active_at: "", messageCount: 0 },
+    { id: "s-a", name: "General", created_at: "", last_active_at: "", messageCount: 1, workspace: { id: null, name: "" } },
+    { id: "s-b", name: "Pipeline", created_at: "", last_active_at: "", messageCount: 0, workspace: { id: 2, name: "Acme", } },
   ];
   beforeAll(() => {
     (globalThis as any).fetch = async (url: string, opts?: any) => {
       const ok = (d: any) => ({ json: async () => d });
       const u = String(url);
       if (u.includes("/api/chat-sessions") && opts?.method === "POST") {
-        const created = { id: "s-c", name: "Session 3", created_at: "", last_active_at: "", messageCount: 0 };
+        const created = { id: "s-c", name: "Session 3", created_at: "", last_active_at: "", messageCount: 0, workspace: { id: 2, name: "Acme" } };
         SESSIONS.unshift(created);
         return ok({ session: created });
       }
@@ -305,22 +306,58 @@ describe("session switcher", () => {
   });
   afterAll(() => { (globalThis as any).fetch = outerFetch; });
 
-  test("dropdown lists sessions; switching swaps sid and reloads history", async () => {
-    els["session-select"].value = "s-b";
-    els["session-select"]._l.change();
+  test("avatar click opens the picker listing sessions with their workspaces", async () => {
+    // real markup starts the overlay hidden
+    els["session-overlay"].hidden = true;
+    els["manage-overlay"].hidden = true;
+    els["avatar-btn"]._l.click();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(els["session-overlay"].hidden).toBe(false);
+    expect(els["session-list"].innerHTML).toContain("Pipeline");
+    expect(els["session-list"].innerHTML).toContain("ws-badge");
+    expect(els["session-list"].innerHTML).toContain("Acme");
+    expect(els["session-list"].innerHTML).toContain("default");
+    // active session is marked
+    expect(els["session-list"].innerHTML).toContain("active");
+    // picker has the New session button and the management link
+    expect(typeof els["session-create"]._l.click).toBe("function");
+    expect(typeof els["session-manage-link"]._l.click).toBe("function");
+  });
+
+  test("second avatar click closes the picker", async () => {
+    els["avatar-btn"]._l.click();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(els["session-overlay"].hidden).toBe(true);
+  });
+
+  test("switchSession swaps sid and reloads history", async () => {
+    T.switchSession("s-b");
     await new Promise((r) => setTimeout(r, 60));
     expect((globalThis as any).localStorage.getItem("milton_sid")).toBe("s-b");
-    expect(els["session-select"].innerHTML).toContain("Pipeline");
-    expect(els["session-select"].value).toBe("s-b");
+    expect(els["session-overlay"].hidden).toBe(true);
     const html = els["chat"].children.map((c: any) => c.innerHTML).join("\n");
     expect(html).toContain("history for s-b");
   });
 
-  test("＋ button creates a session and switches to it", async () => {
-    els["session-new"]._l.click();
+  test("New session button creates a bound session and switches to it", async () => {
+    els["session-create"]._l.click();
     await new Promise((r) => setTimeout(r, 60));
     expect((globalThis as any).localStorage.getItem("milton_sid")).toBe("s-c");
-    expect(els["session-select"].innerHTML).toContain("Session 3");
-    expect(els["session-select"].value).toBe("s-c");
+  });
+
+  test("Manage link opens the management modal with rename/delete rows", async () => {
+    els["session-manage-link"]._l.click();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(els["manage-overlay"].hidden).toBe(false);
+    expect(els["session-overlay"].hidden).toBe(true);
+    expect(els["manage-list"].innerHTML).toContain("Pipeline");
+    expect(els["manage-list"].innerHTML).toContain("Rename");
+    expect(els["manage-list"].innerHTML).toContain("Delete");
+  });
+
+  test("single automations button: no bell button in the header", () => {
+    expect(document.getElementById("bell-btn")).toBeNull();
+    expect(typeof els["auto-btn"]._l.click).toBe("function");
+    expect(els["auto-badge"]).toBeTruthy();
   });
 });

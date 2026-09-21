@@ -138,9 +138,9 @@ Milton: Run requested: recon of **Austin** is now `running` (run `a3f9c21b`). I'
 Milton can work inside any exec-crm workspace, not just the default one. Every exec-crm request carries the session's workspace via exec-crm's `?workspace=<id>` scoping (which wins over the `X-Workspace` header).
 
 - `workspaces` — list exec-crm's workspaces with ids
-- `switch to Acme` / `use workspace Acme` — fuzzy name match; ambiguous names get a numbered pick-list, a bare id works too, `switch to default` goes back
+- `switch to Acme` / `use workspace Acme` — fuzzy name match; ambiguous names get a numbered pick-list, a bare id works too, `switch to default` goes back. One workspace per session: switching starts a **fresh session** bound to the target workspace (the old session keeps its own history and workspace), so workspaces never commingle.
 - `current workspace` — where this chat session is working
-- The topbar has a workspace switcher dropdown showing the current workspace; it stays in sync when you switch from chat.
+- The session picker (click Milton's avatar) shows every session with its bound workspace.
 - The choice is per chat session and persists across restarts (stored server-side, `session_workspaces` table).
 - **Schedules and triggers pin the workspace they were created in**: `schedule EOD daily at 6pm` while in Acme runs in Acme forever, even if you later switch the chat elsewhere. `list schedules` / `list triggers` show the pinned workspace; unattended runs skip destructive steps as before.
 - If exec-crm is unreachable, Milton says so and keeps the current (or default) workspace rather than guessing.
