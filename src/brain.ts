@@ -1433,7 +1433,7 @@ async function meridianRequestReply(session: Session, city: string): Promise<Rep
     ? "I'll report back here when it finishes."
     : "⚠️ Completion callbacks aren't configured (set MILTON_HOOK_SECRET) — check back with `meridian recons` once it should be done.";
   return {
-    text: `Run requested: recon of **${city}** is now \`${res.status}\` (run \`${short}\`). ${cbNote}`,
+    text: `Run requested: business-data recon of **${city}** is now \`${res.status}\` (run \`${short}\`). ${cbNote}`,
     chips: ["Meridian recons", "Morning brief"],
   };
 }

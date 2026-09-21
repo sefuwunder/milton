@@ -1,7 +1,8 @@
-// meridian.ts — read-only client for Meridian's recon outputs.
-// Milton never launches recons or mutates anything here: every call is GET.
-// Meridian is a separate app (Bun + SQLite, port 3005); Milton only reads
-// its recon sprints over HTTP.
+// meridian.ts — client for Meridian's recon outputs and run requests.
+// Reads are GETs; the one write is requestReconRun, which asks Meridian's
+// run-request router for a NEW recon sprint (POST /api/runs). Meridian is a
+// separate app (Bun + SQLite, port 3005); Milton only talks to it over HTTP,
+// never its DB.
 
 export interface ReconSummary {
   id: string; city: string; country: string; status: string;
@@ -105,12 +106,18 @@ export type RunRequestResult =
  * Ask Meridian's run-request router for a new recon sprint.
  * callbackUrl/callbackHeaders are sent through so Meridian can POST the
  * completion payload back; omit them and the run is fire-and-forget.
+ *
+ * Hard rule: every Milton-initiated run is business-data only. business_only
+ * is always sent as true — there is no chat opt-out. Meridian then restricts
+ * the sprint to sources classified as business data (companies, legal
+ * entities, organizations, filings, registries, business places) plus
+ * geocode plumbing.
  */
 export async function requestReconRun(
   city: string,
   opts: { callbackUrl?: string; callbackHeaders?: Record<string, string> } = {}
 ): Promise<RunRequestResult> {
-  const body: Record<string, any> = { city };
+  const body: Record<string, any> = { city, business_only: true };
   if (opts.callbackUrl) body.callback_url = opts.callbackUrl;
   if (opts.callbackHeaders) body.callback_headers = opts.callbackHeaders;
   try {

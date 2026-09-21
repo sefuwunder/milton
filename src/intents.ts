@@ -661,7 +661,7 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["add stage Discovery before proposal", "add_stage"], ["rename stage Proposal to Scoping", "rename_stage"]], note: "edit the pipeline schema" },
       { cmds: [["add custom field Renewal date to contacts", "add_custom_field"], ["set Renewal date to 2026-10-01 for contact Amara", "set_custom_field"]], note: "custom fields on contacts, companies, campaigns & tasks" },
       { cmds: [["show custom fields for contacts", "show_custom_fields"], ["remove custom field Renewal date from contacts", "delete_custom_field"]], note: "" },
-      { cmds: [["meridian recon Austin", "meridian_request"]], note: "request a new Meridian recon — I report back when it finishes" },
+      { cmds: [["meridian recon Austin", "meridian_request"]], note: "request a new Meridian recon (business data only) — I report back when it finishes" },
       { cmds: [["meridian enrich Acme", "meridian_enrich"], ["enrichment status", "meridian_enrich_status"]], note: "enrich a company: public profile + principal contacts from its own site, then save the dossier to my notes" },
       { cmds: [["meridian prospect dental clinics in Madisonville", "meridian_prospect"], ["prospect status", "meridian_prospect_status"]], note: "territory prospecting: stages prospect companies into exec-crm's Data Workshop Sandbox (staged, never imported without your approval)" },
       { cmds: [["meridian entities Austin company", "meridian_entities"]], note: "its orgs, filtered by type" },
