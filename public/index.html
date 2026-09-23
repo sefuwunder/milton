@@ -20,20 +20,45 @@ try {
 <div class="app">
   <header class="topbar">
     <div class="brand">
-      <div class="avatar">M</div>
+      <button id="avatar-btn" class="avatar" title="Chat sessions — click to switch" aria-label="Open session picker" aria-haspopup="dialog">M</button>
       <div>
         <div class="name">Milton</div>
         <div class="sub"><span id="status-dot" class="dot"></span><span id="status-text">connecting…</span></div>
       </div>
     </div>
     <div class="top-actions">
-      <select id="ws-select" class="ws-select" title="Workspace" hidden></select>
-      <button id="bell-btn" class="ghost bell" title="Automation runs">🔔<span id="bell-badge" class="badge" hidden></span></button>
-      <button id="auto-btn" class="ghost" title="Automations">⚙️</button>
-      <button id="theme-btn" class="ghost" title="Theme: Auto (follows system)">🌓</button>
+      <button id="auto-btn" class="ghost auto-btn" title="Automations" aria-label="Automations"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 4v2.2M12 17.8V20M4 12h2.2M17.8 12H20M6.3 6.3l1.6 1.6M16.1 16.1l1.6 1.6M17.7 6.3l-1.6 1.6M7.9 16.1l-1.6 1.6"/></svg><span id="auto-badge" class="badge" hidden></span></button>
+      <button id="theme-btn" class="ghost" title="Theme: Auto (follows system)" aria-label="Theme: Auto (follows system)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none"/></svg></button>
       <button id="help-btn" class="ghost" title="What can Milton do?">?</button>
     </div>
   </header>
+
+  <!-- session picker: opened from the avatar; lists sessions with their bound workspace -->
+  <div id="session-overlay" class="overlay" hidden>
+    <div class="panel glassy" role="dialog" aria-modal="true" aria-label="Chat sessions">
+      <div class="panel-head">
+        <h3>Chat sessions</h3>
+        <button id="session-picker-close" class="ghost" title="Close (Esc)" aria-label="Close session picker">×</button>
+      </div>
+      <div id="session-list" class="session-list"></div>
+      <div class="panel-foot">
+        <button id="session-create" class="btn-accent"><span aria-hidden="true">＋</span> New session</button>
+        <button id="session-manage-link" class="btn-quiet">Manage sessions…</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- session management: inline rename, delete with confirmation -->
+  <div id="manage-overlay" class="overlay" hidden>
+    <div class="panel glassy" role="dialog" aria-modal="true" aria-label="Manage sessions">
+      <div class="panel-head">
+        <h3>Manage sessions</h3>
+        <button id="manage-close" class="ghost" title="Close (Esc)" aria-label="Close session management">×</button>
+      </div>
+      <div id="manage-list" class="session-list"></div>
+      <p class="panel-hint">Renaming is instant. Deleting a session removes its messages for good — the last session can't be deleted. Each session stays in its own workspace.</p>
+    </div>
+  </div>
 
   <main id="chat" class="chat" aria-live="polite"></main>
 
@@ -57,10 +82,13 @@ try {
   <div id="tray" class="tray" hidden></div>
 
   <form id="composer" class="composer" autocomplete="off">
-    <button type="button" id="cam-btn" class="cam" aria-label="Attach a photo or contacts file" title="Attach a photo or contacts file">📷</button>
+    <div id="palette" class="palette" role="listbox" aria-label="Command palette" hidden></div>
+    <button type="button" id="cam-btn" class="cam" aria-label="Attach a photo or contacts file" title="Attach a photo or contacts file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-2.5h6L17 8h3a1.5 1.5 0 0 1 1.5 1.5V18a1.5 1.5 0 0 1-1.5 1.5H4A1.5 1.5 0 0 1 2.5 18V9.5A1.5 1.5 0 0 1 4 8z"/><circle cx="12" cy="13.5" r="3.5"/></svg></button>
     <input id="photo-input" type="file" accept="image/*,.vcf" hidden>
+    <button type="button" id="vcf-btn" class="cam" aria-label="Import contacts from a vCard file" title="Import contacts (.vcf)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2.5"/><circle cx="9" cy="11" r="2"/><path d="M5.6 16.6c.6-1.9 1.9-2.9 3.4-2.9s2.8 1 3.4 2.9"/><path d="M15 9.5h4M15 12.5h2.5"/></svg></button>
+    <input id="vcf-input" type="file" accept=".vcf" hidden>
     <input id="input" type="text" placeholder="Ask Milton… e.g. &quot;morning brief&quot; or &quot;move Acme deal to negotiation&quot;" maxlength="2000" aria-label="Message Milton">
-    <button type="submit" class="send" aria-label="Send">↑</button>
+    <button type="submit" class="send" aria-label="Send"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 3L10.5 13.5"/><path d="M21 3l-7 18-3.5-7.5L3 10l18-7z"/></svg></button>
   </form>
 </div>
 <script src="app.js"></script>

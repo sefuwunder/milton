@@ -40,6 +40,12 @@ export function addDealNote(dealId: number, text: string, workspaceId: number | 
     .get(Number(r.lastInsertRowid)) as DealNote;
 }
 
+/** Delete one deal note (undo of add_note). Returns true when one was removed. */
+export function deleteDealNote(id: number): boolean {
+  const r = needDb().query("DELETE FROM deal_notes WHERE id = ?").run(id);
+  return Number(r.changes) > 0;
+}
+
 export function getDealNotes(dealId: number, workspaceId: number | null): DealNote[] {
   return needDb().query(
     "SELECT id, deal_id, text, at FROM deal_notes WHERE deal_id = ? AND workspace_id IS ? ORDER BY id ASC"

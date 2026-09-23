@@ -75,7 +75,6 @@ function task(o: any) {
 
 // ---- legacy hygiene, reimplemented verbatim from the pre-engine brain.ts --------
 function legacyHygieneReply(deals: any[], tasks: any[]) {
-  if (!deals.length && !tasks.length) return { text: "No deals or tasks to check.", chips: ["Morning brief"] };
   const today = new Date().toISOString().slice(0, 10);
   const open = deals.filter((d) => !d.stage.startsWith("closed_"));
   const findings: { icon: string; text: string; fix?: string }[] = [];
@@ -94,10 +93,20 @@ function legacyHygieneReply(deals: any[], tasks: any[]) {
   if (!findings.length) {
     return { text: "Pipeline is clean — every open deal has a close date, a contact, and recent activity. Nice.", chips: ["Show pipeline", "Morning brief"] };
   }
+  const hygieneWidget = {
+    kind: "list", title: "Pipeline hygiene", source: "milton:hygiene",
+    payload: {
+      items: findings.slice(0, 15).map((f) => ({
+        text: `${f.icon} ${f.text}`,
+        ...(f.fix ? { sub: f.fix } : {}),
+      })),
+    },
+  };
   return {
     text: `Found ${findings.length} thing${findings.length === 1 ? "" : "s"} worth fixing:`,
     cards: [{ kind: "findings", title: "Pipeline hygiene", items: findings }],
     chips: ["Show pipeline", "My tasks"],
+    widget: hygieneWidget,
   };
 }
 
@@ -131,9 +140,9 @@ describe("hygiene via the rule engine", () => {
     expect(got.chips).toEqual(want.chips);
   });
 
-  test("empty CRM still short-circuits", async () => {
+  test("empty CRM reports a clean pipeline", async () => {
     const r = await handleMessage(freshSession(), "pipeline hygiene");
-    expect(r.text).toBe("No deals or tasks to check.");
+    expect(r.text).toContain("Pipeline is clean");
   });
 
   test("clean pipeline message preserved", async () => {

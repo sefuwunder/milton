@@ -2,27 +2,35 @@
 // Bun + zero dependencies + SQLite. Everything stays on your machine.
 
 import { Database } from "bun:sqlite";
-import { handleMessage, tickAutomation, handleWebhookEvent, handleMeridianCallback, type Session, type Reply, type UploadRef } from "./brain";
+import { mkdirSync } from "node:fs";
+import { handleMessage, tickAutomation, handleWebhookEvent, handleMeridianCallback, enrichTerminalReply, enrichTickDecision, prospectTerminalReply, prospectTickDecision, type Session, type Reply, type UploadRef, type EnrichJobState, type ProspectJobState } from "./brain";
+import { getEnrichJob, getProspectJob } from "./meridian";
 import { ping, crmBase } from "./crm";
 import { helpText } from "./intents";
 import { detectKind } from "./ocr";
 import * as auto from "./automation";
-import { initWorkspaceDb, listWorkspaces, getSessionWorkspace, setSessionWorkspace } from "./workspace";
+import { initWorkspaceDb, listWorkspaces, getSessionWorkspace, setSessionWorkspace, runWithWorkspace } from "./workspace";
+import { initChatSessionDb, listChatSessions, getChatSession, createChatSession, renameChatSession, deleteChatSession, ensureChatSession, touchChatSession } from "./chat_sessions";
 import { initReconRunsDb } from "./recon_runs";
 import { initDealNotesDb } from "./deal_notes";
 import { initMissLogDb } from "./intent_misses";
 import { initPlaybookDb } from "./playbook";
+import { initUsabilityDb } from "./usability";
+import { commandRegistry } from "./commands";
 import { hookSecret, verifyHookSecret } from "./hookauth";
 import { embeddedDecision, startEmbedded, type EmbeddedServer } from "./embedded";
 import { llmEndpointBase, analystModel } from "./analyst";
 
 const PORT = Number(process.env.PORT || 3009);
-const DATA_DIR = process.env.MILTON_DATA || "./data";
 
-await Bun.$`mkdir -p ${DATA_DIR}`.quiet().catch(() => {});
-
-const db = new Database(`${DATA_DIR}/milton.db`);
-db.exec(`
+let db!: Database;
+function initDataDir(dataDir: string) {
+  // NOTE: the previous handle is intentionally left open, not closed: the
+  // per-domain init*Db() helpers keep their own reference to it, and closing
+  // it out from under them breaks their modules. Abandoning a test-only
+  // SQLite handle is harmless (reclaimed on process exit).
+  db = new Database(`${dataDir}/milton.db`);
+  db.exec(`
   CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     state TEXT NOT NULL DEFAULT '{}',
@@ -45,12 +53,32 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now'))
   );
 `);
-auto.initAutomationDb(db);
-initWorkspaceDb(db);
-initReconRunsDb(db);
-initDealNotesDb(db);
-initMissLogDb(db);
-initPlaybookDb(db);
+  auto.initAutomationDb(db);
+  initWorkspaceDb(db);
+  initChatSessionDb(db, `${dataDir}/uploads`);
+  initReconRunsDb(db);
+  initDealNotesDb(db);
+  initMissLogDb(db);
+  initPlaybookDb(db);
+  initUsabilityDb(db);
+}
+
+const DATA_DIR = process.env.MILTON_DATA || "./data";
+await Bun.$`mkdir -p ${DATA_DIR}`.quiet().catch(() => {});
+initDataDir(DATA_DIR);
+
+/**
+ * Test-only hook: re-point the server — sessions, uploads, automation,
+ * workspace, chat-session, recon-run, deal-note and usability stores — at a
+ * fresh data dir. bun shares module state across test files and server.ts
+ * binds its database on first import, so without this a test file that
+ * imports server.ts after another file did silently reuses the other file's
+ * MILTON_DATA, and tests pass or fail depending on test-file order.
+ */
+export function __resetDataDirForTests(dataDir: string) {
+  mkdirSync(dataDir, { recursive: true });
+  initDataDir(dataDir);
+}
 
 // Incoming webhooks share one auth pattern: 503 when MILTON_HOOK_SECRET isn't
 // configured, 401 on a bad X-Milton-Secret (constant-time comparison).
@@ -61,29 +89,34 @@ function hookAuth(req: Request): Response | null {
 }
 
 function loadSession(id: string): Session {
+  // Named chat sessions: every id gets a row with a human name ("General"
+  // for legacy rows). This also runs the one-time legacy migration.
+  const info = ensureChatSession(id);
+  touchChatSession(id);
   const row = db.query("SELECT state FROM sessions WHERE id = ?").get(id) as any;
   let s: Session;
   if (row) {
     try {
       const st = JSON.parse(row.state);
-      s = { id, pending: st.pending, choice: st.choice, history: st.history || [], lastOcr: st.lastOcr, notes: st.notes || [] };
+      s = { id, pending: st.pending, choice: st.choice, enrichJob: st.enrichJob, prospectJob: st.prospectJob, history: st.history || [], lastOcr: st.lastOcr, notes: st.notes || [], lastWidgetable: st.lastWidgetable, tutorial: st.tutorial };
     } catch {
       s = { id, history: [], notes: [] };
-      db.query("INSERT INTO sessions (id, state) VALUES (?, ?)").run(id, JSON.stringify({ history: [], notes: [] }));
+      db.query("UPDATE sessions SET state = ? WHERE id = ?").run(JSON.stringify({ history: [], notes: [] }), id);
     }
   } else {
+    // unreachable: ensureChatSession above guarantees the row exists
     s = { id, history: [], notes: [] };
-    db.query("INSERT INTO sessions (id, state) VALUES (?, ?)").run(id, JSON.stringify({ history: [], notes: [] }));
   }
   const w = getSessionWorkspace(id);
   s.workspaceId = w.id;
   s.workspaceName = w.name;
+  s.chatName = info.name;
   return s;
 }
 
 function saveSession(s: Session) {
   db.query("UPDATE sessions SET state = ?, updated_at = datetime('now') WHERE id = ?")
-    .run(JSON.stringify({ pending: s.pending, choice: s.choice, history: s.history.slice(-40), lastOcr: s.lastOcr, notes: (s.notes || []).slice(-20) }), s.id);
+    .run(JSON.stringify({ pending: s.pending, choice: s.choice, enrichJob: s.enrichJob, prospectJob: s.prospectJob, history: s.history.slice(-40), lastOcr: s.lastOcr, notes: (s.notes || []).slice(-20), lastWidgetable: s.lastWidgetable, tutorial: s.tutorial }), s.id);
 }
 
 function logMessage(sessionId: string, role: string, text: string) {
@@ -201,10 +234,56 @@ const server = Bun.serve({
       });
     }
 
+    if (path === "/api/commands" && method === "GET") {
+      return json({ commands: commandRegistry() });
+    }
+
     if (path === "/api/history" && method === "GET") {
       const sid = url.searchParams.get("session") || "";
       const rows = db.query("SELECT role, text, created_at FROM messages WHERE session_id = ? ORDER BY id ASC LIMIT 100").all(sid) as any[];
       return json({ messages: rows });
+    }
+
+    // ---- chat sessions: named conversations ---------------------------------------
+    if (path === "/api/chat-sessions" && method === "GET") {
+      return json({
+        sessions: listChatSessions().map((s) => ({
+          ...s,
+          workspace: (() => { const w = getSessionWorkspace(s.id); return { id: w.id, name: w.name }; })(),
+        })),
+      });
+    }
+    if (path === "/api/chat-sessions" && method === "POST") {
+      let body: any = {};
+      try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      // A new session is bound to exactly one workspace at creation (null =
+      // exec-crm's default). Validate before creating anything.
+      const wid = body.workspace_id == null || body.workspace_id === "" ? null : Number(body.workspace_id);
+      if (wid !== null && (!Number.isInteger(wid) || wid <= 0)) return json({ error: "bad workspace_id" }, 400);
+      let wname = "";
+      if (wid !== null) {
+        const w = (await listWorkspaces())?.find((x) => x.id === wid);
+        if (!w) return json({ error: `unknown workspace ${wid}` }, 400);
+        wname = w.name;
+      }
+      const id = "s-" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+      try {
+        const info = createChatSession(id, String(body.name || ""));
+        setSessionWorkspace(id, wid, wname);
+        return json({ session: { ...info, workspace: { id: wid, name: wname } } }, 201);
+      } catch (e: any) { return json({ error: String(e?.message || e) }, 400); }
+    }
+    if (path.startsWith("/api/chat-sessions/") && (method === "PATCH" || method === "DELETE")) {
+      const id = decodeURIComponent(path.slice("/api/chat-sessions/".length).split("/")[0]).slice(0, 64);
+      if (!getChatSession(id)) return json({ error: "not found" }, 404);
+      if (method === "DELETE") {
+        try { return json({ ok: true, ...deleteChatSession(id) }); }
+        catch (e: any) { return json({ error: String(e?.message || e) }, 400); }
+      }
+      let body: any = {};
+      try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      try { return json({ session: renameChatSession(id, String(body.name || "")) }); }
+      catch (e: any) { return json({ error: String(e?.message || e) }, 400); }
     }
 
     // ---- automations: SSE live events -------------------------------------------
@@ -285,22 +364,35 @@ const server = Bun.serve({
       return json({ workspace_id: w.id, workspace_name: w.name });
     }
     if (path === "/api/session/workspace" && method === "POST") {
+      // One workspace per session: "switching" a session's workspace forks a
+      // FRESH session bound to the target. The old session is never re-scoped,
+      // so workspaces can't commingle. Returns the new session for the client
+      // to follow (or unchanged:true when already there).
       let body: any = {};
       try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
       const sid = String(body.session || "").slice(0, 64);
       if (!sid) return json({ error: "missing session" }, 400);
-      if (body.workspace_id == null || body.workspace_id === "") {
-        setSessionWorkspace(sid, null, "");
-        return json({ ok: true, workspace_id: null, workspace_name: "" });
+      if (!getChatSession(sid)) return json({ error: "unknown session" }, 404);
+      const id = body.workspace_id == null || body.workspace_id === "" ? null : Number(body.workspace_id);
+      if (id !== null && (!Number.isInteger(id) || id <= 0)) return json({ error: "bad workspace_id" }, 400);
+      const cur = getSessionWorkspace(sid);
+      if ((cur.id ?? null) === id) {
+        return json({ ok: true, unchanged: true, workspace_id: cur.id, workspace_name: cur.name });
       }
-      const id = Number(body.workspace_id);
-      if (!Number.isInteger(id) || id <= 0) return json({ error: "bad workspace_id" }, 400);
-      const list = await listWorkspaces();
-      const w = list?.find((x) => x.id === id);
-      if (list && !w) return json({ error: `unknown workspace ${id}` }, 400);
-      // exec-crm unreachable: accept the id on trust, name unknown
-      setSessionWorkspace(sid, id, w ? w.name : "");
-      return json({ ok: true, workspace_id: id, workspace_name: w ? w.name : "" });
+      let wname = "";
+      if (id !== null) {
+        const list = await listWorkspaces();
+        const w = list?.find((x) => x.id === id);
+        if (list && !w) return json({ error: `unknown workspace ${id}` }, 400);
+        // exec-crm unreachable: accept the id on trust, name unknown
+        wname = w ? w.name : "";
+      }
+      const nid = "s-" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+      try {
+        const info = createChatSession(nid, "");
+        setSessionWorkspace(nid, id, wname);
+        return json({ ok: true, session: { id: info.id, name: info.name }, workspace_id: id, workspace_name: wname });
+      } catch (e: any) { return json({ error: String(e?.message || e) }, 400); }
     }
 
     // ---- incoming exec-crm webhook -> triggers -----------------------------------
@@ -411,12 +503,98 @@ console.log(`LLM mode: ${embedded ? `embedded (${embedded.label})` : process.env
 console.log(`automation scheduler: every 30s${process.env.MILTON_HOOK_SECRET ? "" : " (incoming webhooks disabled: set MILTON_HOOK_SECRET)"}`);
 if (!crmOk) console.log("Hint: start exec-crm first, or set EXEC_CRM_URL (or MILTON_CRM_URL) to its address.");
 
+// ---- enrichment tick: 30s background poll of in-flight Meridian jobs --------
+// The scrape can take longer than a few seconds, so the chat never blocks on
+// it: this tick polls every parked job on the same 30s cadence as the
+// automation scheduler. On a terminal state the completion (offer card or
+// failure note) is appended to the session and pushed over SSE, so the user
+// sees it without asking. A job still "running" past ENRICH_JOB_TIMEOUT_MS
+// is treated as stalled — Meridian caps jobs at ~60s, so anything older than
+// that means Meridian died mid-job.
+async function tickEnrichment() {
+  let rows: { id: string; state: string }[] = [];
+  try { rows = db.query("SELECT id, state FROM sessions").all() as any[]; }
+  catch { return; }
+  for (const row of rows) {
+    let st: any;
+    try { st = JSON.parse(row.state); } catch { continue; }
+    const job = st.enrichJob as EnrichJobState | undefined;
+    if (!job?.job_id) continue;
+    let r;
+    try { r = await getEnrichJob(job.job_id); }
+    catch { continue; } // Meridian unreachable this round — try again next tick
+    if (!r) continue;
+    const decision = enrichTickDecision(job, r.status, Date.now());
+    if (decision === "keep") continue;
+    const session = loadSession(row.id);
+    // A chat turn may have resolved it concurrently — don't double-deliver.
+    if (session.enrichJob?.job_id !== job.job_id) continue;
+    session.enrichJob = undefined;
+    const reply: Reply = decision === "stale"
+      ? {
+        text: `The enrichment for **${job.targetName}** seems to have stalled — it's been running far longer than Meridian's ~60s job cap, so Meridian probably restarted mid-scrape. Say \`enrich ${job.targetName}\` to try again.`,
+        chips: ["Meridian recons"],
+      }
+      : enrichTerminalReply(session, job, r);
+    session.history.push({ role: "milton", text: reply.text });
+    saveSession(session);
+    logMessage(row.id, "milton", reply.text);
+    auto.broadcastSse("enrichment-done", {
+      session_id: row.id, target_name: job.targetName, decision, reply,
+    });
+  }
+}
+
+// ---- prospect tick: 30s background poll of in-flight Meridian prospect jobs --
+// Mirrors tickEnrichment. On `done`, the tick stages the batch into exec-crm's
+// Data Workshop Sandbox itself (staged, never committed), then reports the
+// staged confirmation into the session. Staging runs inside the session's
+// workspace (runWithWorkspace) so the batch lands in the right workspace even
+// from the background sweep, which has no ambient workspace of its own.
+async function tickProspect() {
+  let rows: { id: string; state: string }[] = [];
+  try { rows = db.query("SELECT id, state FROM sessions").all() as any[]; }
+  catch { return; }
+  for (const row of rows) {
+    let st: any;
+    try { st = JSON.parse(row.state); } catch { continue; }
+    const job = st.prospectJob as ProspectJobState | undefined;
+    if (!job?.job_id) continue;
+    let r;
+    try { r = await getProspectJob(job.job_id); }
+    catch { continue; } // Meridian unreachable this round — try again next tick
+    if (!r) continue;
+    const decision = prospectTickDecision(job, r.status, Date.now());
+    if (decision === "keep") continue;
+    const session = loadSession(row.id);
+    // A chat turn may have resolved it concurrently — don't double-stage.
+    if (session.prospectJob?.job_id !== job.job_id) continue;
+    session.prospectJob = undefined;
+    const reply: Reply = decision === "stale"
+      ? {
+        text: `Prospecting **${job.industry}** in **${job.location}** seems to have stalled — it's been running far longer than Meridian's ~60s job cap, so Meridian probably restarted mid-run. Say \`meridian prospect ${job.industry} in ${job.location}\` to try again.`,
+        chips: ["Meridian recons"],
+      }
+      : await runWithWorkspace(session.workspaceId ?? null, () => prospectTerminalReply(session, job, r));
+    session.history.push({ role: "milton", text: reply.text });
+    saveSession(session);
+    logMessage(row.id, "milton", reply.text);
+    auto.broadcastSse("prospect-done", {
+      session_id: row.id, industry: job.industry, location: job.location, decision, reply,
+    });
+  }
+}
+
 // scheduler: run due schedules every 30s (plus one sweep shortly after boot)
 let ticking = false;
 async function sweep() {
   if (ticking) return;
   ticking = true;
-  try { await tickAutomation(Date.now()); }
+  try {
+    await tickAutomation(Date.now());
+    await tickEnrichment();
+    await tickProspect();
+  }
   catch (e) { console.error("scheduler sweep failed:", e); }
   finally { ticking = false; }
 }
@@ -424,4 +602,4 @@ setInterval(sweep, 30000);
 setTimeout(sweep, 5000);
 
 // exported for tests (boots the server against MILTON_DATA on import)
-export { server };
+export { server, loadSession, saveSession, tickEnrichment, tickProspect };

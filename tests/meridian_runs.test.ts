@@ -132,6 +132,18 @@ describe("meridian run request flow", () => {
     expect(r.text).toContain("run-test"); // short run id
     expect(r.text).toContain("report back");
   });
+  test("every run request is business-only: POST body hardcodes business_only true", async () => {
+    await handleMessage(sess("mr-biz1"), "meridian recon Austin");
+    expect(lastRunPost?.body.business_only).toBe(true);
+    const direct = await mer.requestReconRun("Austin");
+    expect(direct.ok).toBe(true);
+    expect(lastRunPost?.body.business_only).toBe(true);
+    expect(lastRunPost?.body.city).toBe("Austin");
+  });
+  test("confirmation text says it is a business-data recon", async () => {
+    const r = await handleMessage(sess("mr-biz2"), "meridian recon Austin");
+    expect(r.text).toContain("business-data recon");
+  });
   test("pending run is persisted", async () => {
     await handleMessage(sess("mr-2"), "meridian recon Denver");
     const latest = rr.listRunRequests()[0];
@@ -151,6 +163,7 @@ describe("meridian run request flow", () => {
     try {
       const r = await handleMessage(sess("mr-4"), "meridian recon Paris");
       expect(lastRunPost?.body.city).toBe("Paris");
+      expect(lastRunPost?.body.business_only).toBe(true); // business-only even without callbacks
       expect("callback_url" in (lastRunPost?.body || {})).toBe(false);
       expect("callback_headers" in (lastRunPost?.body || {})).toBe(false);
       expect(r.text).toContain("Run requested");

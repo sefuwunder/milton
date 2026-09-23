@@ -117,6 +117,13 @@ const DESCRIPTIONS: Record<string, string> = {
   task_blockers: "What's blocking a task",
   duplicates: "Find duplicate contacts and companies",
   deals_by_source: "Deals from a given source",
+  show_playbook: "Show the CRM playbook rules",
+  pause_rule: "Pause a playbook rule",
+  resume_rule: "Resume a playbook rule",
+  reload_playbook: "Reload the playbook rules",
+  show_misses: "Show phrases Milton didn't understand",
+  review_miss: "Mark a misunderstood phrase as reviewed",
+  dismiss_miss: "Dismiss a misunderstood phrase",
 };
 
 /** A usage example for each intent that must parse back to that intent. */
@@ -213,6 +220,13 @@ const USAGE: Record<string, string> = {
   task_blockers: "what's blocking Website redesign",
   duplicates: "show duplicates",
   deals_by_source: "deals from Referral",
+  show_playbook: "show playbook",
+  pause_rule: "pause rule R7",
+  resume_rule: "resume rule R7",
+  reload_playbook: "reload playbook",
+  show_misses: "show misses",
+  review_miss: "review miss 1",
+  dismiss_miss: "dismiss miss 1",
 };
 
 let cached: CommandMeta[] | null = null;

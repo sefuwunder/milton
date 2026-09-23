@@ -424,14 +424,11 @@ function broadcastRun(run: AutomationRun) {
   }
 }
 
-/** Surface a playbook suggestion (e.g. win follow-through from R8b) as a live
- *  toast. Reuses the automation-run SSE channel the frontend already renders
- *  (`kind: "reminder"` → "⏰ Reminder: …"). Fire-and-forget: no-ops with no
- *  connected clients. */
-export function notifyPlaybook(summary: string): void {
+/** Fan-out for non-automation live events (e.g. enrichment completions). */
+export function broadcastSse(event: string, data: any) {
   if (!sseClients.size) return;
-  broadcastRun({
-    id: 0, kind: "reminder", ref: "playbook", routine_name: "playbook",
-    status: "done", summary, detail: null, ran_at: new Date().toISOString(),
-  });
+  const msg = new TextEncoder().encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  for (const c of [...sseClients]) {
+    try { c.enqueue(msg); } catch { sseClients.delete(c); }
+  }
 }

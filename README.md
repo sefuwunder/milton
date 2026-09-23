@@ -52,17 +52,25 @@ If the model endpoint is misconfigured (wrong model name, unreachable host), Mil
 
 ## What Milton can do
 
+**Fuzzy language** — Milton understands commands with typos, paraphrases, shuffled word order, and filler: `shwo my daels` · `clsoe the acme deal as won` · `ad a new deal acme 50k` · `what opportunities are closing soon` · `hey milton could you please show me my top deals thanks`. It's fully deterministic and runs with zero dependencies and no LLM: normalized keyword scoring with bounded Damerau-Levenshtein typo tolerance (transpositions like `shwo`→`show` count as one edit), phrase bonuses, and confidence thresholds. When the top interpretations score within a hair of each other you get a numbered pick-list instead of a coin flip; gibberish and small talk (`tell me a joke about crm`) stay `unknown` and fall through to the LLM fallback. The exact command parser always runs first, so precise commands behave exactly as before.
+
 **Look & feel** — Tokyo day/night theme: follows your OS automatically, or tap 🌓 in the topbar to cycle Auto → Light → Dark.
 
-**Look things up** — `show pipeline` · `kpis` · `show deal Acme` · `list deals in negotiation` · `show negotiation deals` · `find contacts named jane` · `who is Jane Doe` · `search acme` · `my tasks` · `recent activity` · `webhooks` · `delivery log`
+**Tutorial mode** — say `tutorial` (or `teach me milton`) for a guided walkthrough: 6 short steps from reading the pipeline (`top deals`) through deal details, notes, analysis, and `pin this as a widget`, up to routines and automations. Typos and paraphrases count — the tutorial accepts any phrasing the normal parser would. Controls: `skip` / `next`, `back`, `tutorial status`, `exit tutorial`, `restart tutorial`. Off-script commands work normally mid-tutorial and you're never trapped; progress is kept in your session, so re-entering resumes where you left off.
+
+**Look things up** — `show pipeline` · `kpis` · `show deal Acme` · `list deals in negotiation` · `show negotiation deals` · `find contacts named jane` · `who is Jane Doe` · `search acme` · `my tasks` · `overdue tasks` · `recent activity` · `webhooks` · `delivery log`
 
 **Analysis (all offline, deterministic)** — `sales cycle` (average creation-to-won + where deals stall) · `top deals` (biggest open deals) · `campaign stats` (open/won/win rate per campaign) · `closing soon` (30-day closes with weighted values) · `stale deals` (30d+ untouched, oldest first)
+
+**Widgets** — after any analysis above, `pin this as a widget` (also `add widget`, `save it as a widget`) publishes the result to exec-crm's **Milton** tab for the active workspace (stat/table/bars/list cards, newest first, capped at 50).
 
 **Work the pipeline** — `add deal Website redesign for Acme worth 50k close friday` · `move Acme deal to negotiation` · `mark Acme deal as won` (asks first, like lost) · `set Acme deal value to 75k` · `note on Acme: called today, wants the proposal` · `new campaign Q4 Push for Acme` · `delete deal Old Opp` (asks first)
 
 **Deal notes** — exec-crm has no deal-notes endpoint, so `note on <deal> <text>` pins notes in Milton's own SQLite (keyed by deal + workspace) and shows them on deal lookups.
 
 **People & tasks** — `add contact Jane Doe at Acme jane@acme.com` · `add company Globex` · `add task Call Acme tomorrow` · `remind me to send the proposal friday` · `complete task 3`
+
+**vCard import** — tap 📇 in the chat bar to pick a `.vcf` file; Milton lists every contact inside and imports after you confirm (dedupes by email, flags nameless entries).
 
 **Routines** — `morning brief` (open pipeline, closing this week, overdue/due-today tasks, latest activity) · `pipeline hygiene` (missing close dates, stale deals, deals without contacts, overdue tasks)
 
@@ -130,12 +138,26 @@ Milton: Run requested: recon of **Austin** is now `running` (run `a3f9c21b`). I'
 Milton can work inside any exec-crm workspace, not just the default one. Every exec-crm request carries the session's workspace via exec-crm's `?workspace=<id>` scoping (which wins over the `X-Workspace` header).
 
 - `workspaces` — list exec-crm's workspaces with ids
-- `switch to Acme` / `use workspace Acme` — fuzzy name match; ambiguous names get a numbered pick-list, a bare id works too, `switch to default` goes back
+- `switch to Acme` / `use workspace Acme` — fuzzy name match; ambiguous names get a numbered pick-list, a bare id works too, `switch to default` goes back. One workspace per session: switching starts a **fresh session** bound to the target workspace (the old session keeps its own history and workspace), so workspaces never commingle.
 - `current workspace` — where this chat session is working
-- The topbar has a workspace switcher dropdown showing the current workspace; it stays in sync when you switch from chat.
+- The session picker (click Milton's avatar) shows every session with its bound workspace.
 - The choice is per chat session and persists across restarts (stored server-side, `session_workspaces` table).
 - **Schedules and triggers pin the workspace they were created in**: `schedule EOD daily at 6pm` while in Acme runs in Acme forever, even if you later switch the chat elsewhere. `list schedules` / `list triggers` show the pinned workspace; unattended runs skip destructive steps as before.
 - If exec-crm is unreachable, Milton says so and keeps the current (or default) workspace rather than guessing.
+
+### Chat sessions
+
+Milton keeps **named chat sessions** — separate conversations, each with its own history, workspace pin, tutorial progress, and widget stash. The header has a session dropdown plus a ＋ button for a fresh one.
+
+- `sessions` — numbered list with message counts and last-active times
+- `new session Pipeline review` — start one (auto-named `Session 2`, `Session 3`, … when you skip the name)
+- `switch session to Pipeline review` / `switch to 2` — jump by fuzzy name or list number; a bare `switch to <name>` prefers a session whose name matches exactly, otherwise it's a workspace switch as before
+- `current session` — name, workspace, message count, tutorial state
+- `rename session to Q4 push` — renames the current session; `rename session Old to New` renames another one
+- `delete session` / `delete session 2` / `remove session 2` — always asks first (destructive intent: skipped by unattended routines); you can't delete your only session
+- Typo-tolerant like everything else: `list sesions`, `new sesion pipeline`, `curent session`, `shwo my sessions`
+- Everything is per session: chat history, the exec-crm workspace pin, tutorial progress, pending confirmations, staged uploads. Deleting a session removes its messages, uploads, workspace pin, and reminders with it.
+- Reminders belong to the session that created them; a reminder whose session was deleted is logged and skipped instead of crashing. Schedules/triggers pin workspaces (not sessions), so deleting a session never strands them.
 
 **Camera & OCR** — tap the 📷 button to snap a photo of printed text (whiteboard, business card, document); Milton transcribes it automatically. Then `read this`, `analyze handwriting` (geometric analysis: slant, stroke pressure, size consistency, spacing, baseline drift — with raw numbers, not mysticism), or save the transcription as a note on a deal.
 
@@ -149,6 +171,7 @@ Natural dates (`tomorrow`, `friday`, `in 3 days`, `2026-10-02`) and money (`50k`
 - `POST /api/upload` → multipart image (JPEG/PNG/WebP, ≤10 MB) → `{ id, url }`
 - `GET /api/file/:id` → serves the upload (scoped to its session)
 - `GET /api/history?session=…` → recent messages for a session
+- `GET /api/chat-sessions` → `[{ id, name, created_at, last_active_at, messageCount }]` · `POST /api/chat-sessions` (`{ name? }`) → `{ session }` · `PATCH /api/chat-sessions/:id` (`{ name }`) → `{ session }` · `DELETE /api/chat-sessions/:id` → `{ deleted, sessions }` (refuses the last session)
 - `GET /api/health` → `{ ok, crm, crm_url, llm, llm_url, llm_model, llm_source, analyst_model }`
 - `GET /api/routines` · `POST /api/routines` / `DELETE /api/routines/:name`
 - `GET /api/schedules` · `POST /api/schedules` (`{ routine, when }`) · `PATCH /api/schedules/:id` (`{ active }`) · `DELETE /api/schedules/:id`

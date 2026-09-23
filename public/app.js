@@ -9,17 +9,28 @@
   const statusText = document.getElementById("status-text");
   const camBtn = document.getElementById("cam-btn");
   const photoInput = document.getElementById("photo-input");
+  const vcfBtn = document.getElementById("vcf-btn");
+  const vcfInput = document.getElementById("vcf-input");
   const tray = document.getElementById("tray");
-  const bellBtn = document.getElementById("bell-btn");
-  const bellBadge = document.getElementById("bell-badge");
   const autoBtn = document.getElementById("auto-btn");
   const autoView = document.getElementById("auto-view");
   const autoTabs = document.getElementById("auto-tabs");
   const autoBody = document.getElementById("auto-body");
   const autoClose = document.getElementById("auto-close");
   const toastEl = document.getElementById("toast");
-  const wsSelect = document.getElementById("ws-select");
-  let wsList = []; // cached exec-crm workspaces: {id, name, color}
+  const autoBadge = document.getElementById("auto-badge");
+  const avatarBtn = document.getElementById("avatar-btn");
+  const sessionOverlay = document.getElementById("session-overlay");
+  const sessionList = document.getElementById("session-list");
+  const sessionCreateBtn = document.getElementById("session-create");
+  const sessionManageLink = document.getElementById("session-manage-link");
+  const sessionPickerClose = document.getElementById("session-picker-close");
+  const manageOverlay = document.getElementById("manage-overlay");
+  const manageList = document.getElementById("manage-list");
+  const manageClose = document.getElementById("manage-close");
+  let wsList = []; // cached exec-crm workspaces: {id, name, color} — names for automation rows
+  let curWs = { id: null, name: "" }; // workspace the active session is bound to
+  let sessionCache = []; // last fetched /api/chat-sessions list (with workspace bindings)
 
   // photos uploaded and waiting to be sent with the next message
   const pending = []; // { id, url, objUrl }
@@ -29,12 +40,30 @@
   let sid = localStorage.getItem("milton_sid");
   if (!sid) { sid = "s-" + Math.random().toString(36).slice(2, 10); localStorage.setItem("milton_sid", sid); }
 
+  // ---- icons: Switchboard-style inline line marks (24x24, stroke=currentColor) ----
+  const SVG_OPEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">';
+  const ICONS = {
+    camera: SVG_OPEN + '<path d="M4 8h3l2-2.5h6L17 8h3a1.5 1.5 0 0 1 1.5 1.5V18a1.5 1.5 0 0 1-1.5 1.5H4A1.5 1.5 0 0 1 2.5 18V9.5A1.5 1.5 0 0 1 4 8z"/><circle cx="12" cy="13.5" r="3.5"/></svg>',
+    contacts: SVG_OPEN + '<rect x="3" y="5" width="18" height="14" rx="2.5"/><circle cx="9" cy="11" r="2"/><path d="M5.6 16.6c.6-1.9 1.9-2.9 3.4-2.9s2.8 1 3.4 2.9"/><path d="M15 9.5h4M15 12.5h2.5"/></svg>',
+    gear: SVG_OPEN + '<circle cx="12" cy="12" r="3.2"/><path d="M12 4v2.2M12 17.8V20M4 12h2.2M17.8 12H20M6.3 6.3l1.6 1.6M16.1 16.1l1.6 1.6M17.7 6.3l-1.6 1.6M7.9 16.1l-1.6 1.6"/></svg>',
+    plus: SVG_OPEN + '<path d="M12 5v14M5 12h14"/></svg>',
+    x: SVG_OPEN + '<path d="M6 6l12 12M18 6L6 18"/></svg>',
+    send: SVG_OPEN + '<path d="M21 3L10.5 13.5"/><path d="M21 3l-7 18-3.5-7.5L3 10l18-7z"/></svg>',
+    check: SVG_OPEN + '<path d="M4.5 12.5l5 5 10-11"/></svg>',
+    alert: SVG_OPEN + '<path d="M12 3.5L22 20H2L12 3.5z"/><path d="M12 10v4.5"/><path d="M12 17.3v.3"/></svg>',
+    skip: SVG_OPEN + '<path d="M5 5l8 7-8 7V5z"/><path d="M15 5v14"/></svg>',
+    box: SVG_OPEN + '<rect x="4" y="4" width="16" height="16" rx="4"/></svg>',
+    boxCheck: SVG_OPEN + '<rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8.5 12.5l2.5 2.5 5-6"/></svg>',
+    half: SVG_OPEN + '<circle cx="12" cy="12" r="8.5"/><path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none"/></svg>',
+    sun: SVG_OPEN + '<circle cx="12" cy="12" r="4"/><path d="M12 2.5V5M12 19v2.5M2.5 12H5M19 12h2.5M5 5l1.8 1.8M17.2 17.2L19 19M19 5l-1.8 1.8M6.8 17.2L5 19"/></svg>',
+    moon: SVG_OPEN + '<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5z"/></svg>',
+  };
   // ---- theme: auto (follows OS) / light / dark ----------------------------------
   // Auto = no data-theme on <html>; CSS picks the palette from prefers-color-scheme.
   // Explicit light/dark set data-theme and are stored in localStorage ("milton_theme").
   const THEME_KEY = "milton_theme";
   const THEME_ORDER = ["auto", "light", "dark"];
-  const THEME_ICON = { auto: "🌓", light: "☀️", dark: "🌙" };
+  const THEME_ICON = { auto: ICONS.half, light: ICONS.sun, dark: ICONS.moon };
   const THEME_LABEL = { auto: "Auto (follows system)", light: "Light", dark: "Dark" };
   const themeBtn = document.getElementById("theme-btn");
   const rootEl = document.documentElement || null;
@@ -49,7 +78,7 @@
       else rootEl.setAttribute("data-theme", mode);
     }
     if (themeBtn) {
-      themeBtn.textContent = THEME_ICON[mode];
+      themeBtn.innerHTML = THEME_ICON[mode];
       themeBtn.title = "Theme: " + THEME_LABEL[mode] + " — click to change";
       themeBtn.setAttribute("aria-label", "Theme: " + THEME_LABEL[mode]);
     }
@@ -113,7 +142,7 @@
         break;
       case "tasks":
         h += (card.items || []).map((t) =>
-          `<div class="row"><span>${t.done ? "✅" : "⬜"} ${esc(t.title)}</span><span class="v">${esc(t.due_date || "no due date")}</span></div>`).join("");
+          `<div class="row"><span><span class="taskbox${t.done ? " done" : ""}">${t.done ? ICONS.boxCheck : ICONS.box}</span> ${esc(t.title)}</span><span class="v">${esc(t.due_date || "no due date")}</span></div>`).join("");
         break;
       case "contacts":
         h += (card.items || []).map((c) =>
@@ -165,6 +194,10 @@
         h += `<ul class="notes">` + (card.notes || []).map((n) => `<li>${esc(n)}</li>`).join("") + `</ul>`;
         break;
       }
+      case "suggestions":
+        h += (card.items || []).map((c) =>
+          `<button class="opt" data-fill="${esc("/" + c.usage)}"><span class="n">/</span><span style="text-align:left"><b>${esc(String(c.name).replace(/_/g, " "))}</b><br><small style="color:var(--muted)">${esc(c.description || "")}</small></span></button>`).join("");
+        break;
     }
     return h + `</div>`;
   }
@@ -173,7 +206,7 @@
     const div = document.createElement("div");
     div.className = "msg " + role;
     (reply.photos || []).forEach((p) => { div.insertAdjacentHTML("beforeend", `<img class="thumb" src="${esc(p)}" alt="Uploaded photo">`); });
-    (reply.files || []).forEach((n) => { div.insertAdjacentHTML("beforeend", `<span class="file-chip">📇 ${esc(n)}</span>`); });
+    (reply.files || []).forEach((n) => { div.insertAdjacentHTML("beforeend", `<span class="file-chip">${ICONS.contacts} ${esc(n)}</span>`); });
     div.innerHTML += md(reply.text || "");
     (reply.cards || []).forEach((c) => { div.insertAdjacentHTML("beforeend", cardHTML(c)); });
     chat.appendChild(div);
@@ -186,7 +219,11 @@
     (chips || []).forEach((c) => {
       const b = document.createElement("button");
       b.className = "chip"; b.type = "button"; b.textContent = c;
-      b.addEventListener("click", () => send(c));
+      // "/"-prefixed chips are suggestions: tap fills the input, doesn't send
+      b.addEventListener("click", () => {
+        if (c.charAt(0) === "/") { input.value = c.slice(1); input.focus(); }
+        else send(c);
+      });
       chipsEl.appendChild(b);
     });
   }
@@ -198,7 +235,11 @@
     if (conf) {
       const label = conf.getAttribute("data-confirm") || "";
       send(/cancel/i.test(label) ? "No" : "Yes");
+      return;
     }
+    // suggestion card rows fill the input instead of sending
+    const fill = e.target.closest("[data-fill]");
+    if (fill) { input.value = fill.getAttribute("data-fill").slice(1); input.focus(); }
   });
 
   // ---- camera uploads ------------------------------------------------------------
@@ -213,7 +254,7 @@
     const objUrl = isVcf ? null : URL.createObjectURL(file);
     item.innerHTML =
       (isVcf
-        ? `<span class="file-chip">📇 ${esc(file.name || "contacts.vcf")}</span>`
+        ? `<span class="file-chip">${ICONS.contacts} ${esc(file.name || "contacts.vcf")}</span>`
         : `<img src="${esc(objUrl)}" alt="Photo to send">`) +
       `<div class="prog"><div class="bar"></div></div>` +
       `<button type="button" class="rm" aria-label="Remove attachment">×</button>`;
@@ -270,16 +311,26 @@
     });
   }
 
-  camBtn.addEventListener("click", () => photoInput.click());
-  photoInput.addEventListener("change", () => {
-    Array.from(photoInput.files || []).slice(0, 4).forEach((f) => {
+  // Stage picked files for upload (shared by the photo and vCard pickers).
+  function stageFiles(files, what) {
+    Array.from(files || []).slice(0, 4).forEach((f) => {
       if (f.size > 10 * 1024 * 1024) {
-        addMsg("milton", { text: `"${f.name}" is over the 10 MB limit — pick a smaller photo.` });
+        addMsg("milton", { text: `"${f.name}" is over the 10 MB limit — pick a smaller ${what}.` });
         return;
       }
       addTrayItem(f);
     });
+  }
+
+  camBtn.addEventListener("click", () => photoInput.click());
+  photoInput.addEventListener("change", () => {
+    stageFiles(photoInput.files, "photo");
     photoInput.value = "";
+  });
+  vcfBtn.addEventListener("click", () => vcfInput.click());
+  vcfInput.addEventListener("change", () => {
+    stageFiles(vcfInput.files, "contacts file");
+    vcfInput.value = "";
   });
 
   function clearTray() {
@@ -294,7 +345,7 @@
 
   // ---- automations view ------------------------------------------------------------
   let autoTab = "routines";
-  const statusIcon = (st) => st === "ok" ? "✅" : st === "partial" ? "⚠️" : st === "skipped" ? "⏭️" : "❌";
+  const statusIcon = (st) => st === "ok" ? `<span class="st st-ok" title="ok">${ICONS.check}</span>` : st === "partial" ? `<span class="st st-warn" title="partial">${ICONS.alert}</span>` : st === "skipped" ? `<span class="st st-skip" title="skipped">${ICONS.skip}</span>` : `<span class="st st-bad" title="failed">${ICONS.x}</span>`;
 
   function routineRow(r) {
     return `<div class="arow"><span><b>${esc(r.name)}</b><br><small style="color:var(--muted)">${r.steps.length} step${r.steps.length === 1 ? "" : "s"}: ${esc(r.steps.join("; ").slice(0, 80))}</small></span>` +
@@ -359,10 +410,17 @@
     scroll();
   }
 
-  autoBtn.addEventListener("click", () => (autoView.hidden ? showAuto() : hideAuto()));
+  autoBtn.addEventListener("click", () => {
+    if (autoView.hidden) { showAuto(); markRunsSeen(); }
+    else hideAuto();
+  });
   autoClose.addEventListener("click", hideAuto);
   document.addEventListener("keydown", (e) => {
-    if (e && e.key === "Escape" && !autoView.hidden) hideAuto();
+    if (e && e.key === "Escape") {
+      if (manageOverlay && !manageOverlay.hidden) closeManage();
+      else if (sessionOverlay && !sessionOverlay.hidden) closePicker();
+      else if (!autoView.hidden) hideAuto();
+    }
   });
   autoTabs.addEventListener("click", (e) => {
     const t = e.target.closest("[data-tab]");
@@ -397,11 +455,14 @@
   });
 
   // ---- automation runs: badge, toast, SSE ----------------------------------------
+  // One button (the gear) opens the automations screen; the unread-runs badge
+  // rides on it. Opening the screen marks runs seen.
   function updateBadge(runs) {
     const seen = Number(localStorage.getItem("milton_runs_seen") || 0);
     const unread = (runs || []).filter((r) => r.id > seen).length;
-    if (unread > 0) { bellBadge.hidden = false; bellBadge.textContent = unread > 9 ? "9+" : String(unread); }
-    else bellBadge.hidden = true;
+    if (!autoBadge) return unread;
+    if (unread > 0) { autoBadge.hidden = false; autoBadge.textContent = unread > 9 ? "9+" : String(unread); }
+    else autoBadge.hidden = true;
     return unread;
   }
   function refreshBadge() {
@@ -413,10 +474,9 @@
     fetch("/api/automation-runs?limit=1").then((r) => r.json()).then((j) => {
       const max = Math.max(0, ...((j.runs || []).map((r) => r.id)));
       localStorage.setItem("milton_runs_seen", String(max));
-      bellBadge.hidden = true;
+      if (autoBadge) autoBadge.hidden = true;
     }).catch(() => {});
   }
-  bellBtn.addEventListener("click", () => { showAuto("runs"); markRunsSeen(); });
 
   let toastTimer = null;
   function toast(msg) {
@@ -436,6 +496,18 @@
         if (!autoView.hidden && autoTab === "runs") refreshAutoTab();
       } catch { /* ignore malformed */ }
     });
+    es.addEventListener("enrichment-done", (ev) => {
+      try {
+        const done = JSON.parse(ev.data);
+        if (done.session_id === sid) {
+          addMsg("milton", done.reply);
+          setChips(done.reply.chips || []);
+          scroll();
+        } else {
+          toast(`🔍 Enrichment finished for ${done.target_name || "a company"}`);
+        }
+      } catch { /* ignore malformed */ }
+    });
   }
 
   async function send(text) {
@@ -444,6 +516,7 @@
     if (!text && !atts.length) return;
     if (!autoView.hidden) hideAuto(); // typing a message means you're done with the panel
     input.value = "";
+    hidePalette();
     const photos = atts.filter((a) => !a.isVcf).map((a) => a.url + "?session=" + encodeURIComponent(sid));
     const files = atts.filter((a) => a.isVcf).map((a) => a.name);
     addMsg("user", { text, photos, files });
@@ -461,58 +534,296 @@
       const reply = await res.json();
       typing.remove();
       if (reply.error) addMsg("milton", { text: "Hmm, that didn't go through: " + reply.error });
-      else { addMsg("milton", reply); setChips(reply.chips); clearTray(); syncWsSelect(reply); }
+      else { addMsg("milton", reply); setChips(reply.chips); clearTray(); syncSession(reply); }
     } catch (err) {
       typing.remove();
       addMsg("milton", { text: "I couldn't reach the Milton server. Is it running?" });
     }
   }
 
+  // ---- slash-command palette ---------------------------------------------------
+  // Typing "/" opens a live-filtered dropdown of every command. Arrows move,
+  // Enter inserts (only after moving — a plain Enter still sends, so "/" alone
+  // remains an ordinary message), Escape closes. Tap/click inserts too.
+  const paletteEl = document.getElementById("palette");
+  let palCommands = null; // [{name, description, usage, examples}]
+  let palItems = [], palIdx = 0, palArmed = false;
+
+  async function loadCommands() {
+    if (palCommands) return palCommands;
+    try {
+      const res = await fetch("/api/commands");
+      const j = await res.json();
+      palCommands = (j.commands || []).filter((c) => !c.internal);
+    } catch { palCommands = []; }
+    return palCommands;
+  }
+  function palFilter(q) {
+    q = (q || "").toLowerCase();
+    return palCommands.filter((c) =>
+      !q || c.name.toLowerCase().indexOf(q) >= 0 || (c.description || "").toLowerCase().indexOf(q) >= 0
+        || (c.usage || "").toLowerCase().indexOf(q) >= 0
+    ).slice(0, 8);
+  }
+  function renderPalette() {
+    if (!palCommands) return;
+    palItems = palFilter(input.value.slice(1));
+    palIdx = Math.min(palIdx, Math.max(palItems.length - 1, 0));
+    if (!palItems.length) { hidePalette(); return; }
+    paletteEl.innerHTML = palItems.map((c, i) =>
+      `<button type="button" role="option" aria-selected="${i === palIdx}" class="pal-row${i === palIdx ? " sel" : ""}" data-pal="${i}">` +
+      `<span class="pal-usage">${esc(c.usage)}</span><span class="pal-desc">${esc(c.description)}</span></button>`
+    ).join("");
+    paletteEl.hidden = false;
+  }
+  function hidePalette() { paletteEl.hidden = true; palArmed = false; }
+  function insertCommand(c) {
+    if (!c) return;
+    input.value = c.usage;
+    hidePalette();
+    input.focus();
+  }
+  input.addEventListener("input", () => {
+    if (input.value.charAt(0) === "/") {
+      palIdx = 0; palArmed = false;
+      loadCommands().then(renderPalette);
+    } else hidePalette();
+  });
+  paletteEl.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-pal]");
+    if (b) insertCommand(palItems[Number(b.getAttribute("data-pal"))]);
+  });
+  input.addEventListener("keydown", (e) => {
+    if (paletteEl.hidden) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); palIdx = Math.min(palIdx + 1, palItems.length - 1); palArmed = true; renderPalette(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); palIdx = Math.max(palIdx - 1, 0); palArmed = true; renderPalette(); }
+    else if (e.key === "Escape") { hidePalette(); }
+    else if (e.key === "Enter" && palArmed) { e.preventDefault(); insertCommand(palItems[palIdx]); }
+  });
+
   form.addEventListener("submit", (e) => { e.preventDefault(); send(input.value); });
   document.getElementById("help-btn").addEventListener("click", () => send("help"));
 
-  // ---- exec-crm workspaces -------------------------------------------------------
-  function wsOptionsHtml(list, currentId) {
-    return list.map((w) => `<option value="${w.id}"${w.id === currentId ? " selected" : ""}>${esc(w.name)}</option>`).join("");
-  }
+  // ---- exec-crm workspaces: names only ---------------------------------------------
+  // The header workspace switcher is gone (one workspace per session now);
+  // this just caches names/colors for the workspace badges in the session
+  // picker and the automation rows below.
   function wsTag(id) {
     if (id == null) return "";
     const w = wsList.find((x) => x.id === id);
     return " · " + esc(w ? w.name : "#" + id);
   }
-  function syncWsSelect(reply) {
-    if (reply && reply.workspace_id !== undefined && !wsSelect.hidden) {
-      wsSelect.value = reply.workspace_id == null ? "" : String(reply.workspace_id);
-    }
-  }
-  async function loadWorkspaces() {
+  async function loadWorkspaceNames() {
     try {
       const j = await fetch("/api/workspaces").then((r) => r.json());
       wsList = j.workspaces || [];
-      if (!wsList.length) { wsSelect.hidden = true; return; }
-      let currentId = null;
-      try {
-        const cur = await fetch("/api/session/workspace?session=" + encodeURIComponent(sid)).then((r) => r.json());
-        currentId = cur.workspace_id ?? null;
-      } catch { /* stay on default */ }
-      wsSelect.innerHTML = `<option value="">Default workspace</option>` + wsOptionsHtml(wsList, currentId);
-      wsSelect.hidden = false;
-    } catch { wsSelect.hidden = true; }
+    } catch { wsList = []; }
   }
-  wsSelect.addEventListener("change", async () => {
-    const id = wsSelect.value === "" ? null : Number(wsSelect.value);
+
+  // ---- chat sessions: avatar opens the picker --------------------------------------
+  function relTime(iso) {
+    const t = Date.parse(String(iso || "").replace(" ", "T") + "Z");
+    if (Number.isNaN(t)) return "";
+    const mins = Math.max(0, Math.floor((Date.now() - t) / 60000));
+    if (mins < 1) return "just now";
+    if (mins < 60) return mins + "m ago";
+    const h = Math.round(mins / 60);
+    if (h < 24) return h + "h ago";
+    const d = Math.round(h / 24);
+    if (d < 7) return d + "d ago";
+    return new Date(t).toISOString().slice(0, 10);
+  }
+  function wsLabel(w) {
+    if (!w || w.id == null) return "default";
+    return w.name || ("#" + w.id);
+  }
+  function wsColor(id) {
+    const w = wsList.find((x) => x.id === id);
+    return w ? w.color : "var(--muted)";
+  }
+  async function fetchSessions() {
     try {
-      const j = await fetch("/api/session/workspace", {
+      const j = await fetch("/api/chat-sessions").then((r) => r.json());
+      sessionCache = j.sessions || [];
+    } catch { sessionCache = []; }
+    const info = sessionCache.find((s) => s.id === sid);
+    if (info && info.workspace) curWs = { id: info.workspace.id ?? null, name: info.workspace.name || "" };
+    return sessionCache;
+  }
+  function openPicker() {
+    if (!sessionOverlay) return;
+    closeManage();
+    fetchSessions().then(renderPicker);
+    sessionOverlay.hidden = false;
+  }
+  function closePicker() { if (sessionOverlay) sessionOverlay.hidden = true; }
+  function renderPicker() {
+    if (!sessionList) return;
+    sessionList.innerHTML = sessionCache.map((s) => {
+      const w = s.workspace || {};
+      const active = s.id === sid;
+      const msgs = s.messageCount === 1 ? "1 message" : s.messageCount + " messages";
+      return `<button type="button" class="session-row${active ? " active" : ""}" data-session="${esc(s.id)}" aria-current="${active}">` +
+        `<span class="srow-main"><b>${esc(s.name)}</b>` +
+        `<small>${msgs} · active ${esc(relTime(s.last_active_at))}${active ? " · current" : ""}</small></span>` +
+        `<span class="ws-badge" title="Workspace"><span class="ws-dot" style="background:${esc(wsColor(w.id))}"></span>${esc(wsLabel(w))}</span>` +
+        `</button>`;
+    }).join("");
+  }
+  function switchSession(id) {
+    closePicker();
+    if (id && id !== sid) setSid(id);
+  }
+  async function createSession() {
+    try {
+      const j = await fetch("/api/chat-sessions", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session: sid, workspace_id: id }),
+        body: JSON.stringify({ workspace_id: curWs.id }),
+      }).then((r) => r.json());
+      if (j.error || !j.session) throw new Error(j.error || "no session");
+      await fetchSessions();
+      closePicker();
+      setSid(j.session.id);
+      const w = j.session.workspace || {};
+      toast("New session: " + j.session.name + (w.id != null ? " · " + wsLabel(w) : ""));
+    } catch (_) { toast("Couldn't create a session."); }
+  }
+
+  // ---- session management: inline rename, confirm-guarded delete -------------------
+  function openManage() {
+    if (!manageOverlay) return;
+    closePicker();
+    fetchSessions().then(renderManage);
+    manageOverlay.hidden = false;
+  }
+  function closeManage() { if (manageOverlay) manageOverlay.hidden = true; }
+  function renderManage() {
+    if (!manageList) return;
+    const lastOne = sessionCache.length <= 1;
+    manageList.innerHTML = sessionCache.map((s) => {
+      const w = s.workspace || {};
+      const msgs = s.messageCount === 1 ? "1 message" : s.messageCount + " messages";
+      return `<div class="manage-row">` +
+        `<span class="srow-main"><b class="mname" data-mname="${esc(s.id)}">${esc(s.name)}</b>` +
+        `<small>${msgs} · <span class="ws-dot" style="background:${esc(wsColor(w.id))}"></span>${esc(wsLabel(w))}${s.id === sid ? " · current" : ""}</small></span>` +
+        `<span class="ops">` +
+        `<button type="button" class="mini" data-mrename="${esc(s.id)}">Rename</button>` +
+        `<button type="button" class="mini danger" data-mdelete="${esc(s.id)}"${lastOne ? " disabled" : ""}>Delete</button>` +
+        `</span></div>`;
+    }).join("");
+  }
+  async function renameSession(id, name) {
+    try {
+      const j = await fetch("/api/chat-sessions/" + encodeURIComponent(id), {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
       }).then((r) => r.json());
       if (j.error) throw new Error(j.error);
-      toast("Workspace: " + (j.workspace_name || "default"));
-    } catch (err) {
-      toast("Couldn't switch workspace.");
-      loadWorkspaces();
+      await fetchSessions();
+      renderManage();
+    } catch (_) { toast("Couldn't rename that session."); }
+  }
+  function startRename(id) {
+    const s = sessionCache.find((x) => x.id === id);
+    if (!s || !manageList) return;
+    const el = manageList.querySelector('[data-mname="' + id + '"]');
+    if (!el || typeof el.replaceWith !== "function") return;
+    const input = document.createElement("input");
+    input.className = "name-input";
+    input.value = s.name;
+    input.maxLength = 60;
+    input.setAttribute("aria-label", "Session name");
+    let done = false;
+    const commit = (save) => {
+      if (done) return; done = true;
+      const name = input.value.trim();
+      renderManage();
+      if (save && name && name !== s.name) renameSession(id, name);
+    };
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") commit(true);
+      else if (ev.key === "Escape") commit(false);
+    });
+    input.addEventListener("blur", () => commit(true));
+    el.replaceWith(input);
+    input.focus();
+    if (typeof input.select === "function") input.select();
+  }
+
+  function setSid(id) {
+    sid = id;
+    try { localStorage.setItem("milton_sid", sid); } catch (_) {}
+    if (pending.length) { clearTray(); toast("Staged attachments cleared — they belonged to the previous session."); }
+    loadHistory();
+    loadWorkspaceNames();
+    refreshBadge();
+    if (sessionOverlay && !sessionOverlay.hidden) renderPicker();
+  }
+  async function loadHistory() {
+    chat.innerHTML = "";
+    try {
+      const hist = await fetch("/api/history?session=" + encodeURIComponent(sid)).then((r) => r.json());
+      (hist.messages || []).forEach((m) => addMsg(m.role === "user" ? "user" : "milton", { text: m.text }));
+    } catch { /* fresh start */ }
+    if (!chat.children.length) {
+      addMsg("milton", { text: "Hey, I'm **Milton** — your copilot inside exec-crm. Ask for a **morning brief**, check the **pipeline**, move a deal — or tap the camera button to snap a photo of text and I'll read it. What are we working on?" });
+      setChips(["Morning brief", "Show pipeline", "My tasks", "Help"]);
     }
-  });
+    scroll();
+  }
+  // A chat reply can create/switch/rename/delete sessions or fork one on a
+  // workspace switch; keep the picker and the bound workspace in sync.
+  function syncSession(reply) {
+    if (!reply) return;
+    if (reply.workspace_id !== undefined) {
+      curWs = { id: reply.workspace_id ?? null, name: reply.workspace_name || "" };
+    }
+    if (reply.activeSession && reply.activeSession.id) {
+      if (reply.activeSession.id !== sid) setSid(reply.activeSession.id);
+      else if (sessionOverlay && !sessionOverlay.hidden) renderPicker();
+    } else if (reply.sessionsChanged) {
+      if (sessionOverlay && !sessionOverlay.hidden) fetchSessions().then(renderPicker);
+    }
+  }
+  if (avatarBtn) {
+    avatarBtn.addEventListener("click", () => {
+      if (sessionOverlay && !sessionOverlay.hidden) closePicker();
+      else openPicker();
+    });
+  }
+  if (sessionPickerClose) sessionPickerClose.addEventListener("click", closePicker);
+  if (sessionCreateBtn) sessionCreateBtn.addEventListener("click", createSession);
+  if (sessionManageLink) sessionManageLink.addEventListener("click", openManage);
+  if (manageClose) manageClose.addEventListener("click", closeManage);
+  if (sessionOverlay) sessionOverlay.addEventListener("click", (e) => { if (e.target === sessionOverlay) closePicker(); });
+  if (manageOverlay) manageOverlay.addEventListener("click", (e) => { if (e.target === manageOverlay) closeManage(); });
+  if (sessionList) {
+    sessionList.addEventListener("click", (e) => {
+      const row = e.target.closest("[data-session]");
+      if (row) switchSession(row.getAttribute("data-session"));
+    });
+  }
+  if (manageList) {
+    manageList.addEventListener("click", async (e) => {
+      const del = e.target.closest("[data-mdelete]");
+      const rn = e.target.closest("[data-mrename]");
+      if (del && !del.disabled) {
+        const id = del.getAttribute("data-mdelete");
+        const s = sessionCache.find((x) => x.id === id);
+        if (!confirm(`Delete session "${s ? s.name : id}" and all its messages?`)) return;
+        try {
+          const j = await fetch("/api/chat-sessions/" + encodeURIComponent(id), { method: "DELETE" }).then((r) => r.json());
+          if (j.error) throw new Error(j.error);
+          await fetchSessions();
+          if (id === sid && j.remaining && j.remaining.length) setSid(j.remaining[0].id);
+          renderManage();
+          toast(`Deleted session "${j.name || (s ? s.name : "")}".`);
+        } catch (_) { toast("Couldn't delete that session."); }
+        return;
+      }
+      if (rn) startRename(rn.getAttribute("data-mrename"));
+    });
+  }
 
   // status + history restore
   (async function init() {
@@ -521,16 +832,10 @@
       if (h.crm) { statusDot.className = "dot ok"; statusText.textContent = "connected to exec-crm" + (h.llm ? " · AI on" : ""); }
       else { statusDot.className = "dot bad"; statusText.textContent = "exec-crm unreachable"; }
     } catch { statusDot.className = "dot bad"; statusText.textContent = "offline"; }
-    try {
-      const hist = await fetch("/api/history?session=" + encodeURIComponent(sid)).then((r) => r.json());
-      (hist.messages || []).forEach((m) => addMsg(m.role === "user" ? "user" : "milton", { text: m.text }));
-    } catch { /* fresh start */ }
-    if (!chat.children.length) {
-      addMsg("milton", { text: "Hey, I'm **Milton** — your copilot inside exec-crm. Ask for a **morning brief**, check the **pipeline**, move a deal — or tap 📷 to snap a photo of text and I'll read it. What are we working on?" });
-      setChips(["Morning brief", "Show pipeline", "My tasks", "Help"]);
-    }
+    await loadHistory();
     refreshBadge();
-    loadWorkspaces();
+    await fetchSessions();
+    loadWorkspaceNames();
     input.focus();
   })();
 })();

@@ -5,8 +5,9 @@ import { handleMessage, type Session } from "../src/brain";
 import { parseIntent } from "../src/intents";
 import * as auto from "../src/automation";
 import { initDealNotesDb } from "../src/deal_notes";
+import { initPlaybookDb } from "../src/playbook";
 
-beforeAll(() => { auto.initAutomationDb(new Database(":memory:")); initDealNotesDb(new Database(":memory:")); });
+beforeAll(() => { auto.initAutomationDb(new Database(":memory:")); initDealNotesDb(new Database(":memory:")); initPlaybookDb(new Database(":memory:")); });
 
 const BASE = "http://localhost:3001";
 let failPost = false;

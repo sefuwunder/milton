@@ -68,6 +68,13 @@ beforeAll(async () => {
   process.env.MILTON_DATA = `/tmp/milton-upload-test-${Date.now()}`;
   process.env.PORT = "0";
   const mod = await import("../src/server.ts");
+  // The server module binds its database on first import and bun shares
+  // module state across test files: another file may have imported server.ts
+  // first (test files run in readdir order, which varies by filesystem) and
+  // re-pointed the per-domain stores (e.g. chat_sessions) at a scratch DB
+  // without the full schema. Reset explicitly so these tests always run
+  // against their own dir.
+  mod.__resetDataDirForTests(process.env.MILTON_DATA);
   server = mod.server;
   base = `http://localhost:${server.port}`;
 });

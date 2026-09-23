@@ -30,7 +30,6 @@
 // brain.ts imports this module; this module must never import brain.ts (cycle).
 
 import type { Deal, Task, Activity, Stage } from "./crm";
-import { computeSalesCycle } from "./analyst";
 import type { Database } from "bun:sqlite";
 import { existsSync, readFileSync } from "node:fs";
 import starterRulesJson from "./playbook-rules.json";
@@ -133,9 +132,28 @@ export function extractFacts(input: PlaybookInput): FactSet {
     };
   });
 
-  const dwell: Fact[] = computeSalesCycle(deals, stages).perStage
-    .filter((s) => s.medianDwell != null)
-    .map((s) => ({ stage: s.slug, median_dwell: s.medianDwell as number }));
+  const openDeals = deals.filter((d) => !String(d.stage).startsWith("closed_"));
+  // Per-stage median current-stage dwell in whole local calendar days, pinned
+  // to the frozen nowMs. We deliberately do NOT use analyst.computeSalesCycle
+  // here: its internals pin "now" to the wall clock, which would make runs
+  // drift across midnight boundaries and break reproducibility. This mirrors
+  // its per-stage logic exactly (same stage order, same median of the same
+  // deal set), only the clock is frozen.
+  const order = stages.length ? stages.map((s) => s.slug) : [...new Set(openDeals.map((d) => d.stage))];
+  const dwell: Fact[] = [];
+  for (const slug of order) {
+    const ds = openDeals.filter((d) => d.stage === slug);
+    if (!ds.length) continue;
+    const dwells = ds
+      .map((d) => calDays((d.updated_at || "").slice(0, 10), nowMs))
+      .filter((n): n is number => n !== null)
+      .map((n) => -n); // dwell days since last update
+    if (!dwells.length) continue;
+    const sorted = [...dwells].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const med = sorted.length % 2 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+    dwell.push({ stage: slug, median_dwell: med });
+  }
 
   const overdueByOwner = new Map<string, number>();
   for (const t of task) {

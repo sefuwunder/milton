@@ -8,12 +8,30 @@ import * as auto from "../src/automation";
 import * as wss from "../src/workspace";
 import { getDeals, getKpis } from "../src/crm";
 import { handleMessage, runRoutineUnattended, type Session } from "../src/brain";
+import * as chats from "../src/chat_sessions";
 
 let mem: Database;
 beforeAll(() => {
   mem = new Database(":memory:");
   auto.initAutomationDb(mem);
   wss.initWorkspaceDb(new Database(":memory:"));
+  // initChatSessionDb migrates the sessions table in place, so it needs the
+  // table to exist. Create the full chat-session schema here so this file is
+  // self-sufficient (bun shares module state across test files; relying on
+  // another file's setup is order-fragile).
+  const csdb = new Database(":memory:");
+  csdb.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+    role TEXT NOT NULL, text TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE uploads (id TEXT PRIMARY KEY, session TEXT NOT NULL, filename TEXT NOT NULL,
+    mime TEXT NOT NULL, size INTEGER NOT NULL, created_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE session_workspaces (session_id TEXT PRIMARY KEY, workspace_id INTEGER NOT NULL,
+    workspace_name TEXT NOT NULL DEFAULT '', updated_at TEXT DEFAULT (datetime('now')));
+    CREATE TABLE reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
+    text TEXT NOT NULL, fire_at INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT DEFAULT (datetime('now')), fired_at TEXT);`);
+  chats.initChatSessionDb(csdb);
   auto.saveRoutine("wseod", ["kpis"]);
 });
 
@@ -161,46 +179,59 @@ describe("workspace chat flows", () => {
     expect(r.text).toContain("Acme Corp");
     expect(r.text).toContain("id 2");
   });
-  test("switch to <name> fuzzy-matches and persists", async () => {
+  test("switch to <name> fuzzy-matches and starts a fresh bound session", async () => {
     const s = sess("s-ws2");
     const r = await handleMessage(s, "switch to Acme Corp");
     expect(r.text).toContain("Acme Corp");
-    expect(s.workspaceId).toBe(2);
-    expect(s.workspaceName).toBe("Acme Corp");
-    expect(wss.getSessionWorkspace("s-ws2").id).toBe(2);
+    expect(r.text).toMatch(/fresh session/i);
+    // the originating session is never re-scoped
+    expect(wss.getSessionWorkspace("s-ws2").id).toBeNull();
+    const fresh = r.activeSession!;
+    expect(fresh.id).not.toBe("s-ws2");
+    expect(wss.getSessionWorkspace(fresh.id)).toEqual({ id: 2, name: "Acme Corp" });
   });
-  test("ambiguous name asks with numbered choices", async () => {
+  test("ambiguous name asks with numbered choices; the pick forks too", async () => {
     const s = sess("s-ws3");
     const r = await handleMessage(s, "switch to acme");
     expect(r.cards?.[0]?.kind).toBe("choices");
     expect(s.choice?.kind).toBe("workspace");
-    expect(s.workspaceId ?? null).toBeNull();
     const r2 = await handleMessage(s, "2");
-    expect(s.workspaceId).toBe(3);
     expect(r2.text).toContain("Acme Labs");
+    expect(wss.getSessionWorkspace("s-ws3").id).toBeNull();
+    expect(wss.getSessionWorkspace(r2.activeSession!.id)).toEqual({ id: 3, name: "Acme Labs" });
   });
   test("unknown name is reported", async () => {
     const r = await handleMessage(sess("s-ws4"), "switch to zzz");
     expect(r.text).toContain('No workspace matching "zzz"');
   });
-  test("switch to default clears", async () => {
+  test("switch to default starts a fresh session in the default workspace", async () => {
     const s = sess("s-ws5");
-    await handleMessage(s, "switch to Acme Corp");
-    expect(s.workspaceId).toBe(2);
-    const r = await handleMessage(s, "switch to default");
-    expect(s.workspaceId ?? null).toBeNull();
+    const r1 = await handleMessage(s, "switch to Acme Corp");
+    const fresh1 = r1.activeSession!.id;
+    expect(wss.getSessionWorkspace(fresh1).id).toBe(2);
+    // the UI binds the fresh session's workspaceId after a fork; simulate that
+    const bound: Session = { id: fresh1, history: [], notes: [], workspaceId: 2, workspaceName: "Acme Corp" };
+    const r = await handleMessage(bound, "switch to default");
     expect(r.text).toContain("default workspace");
+    const fresh2 = r.activeSession!.id;
+    expect(fresh2).not.toBe(fresh1);
+    expect(wss.getSessionWorkspace(fresh2)).toEqual({ id: null, name: "" });
+    // neither origin was re-scoped
+    expect(wss.getSessionWorkspace(fresh1).id).toBe(2);
+    expect(wss.getSessionWorkspace("s-ws5").id).toBeNull();
   });
-  test("current workspace reflects the session", async () => {
+  test("current workspace reflects the fresh session's binding", async () => {
     const s = sess("s-ws6");
     expect((await handleMessage(s, "current workspace")).text).toContain("default workspace");
-    await handleMessage(s, "switch to Acme Corp");
-    expect((await handleMessage(s, "current workspace")).text).toContain("Acme Corp");
+    const r = await handleMessage(s, "switch to Acme Corp");
+    const fresh: Session = { id: r.activeSession!.id, history: [], notes: [], workspaceId: 2, workspaceName: "Acme Corp" };
+    expect((await handleMessage(fresh, "current workspace")).text).toContain("Acme Corp");
   });
-  test("entity commands run inside the session workspace", async () => {
+  test("entity commands run inside the fresh session's workspace", async () => {
     const s = sess("s-ws7");
-    await handleMessage(s, "switch to Acme Corp");
-    await handleMessage(s, "kpis");
+    const r = await handleMessage(s, "switch to Acme Corp");
+    const fresh: Session = { id: r.activeSession!.id, history: [], notes: [], workspaceId: 2, workspaceName: "Acme Corp" };
+    await handleMessage(fresh, "kpis");
     expect(lastCall().url).toContain("workspace=2");
   });
   test("graceful when exec-crm is down", async () => {
@@ -297,8 +328,10 @@ describe("workspace UI", () => {
     });
     const els: Record<string, any> = {};
     ["chat", "chips", "composer", "input", "status-dot", "status-text", "help-btn",
-     "cam-btn", "photo-input", "tray", "bell-btn", "bell-badge", "auto-btn",
-     "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "ws-select"].forEach((id) => (els[id] = mkEl("div")));
+     "cam-btn", "photo-input", "vcf-btn", "vcf-input", "tray", "auto-badge", "auto-btn",
+     "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "palette",
+     "avatar-btn", "session-overlay", "session-list", "session-create", "session-manage-link",
+     "session-picker-close", "manage-overlay", "manage-list", "manage-close"].forEach((id) => (els[id] = mkEl("div")));
     (globalThis as any).document = {
       getElementById: (id: string) => els[id] || null,
       createElement: (t: string) => mkEl(t),
@@ -308,36 +341,36 @@ describe("workspace UI", () => {
     const prevFetch = (globalThis as any).fetch;
     (globalThis as any).fetch = async () => ({ json: async () => ({}) });
     let src = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
-    src = src.replace("})();", ";globalThis.__wsx={wsOptionsHtml,wsTag,loadWorkspaces,wsSelectEl:wsSelect};})();");
+    src = src.replace("})();", ";globalThis.__wsx={wsTag,wsLabel,wsColor,loadWorkspaceNames};})();");
     eval(src);
     await new Promise((r) => setTimeout(r, 50));
     W = (globalThis as any).__wsx;
     (globalThis as any).fetch = prevFetch;
   });
-  test("wsOptionsHtml renders options with selection and escaping", () => {
-    const html = W.wsOptionsHtml([{ id: 1, name: "Main" }, { id: 2, name: "A<B" }], 2);
-    expect(html).toContain('value="2" selected');
-    expect(html).toContain("A&lt;B");
-    expect(html).not.toContain('value="1" selected');
-  });
-  test("wsTag falls back to #id when unknown", () => {
+  test("wsTag renders the cached name or falls back to #id", () => {
     expect(W.wsTag(null)).toBe("");
     expect(W.wsTag(7)).toBe(" · #7");
   });
-  test("loadWorkspaces populates and reveals the select", async () => {
+  test("wsLabel/wsColor describe a session's bound workspace", () => {
+    expect(W.wsLabel(null)).toBe("default");
+    expect(W.wsLabel({ id: null, name: "" })).toBe("default");
+    expect(W.wsLabel({ id: 7, name: "Beta" })).toBe("Beta");
+    expect(W.wsLabel({ id: 7, name: "" })).toBe("#7");
+    expect(W.wsColor(12345)).toBe("var(--muted)");
+  });
+  test("loadWorkspaceNames caches names/colors for badges and rows", async () => {
     (globalThis as any).fetch = async (url: string) => ({
       json: async () => url.includes("/api/workspaces")
         ? { workspaces: [{ id: 1, name: "Main", color: "#579bfc" }, { id: 7, name: "Beta", color: "#00ff00" }] }
-        : { workspace_id: 7, workspace_name: "Beta" },
+        : {},
     });
-    await W.loadWorkspaces();
-    expect(W.wsSelectEl.hidden).toBe(false);
-    expect(W.wsSelectEl.innerHTML).toContain("Default workspace");
-    expect(W.wsSelectEl.innerHTML).toContain('value="7" selected');
-    expect(W.wsSelectEl.innerHTML).toContain("Beta");
-    // exec-crm down -> select stays hidden, no throw
+    await W.loadWorkspaceNames();
+    expect(W.wsTag(7)).toBe(" · Beta");
+    expect(W.wsColor(7)).toBe("#00ff00");
+    expect(W.wsLabel({ id: 7, name: "Beta" })).toBe("Beta");
+    // exec-crm down -> cache stays empty, no throw
     (globalThis as any).fetch = async () => { throw new Error("fetch failed"); };
-    await W.loadWorkspaces();
-    expect(W.wsSelectEl.hidden).toBe(true);
+    await W.loadWorkspaceNames();
+    expect(W.wsTag(7)).toBe(" · #7");
   });
 });

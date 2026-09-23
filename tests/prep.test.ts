@@ -1,7 +1,7 @@
 // prep.test.ts — meeting prep brief: intent parsing, brief assembly vs a
 // stubbed exec-crm, disambiguation, no-match, workspace scoping, the
 // Meridian pointer, and the optional LLM talking-points section.
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { parseIntent } from "../src/intents";
 import * as mer from "../src/meridian";
 import { handleMessage, type Session } from "../src/brain";
@@ -78,6 +78,12 @@ beforeEach(() => {
   calls.length = 0;
   llmMode = "ok";
   delete process.env.MILTON_LLM_URL;
+});
+
+// Never leak the stub: later files (e.g. tutorial.test.ts) assert on
+// unreachable-Meridian behavior and need the real fetch back.
+afterEach(() => {
+  (globalThis as any).fetch = realFetch;
 });
 
 // ---- intent parsing ---------------------------------------------------------------

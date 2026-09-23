@@ -47,10 +47,14 @@ afterAll(() => {
 beforeAll(async () => {
   els = {};
   ["chat", "chips", "composer", "input", "status-dot", "status-text", "help-btn",
-   "cam-btn", "photo-input", "tray", "bell-btn", "bell-badge", "auto-btn",
-   "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "ws-select"].forEach((id) => (els[id] = mkEl("div")));
-  // mirror the HTML: panel starts hidden, chat starts visible
+   "cam-btn", "photo-input", "vcf-btn", "vcf-input", "tray", "auto-badge", "auto-btn",
+   "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "palette",
+   "avatar-btn", "session-overlay", "session-list", "session-create", "session-manage-link",
+   "session-picker-close", "manage-overlay", "manage-list", "manage-close"].forEach((id) => (els[id] = mkEl("div")));
+  // mirror the HTML: panel + overlays start hidden, chat starts visible
   els["auto-view"].hidden = true;
+  els["session-overlay"].hidden = true;
+  els["manage-overlay"].hidden = true;
   els["chat"].hidden = false;
   docListeners = {};
   (globalThis as any).__stubDoc = {
@@ -95,7 +99,7 @@ beforeEach(() => {
   T.hideAuto();
   Object.keys(lsStore).forEach((k) => delete lsStore[k]);
   els["toast"].hidden = true;
-  els["bell-badge"].hidden = true;
+  els["auto-badge"].hidden = true;
 });
 
 function openPanel() { els["auto-btn"].fire("click"); }
@@ -159,20 +163,28 @@ describe("automations panel dismiss behavior", () => {
     expect(els["toast"].hidden).toBe(false);
     expect(els["toast"].textContent).toContain("EOD");
   });
-  test("SSE run refreshes the bell badge without opening the panel", async () => {
+  test("SSE run refreshes the automations badge without opening the panel", async () => {
     sseRun({ id: 9, routine_name: "EOD", kind: "routine", summary: "done" });
     await tick(50);
     expect(els["auto-view"].hidden).toBe(true);
-    expect(els["bell-badge"].hidden).toBe(false);
-    expect(els["bell-badge"].textContent).toBe("1");
+    expect(els["auto-badge"].hidden).toBe(false);
+    expect(els["auto-badge"].textContent).toBe("1");
   });
-  test("updateBadge hides the bell when everything was seen", () => {
+  test("updateBadge hides the badge when everything was seen", () => {
     lsStore["milton_runs_seen"] = "7";
     T.updateBadge([{ id: 7, routine_name: "EOD", kind: "routine", status: "ok", summary: "2 steps ok" }]);
-    expect(els["bell-badge"].hidden).toBe(true);
+    expect(els["auto-badge"].hidden).toBe(true);
   });
-  test("panel open on the runs tab stays open through an SSE event", async () => {
-    els["bell-btn"].fire("click");
+  test("opening the automations button marks runs seen and clears the badge", async () => {
+    sseRun({ id: 9, routine_name: "EOD", kind: "routine", summary: "done" });
+    await tick(50);
+    expect(els["auto-badge"].hidden).toBe(false);
+    openPanel(); // the single automations button
+    await tick(50);
+    expect(els["auto-badge"].hidden).toBe(true);
+  });
+  test("open panel stays open through an SSE event", async () => {
+    openPanel();
     await tick(50);
     expect(els["auto-view"].hidden).toBe(false);
     sseRun({ id: 9, routine_name: "EOD", kind: "routine", summary: "done" });

@@ -16,6 +16,17 @@ export interface Company { id: number; name: string; industry: string; website: 
 export interface Task {
   id: number; title: string; deal_id: number | null; campaign_id: number | null;
   due_date: string; done: number; owner: string; created_at: string;
+  blocked_by?: { id: number; title: string; done: number }[];
+  is_blocked?: boolean;
+}
+export interface DealHistoryEntry {
+  id: number; from_stage: string | null; to_stage: string | null;
+  created_at: string; from_name?: string | null; to_name?: string | null;
+}
+export interface DuplicatePair {
+  a: { id: number; name: string; email?: string | null };
+  b: { id: number; name: string; email?: string | null };
+  reason: string;
 }
 export interface Kpis { [k: string]: any }
 export interface Activity { id: number; kind: string; text: string; ref_type: string; ref_id: number; created_at: string }
@@ -30,7 +41,8 @@ import { currentWorkspaceId } from "./workspace";
 
 const BASE = process.env.EXEC_CRM_URL || process.env.MILTON_CRM_URL || "http://localhost:3001";
 
-async function req(path: string, method = "GET", body?: any): Promise<any> {
+/** Exported for Data Workshop Sandbox staging (brain.ts): workspace-scoped. */
+export async function req(path: string, method = "GET", body?: any): Promise<any> {
   // Session workspace scoping: ?workspace=<id> wins in exec-crm's needWs
   // (over the X-Workspace header). null = default workspace: send nothing.
   const ws = currentWorkspaceId();
@@ -58,9 +70,22 @@ export async function ping(): Promise<boolean> {
   try { await req("/api/kpis"); return true; } catch { return false; }
 }
 
-export async function getDeals(): Promise<Deal[]> {
-  const j = await req("/api/deals");
+export async function getDeals(source?: string): Promise<Deal[]> {
+  const q = source ? `?source=${encodeURIComponent(source)}` : "";
+  const j = await req(`/api/deals${q}`);
   return j.deals || [];
+}
+export async function getDealSources(): Promise<string[]> {
+  const j = await req("/api/deal-sources");
+  return j.sources || [];
+}
+export async function getDealHistory(id: number): Promise<DealHistoryEntry[]> {
+  const j = await req(`/api/deals/${id}/history`);
+  return j.history || [];
+}
+export async function getDuplicates(type: "contact" | "company"): Promise<DuplicatePair[]> {
+  const j = await req(`/api/duplicates?type=${type}`);
+  return j.pairs || [];
 }
 export async function getContacts(): Promise<Contact[]> {
   const j = await req("/api/contacts");
@@ -164,6 +189,11 @@ export async function patchTask(id: number, t: Partial<Task>): Promise<Task> {
   const j = await req(`/api/tasks/${id}`, "PATCH", t);
   return j.task;
 }
+/** Flip task completion. Throws on 409 when open blockers exist unless confirm=true. */
+export async function toggleTask(id: number, confirm?: boolean): Promise<Task> {
+  const j = await req(`/api/tasks/${id}/toggle`, "POST", confirm ? { confirm: true } : {});
+  return j.task;
+}
 export async function deleteTask(id: number): Promise<void> {
   await req(`/api/tasks/${id}`, "DELETE");
 }
@@ -215,5 +245,52 @@ export async function resolveTask(query: string): Promise<Match<Task>[]> {
   }
   return matchByName(tasks.map((t) => ({ ...t, name: t.title })), query) as Match<Task>[];
 }
+export async function resolveCampaign(query: string): Promise<Match<Campaign>[]> {
+  return matchByName(await getCampaigns(), query);
+}
 
 export function crmBase(): string { return BASE; }
+
+// ---- custom fields (exec-crm's /api/custom-fields, workspace-scoped like everything else)
+export interface CustomField { id: number; name: string; field_type: string; value?: string | null }
+// exec-crm definitions carry name=slug, label=display, type; the values
+// endpoint carries field_id, name=label, field_type. Normalize both to one shape.
+function normField(f: any): CustomField {
+  return {
+    id: Number(f.id ?? f.field_id),
+    name: String(f.label ?? f.name ?? ""),
+    field_type: String(f.type ?? f.field_type ?? "text"),
+    value: f.value ?? null,
+  };
+}
+export async function getCustomFields(entityType: string): Promise<CustomField[]> {
+  const j = await req(`/api/custom-fields?entity_type=${encodeURIComponent(entityType)}`);
+  return (j.fields || []).map(normField);
+}
+export async function addCustomField(entityType: string, name: string, fieldType: string): Promise<CustomField> {
+  const j = await req("/api/custom-fields", "POST", { entity_type: entityType, name, field_type: fieldType });
+  return normField(j.field);
+}
+export async function deleteCustomField(id: number): Promise<void> {
+  await req(`/api/custom-fields/${id}`, "DELETE");
+}
+export async function getCustomFieldValues(entityType: string, entityId: number): Promise<CustomField[]> {
+  const j = await req(`/api/custom-fields/values?entity_type=${encodeURIComponent(entityType)}&entity_id=${entityId}`);
+  return (j.values || j.fields || []).map(normField);
+}
+export async function setCustomFieldValue(fieldId: number, entityId: number, value: string): Promise<{ ok: boolean }> {
+  return req("/api/custom-fields/values", "PUT", { field_id: fieldId, entity_id: entityId, value });
+}
+
+// ---- milton widgets (published to exec-crm's /api/milton/widgets, rendered on its Milton tab)
+export interface Widgetable {
+  kind: "stat" | "table" | "bars" | "list";
+  title: string;
+  payload: any;
+  source?: string;
+}
+/** Pin a widget to the active session workspace's Milton tab in exec-crm. */
+export async function pinWidget(w: Widgetable): Promise<any> {
+  const j = await req("/api/milton/widgets", "POST", w);
+  return j.widget;
+}

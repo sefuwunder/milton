@@ -164,6 +164,25 @@ describe("extractFacts", () => {
     expect(facts.event).toBeUndefined();
   });
 
+  test("dwell medians are pinned to the frozen nowMs, not the wall clock", () => {
+    // Fixed history: frozen at local noon on 2024-07-02. A wall-clock
+    // implementation would report ~844 days of dwell for these deals.
+    const nowMs = new Date(2024, 6, 2, 12, 0).getTime();
+    const deals = [
+      mkDeal({ id: 1, title: "A", stage: "negotiation", updated_at: "2024-06-01T09:00:00" }),
+      mkDeal({ id: 2, title: "B", stage: "negotiation", updated_at: "2024-06-21T18:30:00" }),
+      mkDeal({ id: 3, title: "C", stage: "proposal", updated_at: "2024-07-01T00:00:00" }),
+    ];
+    const a = extractFacts({ deals, tasks: [], activities: [], stages: stubStages, nowMs });
+    const b = extractFacts({ deals, tasks: [], activities: [], stages: stubStages, nowMs });
+    // 2024-06-01 -> 2024-07-02 is 31 days; 2024-06-21 -> 2024-07-02 is 11 days;
+    // median(31, 11) = 21. 2024-07-01 -> 2024-07-02 is 1 day.
+    expect(a.dwell.find((d) => d.stage === "negotiation")!.median_dwell).toBe(21);
+    expect(a.dwell.find((d) => d.stage === "proposal")!.median_dwell).toBe(1);
+    // Same input, same frozen time → identical output (reproducible runs).
+    expect(b.dwell).toEqual(a.dwell);
+  });
+
   test("adds the event fact when an event is provided", () => {
     const facts = extractFacts({
       deals: [], tasks: [], activities: [], stages: [], nowMs: NOW,

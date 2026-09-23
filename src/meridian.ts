@@ -1,7 +1,8 @@
-// meridian.ts — read-only client for Meridian's recon outputs.
-// Milton never launches recons or mutates anything here: every call is GET.
-// Meridian is a separate app (Bun + SQLite, port 3005); Milton only reads
-// its recon sprints over HTTP.
+// meridian.ts — client for Meridian's recon outputs and run requests.
+// Reads are GETs; the one write is requestReconRun, which asks Meridian's
+// run-request router for a NEW recon sprint (POST /api/runs). Meridian is a
+// separate app (Bun + SQLite, port 3005); Milton only talks to it over HTTP,
+// never its DB.
 
 export interface ReconSummary {
   id: string; city: string; country: string; status: string;
@@ -105,12 +106,18 @@ export type RunRequestResult =
  * Ask Meridian's run-request router for a new recon sprint.
  * callbackUrl/callbackHeaders are sent through so Meridian can POST the
  * completion payload back; omit them and the run is fire-and-forget.
+ *
+ * Hard rule: every Milton-initiated run is business-data only. business_only
+ * is always sent as true — there is no chat opt-out. Meridian then restricts
+ * the sprint to sources classified as business data (companies, legal
+ * entities, organizations, filings, registries, business places) plus
+ * geocode plumbing.
  */
 export async function requestReconRun(
   city: string,
   opts: { callbackUrl?: string; callbackHeaders?: Record<string, string> } = {}
 ): Promise<RunRequestResult> {
-  const body: Record<string, any> = { city };
+  const body: Record<string, any> = { city, business_only: true };
   if (opts.callbackUrl) body.callback_url = opts.callbackUrl;
   if (opts.callbackHeaders) body.callback_headers = opts.callbackHeaders;
   try {
@@ -131,6 +138,149 @@ export async function requestReconRun(
   } catch (e) {
     return { ok: false, error: String(e instanceof Error ? e.message : e), unreachable: true };
   }
+}
+
+// ---- enrichment jobs (the one async write: company + principal lookup) --------
+// POST /api/enrich -> 201 { job_id, status: "running" }; the scrape can take
+// longer than a few seconds, so the job runs in Meridian's background and
+// Milton polls GET /api/enrich/:id.
+
+export interface EnrichCompany {
+  name: string; domain: string;
+  description?: string; founded?: string; employees?: string;
+}
+export interface EnrichPrincipal {
+  name: string; title: string; email?: string; source_url: string;
+}
+export interface EnrichJob {
+  id: string; query: string; status: string;
+  progress: { done: number; total: number; current?: string };
+  error: string | null;
+  company: EnrichCompany | null; principals: EnrichPrincipal[] | null;
+  notes: string[]; nodes: any[]; edges: any[];
+  created_at: number; updated_at: number;
+}
+
+export type EnrichRequestResult =
+  | { ok: true; job_id: string; status: string }
+  | { ok: false; error: string; unreachable: boolean };
+
+/** Start a company enrichment job in Meridian. */
+export async function requestEnrich(query: string): Promise<EnrichRequestResult> {
+  try {
+    const res = await fetch(meridianBase() + "/api/enrich", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (res.status !== 201) {
+      let detail = res.statusText;
+      try { detail = JSON.stringify(await res.json()); } catch { /* keep statusText */ }
+      return { ok: false, error: `status ${res.status}: ${String(detail).slice(0, 200)}`, unreachable: false };
+    }
+    const j: any = await res.json();
+    if (!j?.job_id) return { ok: false, error: "bad response: no job_id", unreachable: false };
+    return { ok: true, job_id: String(j.job_id), status: String(j.status || "running") };
+  } catch (e) {
+    return { ok: false, error: String(e instanceof Error ? e.message : e), unreachable: true };
+  }
+}
+
+/** Poll one enrichment job — or null when Meridian is unreachable / unknown id. */
+export async function getEnrichJob(id: string): Promise<EnrichJob | null> {
+  const j = await get<any>(`/api/enrich/${encodeURIComponent(id)}`);
+  // Meridian returns the job at the top level (fullEnrichJob); tolerate a
+  // { job } wrapper too.
+  const r = j?.job ?? j;
+  if (!r || r.id == null) return null;
+  return {
+    id: String(r.id), query: String(r.query || ""), status: String(r.status || "?"),
+    progress: r.progress && typeof r.progress === "object" ? r.progress : { done: 0, total: 0 },
+    error: r.error ?? null,
+    company: r.company ?? null,
+    principals: Array.isArray(r.principals) ? r.principals : null,
+    notes: Array.isArray(r.notes) ? r.notes : [],
+    nodes: Array.isArray(r.nodes) ? r.nodes : [],
+    edges: Array.isArray(r.edges) ? r.edges : [],
+    created_at: Number(r.created_at || 0), updated_at: Number(r.updated_at || 0),
+  };
+}
+
+// ---- territory prospecting (the second async write: Meridian finds companies) --
+// POST /api/prospect { location, industry } -> 201 { job_id, status: "running" };
+// the Overpass + territory pipeline can take longer than a few seconds, so the
+// job runs in Meridian's background and Milton polls GET /api/prospect/:id.
+
+export interface ProspectCompany {
+  name: string; address?: string; lat?: number; lon?: number;
+  tags?: Record<string, string>; industry?: string; territory?: string;
+  source?: string; prospect?: boolean;
+}
+export interface ProspectJob {
+  id: string; location: string; industry: string; status: string;
+  progress: { done: number; total: number; current?: string };
+  error: string | null;
+  companies: ProspectCompany[] | null;
+  nodes: any[]; edges: any[];
+  created_at: number; updated_at: number;
+}
+
+export type ProspectRequestResult =
+  | { ok: true; job_id: string; status: string }
+  | { ok: false; error: string; unreachable: boolean };
+
+/** Start a territory-prospecting job in Meridian. */
+export async function requestProspect(location: string, industry: string): Promise<ProspectRequestResult> {
+  try {
+    const res = await fetch(meridianBase() + "/api/prospect", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ location, industry }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    if (res.status !== 201) {
+      let detail = res.statusText;
+      try { detail = JSON.stringify(await res.json()); } catch { /* keep statusText */ }
+      return { ok: false, error: `status ${res.status}: ${String(detail).slice(0, 200)}`, unreachable: false };
+    }
+    const j: any = await res.json();
+    if (!j?.job_id) return { ok: false, error: "bad response: no job_id", unreachable: false };
+    return { ok: true, job_id: String(j.job_id), status: String(j.status || "running") };
+  } catch (e) {
+    return { ok: false, error: String(e instanceof Error ? e.message : e), unreachable: true };
+  }
+}
+
+/** Poll one prospect job — or null when Meridian is unreachable / unknown id. */
+export async function getProspectJob(id: string): Promise<ProspectJob | null> {
+  const j = await get<any>(`/api/prospect/${encodeURIComponent(id)}`);
+  // Tolerate a { job } wrapper, same as the enrich endpoint.
+  const r = j?.job ?? j;
+  if (!r || r.id == null) return null;
+  const co = (c: any): ProspectCompany => ({
+    name: String(c?.name || ""),
+    ...(c?.address != null ? { address: String(c.address) } : {}),
+    ...(c?.lat != null ? { lat: Number(c.lat) } : {}),
+    ...(c?.lon != null ? { lon: Number(c.lon) } : {}),
+    tags: c?.tags && typeof c.tags === "object" ? c.tags : {},
+    ...(c?.industry != null ? { industry: String(c.industry) } : {}),
+    ...(c?.territory != null ? { territory: String(c.territory) } : {}),
+    ...(c?.source != null ? { source: String(c.source) } : {}),
+    ...(c?.prospect != null ? { prospect: Boolean(c.prospect) } : {}),
+  });
+  return {
+    id: String(r.id),
+    location: String(r.location || ""),
+    industry: String(r.industry || ""),
+    status: String(r.status || "?"),
+    progress: r.progress && typeof r.progress === "object" ? r.progress : { done: 0, total: 0 },
+    error: r.error ?? null,
+    companies: Array.isArray(r.companies) ? r.companies.map(co).filter((c) => c.name) : null,
+    nodes: Array.isArray(r.nodes) ? r.nodes : [],
+    edges: Array.isArray(r.edges) ? r.edges : [],
+    created_at: Number(r.created_at || 0), updated_at: Number(r.updated_at || 0),
+  };
 }
 
 // ---- fuzzy matching (same scoring as crm.ts matchByName / workspace.ts) --------------
