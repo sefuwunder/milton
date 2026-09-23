@@ -3,7 +3,7 @@
 
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
-import { handleMessage, tickAutomation, handleWebhookEvent, handleMeridianCallback, enrichTerminalReply, enrichTickDecision, prospectTerminalReply, prospectTickDecision, type Session, type Reply, type UploadRef, type EnrichJobState, type ProspectJobState } from "./brain";
+import { handleMessage, tickAutomation, handleWebhookEvent, handleMeridianCallback, enrichTerminalReply, enrichTickDecision, prospectTerminalReply, prospectTickDecision, hygieneData, type Session, type Reply, type UploadRef, type EnrichJobState, type ProspectJobState } from "./brain";
 import { getEnrichJob, getProspectJob } from "./meridian";
 import { ping, crmBase } from "./crm";
 import { helpText } from "./intents";
@@ -238,6 +238,23 @@ const server = Bun.serve({
 
     if (path === "/api/commands" && method === "GET") {
       return json({ commands: commandRegistry() });
+    }
+
+    // ---- pipeline hygiene as structured JSON -------------------------------------
+    // Same engine as the "pipeline hygiene" chat reply, but machine-readable so
+    // other surfaces (exec-crm's Dashboard) can render Milton insights grouped
+    // by the Review / Action / Outcome phases without parsing chat text.
+    // ?workspace=<exec-crm workspace id>; absent = default workspace.
+    if (path === "/api/hygiene" && method === "GET") {
+      const raw = (url.searchParams.get("workspace") || "").trim();
+      const wsId = raw === "" ? null : Number(raw);
+      if (wsId !== null && !Number.isInteger(wsId)) return json({ error: "bad workspace" }, 400);
+      try {
+        const data = await runWithWorkspace(wsId, () => hygieneData(wsId));
+        return json({ ok: true, workspace_id: wsId, ...data });
+      } catch (e) {
+        return json({ error: "hygiene failed" }, 500);
+      }
     }
 
     if (path === "/api/history" && method === "GET") {

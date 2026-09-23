@@ -2755,67 +2755,90 @@ async function briefReply(): Promise<Reply> {
   };
 }
 
-async function hygieneReply(session: Session): Promise<Reply> {
+// ---- pipeline hygiene as structured data -------------------------------------
+// The same engine that powers the chat reply, exposed so other surfaces
+// (e.g. exec-crm's Dashboard) can render Milton insights without parsing
+// chat text. Phase order is always review → action → outcome.
+export interface HygieneItem { icon: string; text: string; fix?: string; phase: playbook.Phase }
+export interface HygieneData {
+  lead: string;
+  counts: Record<playbook.Phase, number>;
+  items: HygieneItem[];
+  chips: string[];
+}
+
+export async function hygieneData(workspaceId: number | null): Promise<HygieneData> {
   // Pipeline hygiene runs through the playbook rule engine. Every rule carries
   // an explicit phase — review (prep & strategy), action (the touch),
   // outcome (what came back) — and findings render grouped in that order.
   // The five legacy checks are rules R1–R5; their aggregate wording is
   // byte-identical to the old hard-coded text. Advisory only — nothing here
   // writes to the CRM.
-  const ws = session.workspaceId ?? null;
+  const ws = workspaceId ?? null;
   const [deals, tasks, activities, stages] = await Promise.all([
     crm.getDeals(), crm.getTasks(), crm.getActivities(), crm.getStages(),
   ]);
-  const items: { icon: string; text: string; fix?: string; phase: playbook.Phase }[] = [];
-  const chips = ["Show pipeline", "My tasks"];
-  try {
-    const noteCounts: Record<number, number> = {};
-    for (const d of deals) noteCounts[d.id] = dealNotes.countDealNotes(d.id, ws);
-    const facts = playbook.extractFacts({
-      deals, tasks, activities, stages, nowMs: Date.now(),
-      outcomes: outcomes.getAllOutcomes(ws), noteCounts,
+  const items: HygieneItem[] = [];
+  const chips: string[] = [];
+  const noteCounts: Record<number, number> = {};
+  for (const d of deals) noteCounts[d.id] = dealNotes.countDealNotes(d.id, ws);
+  const facts = playbook.extractFacts({
+    deals, tasks, activities, stages, nowMs: Date.now(),
+    outcomes: outcomes.getAllOutcomes(ws), noteCounts,
+  });
+  // loadRules() returns records with active flags; the engine only sees the
+  // rules it's handed, so paused rules are filtered here.
+  const rules = playbook.loadRules().filter((r) => r.active);
+  const res = playbook.runPlaybook({ rules, facts });
+  // Phase-grouped: review → action → outcome. Within a phase the legacy
+  // five keep their legacy relative order and byte-identical wording, then
+  // newer findings, then suggestions (💡) — suggestions used to be
+  // chip-only, which hid the outcome phase's advice entirely.
+  const legacyOrder = ["no_close", "no_value", "stale", "no_contact", "overdue"];
+  for (const phase of playbook.PHASES) {
+    const fs = res.findings.filter((x) => x.phase === phase).sort((a, b) => {
+      const ai = legacyOrder.indexOf(a.kind), bi = legacyOrder.indexOf(b.kind);
+      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
     });
-    // loadRules() returns records with active flags; the engine only sees the
-    // rules it's handed, so paused rules are filtered here.
-    const rules = playbook.loadRules().filter((r) => r.active);
-    const res = playbook.runPlaybook({ rules, facts });
-    // Phase-grouped: review → action → outcome. Within a phase the legacy
-    // five keep their legacy relative order and byte-identical wording, then
-    // newer findings, then suggestions (💡) — suggestions used to be
-    // chip-only, which hid the outcome phase's advice entirely.
-    const legacyOrder = ["no_close", "no_value", "stale", "no_contact", "overdue"];
-    for (const phase of playbook.PHASES) {
-      const fs = res.findings.filter((x) => x.phase === phase).sort((a, b) => {
-        const ai = legacyOrder.indexOf(a.kind), bi = legacyOrder.indexOf(b.kind);
-        return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
-      });
-      for (const f of fs) items.push({ icon: f.icon, text: f.text, ...(f.fix ? { fix: f.fix } : {}), phase });
-      for (const s of res.suggestions.filter((x) => x.phase === phase)) {
-        items.push({ icon: "💡", text: s.text, phase });
-        for (const c of s.chips) if (!chips.includes(c)) chips.push(c);
-      }
+    for (const f of fs) items.push({ icon: f.icon, text: f.text, ...(f.fix ? { fix: f.fix } : {}), phase });
+    for (const s of res.suggestions.filter((x) => x.phase === phase)) {
+      items.push({ icon: "💡", text: s.text, phase });
+      for (const c of s.chips) if (!chips.includes(c)) chips.push(c);
     }
+  }
+  const counts = { review: 0, action: 0, outcome: 0 } as Record<playbook.Phase, number>;
+  for (const i of items) counts[i.phase]++;
+  const bits = playbook.PHASES.filter((p) => counts[p] > 0).map((p) => `${counts[p]} in ${p}`);
+  const lead = items.length
+    ? `Found ${items.length} thing${items.length === 1 ? "" : "s"} worth a look — ${bits.join(", ")}:`
+    : "Pipeline is clean — every open deal has a close date, a contact, and recent activity. Nice.";
+  return { lead, counts, items, chips };
+}
+
+async function hygieneReply(session: Session): Promise<Reply> {
+  const ws = session.workspaceId ?? null;
+  let data: HygieneData;
+  try {
+    data = await hygieneData(ws);
   } catch {
     return { text: "The playbook couldn't run right now — try again in a moment.", chips: ["Morning brief"] };
   }
-  if (!items.length) {
-    return { text: "Pipeline is clean — every open deal has a close date, a contact, and recent activity. Nice.", chips: ["Show pipeline", "Morning brief"] };
+  const chips = ["Show pipeline", "My tasks", ...data.chips];
+  if (!data.items.length) {
+    return { text: data.lead, chips: ["Show pipeline", "Morning brief"] };
   }
-  const phaseCount = (p: playbook.Phase) => items.filter((i) => i.phase === p).length;
-  const bits = playbook.PHASES.map((p) => ({ p, n: phaseCount(p) }))
-    .filter((x) => x.n > 0).map((x) => `${x.n} in ${x.p}`);
   const hygieneWidget: crm.Widgetable = {
     kind: "list", title: "Pipeline hygiene", source: "milton:hygiene",
     payload: {
-      items: items.slice(0, 15).map((f) => ({
+      items: data.items.slice(0, 15).map((f) => ({
         text: `${f.icon} ${f.text}`,
         ...(f.fix ? { sub: f.fix } : {}),
       })),
     },
   };
   return {
-    text: `Found ${items.length} thing${items.length === 1 ? "" : "s"} worth a look — ${bits.join(", ")}:`,
-    cards: [{ kind: "findings", title: "Pipeline hygiene", items }],
+    text: data.lead,
+    cards: [{ kind: "findings", title: "Pipeline hygiene", items: data.items }],
     chips,
     widget: hygieneWidget,
   };
