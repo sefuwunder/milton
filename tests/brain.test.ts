@@ -4,9 +4,10 @@ import { Database } from "bun:sqlite";
 import { handleMessage, type Session } from "../src/brain";
 import * as auto from "../src/automation";
 import { initDealNotesDb } from "../src/deal_notes";
+import { initOutcomesDb } from "../src/outcomes";
 import { initPlaybookDb } from "../src/playbook";
 
-beforeAll(() => { auto.initAutomationDb(new Database(":memory:")); initDealNotesDb(new Database(":memory:")); initPlaybookDb(new Database(":memory:")); });
+beforeAll(() => { auto.initAutomationDb(new Database(":memory:")); initDealNotesDb(new Database(":memory:")); initOutcomesDb(new Database(":memory:")); initPlaybookDb(new Database(":memory:")); });
 
 // ---- stub exec-crm ------------------------------------------------------------
 const calls: { method: string; path: string; body?: any }[] = [];
@@ -150,7 +151,7 @@ describe("reads", () => {
   });
   test("pipeline hygiene flags gaps", async () => {
     const r = await handleMessage(freshSession(), "pipeline hygiene");
-    expect(r.text).toContain("worth fixing");
+    expect(r.text).toContain("worth a look");
     const items = r.cards?.[0].items || [];
     expect(items.some((f: any) => f.text.includes("no expected close date"))).toBe(true);
     expect(items.some((f: any) => f.text.includes("stale"))).toBe(true);

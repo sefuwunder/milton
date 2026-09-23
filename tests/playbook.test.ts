@@ -467,7 +467,7 @@ describe("storage", () => {
     expect(setRuleActive("NOPE", true)).toBe(false); // unknown id
 
     const { builtins, overrides } = reloadPlaybook();
-    expect(builtins).toBeGreaterThanOrEqual(11);
+    expect(builtins).toBeGreaterThanOrEqual(19);
     expect(overrides).toBe(0);
     expect(getRule("R1")?.active).toBe(false); // preserved across reload
 
@@ -482,7 +482,7 @@ describe("storage", () => {
       process.env.MILTON_DATA = dir;
       const r2override = { ...(STARTER.find((r) => r.id === "R2")!), salience: 99, active: false };
       const custom: Rule = {
-        id: "RX", name: "Custom rule", when: [dealOpen], then: [{ suggest: "hi from RX" }],
+        id: "RX", name: "Custom rule", phase: "action", when: [dealOpen], then: [{ suggest: "hi from RX" }],
       };
       writeFileSync(join(dir, "playbook.user.json"), JSON.stringify([r2override, custom]));
 
@@ -506,7 +506,7 @@ describe("storage", () => {
 
       // Malformed JSON: warned + ignored, never crashes.
       writeFileSync(join(dir, "playbook.user.json"), "{ not json");
-      expect(loadRules().length).toBeGreaterThanOrEqual(11);
+      expect(loadRules().length).toBeGreaterThanOrEqual(19);
       expect(getRule("R1")?.active).toBe(true);
     } finally {
       if (prev === undefined) delete process.env.MILTON_DATA;
@@ -521,7 +521,7 @@ describe("storage", () => {
     try {
       process.env.MILTON_DATA = dir;
       writeFileSync(join(dir, "playbook.user.json"), JSON.stringify([
-        { id: "RY", name: "File only", when: [dealOpen], then: [{ suggest: "yo" }] },
+        { id: "RY", name: "File only", phase: "review", when: [dealOpen], then: [{ suggest: "yo" }] },
       ]));
       expect(getRule("RY")?.builtin).toBe(false);
       expect(setRuleActive("RY", false)).toBe(false); // not in the DB

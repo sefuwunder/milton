@@ -16,7 +16,7 @@ export type IntentName =
   | "analyze_pipeline" | "forecast" | "plan_day" | "plan_week" | "plan_breakdown"
   | "sales_cycle" | "top_deals" | "campaign_stats" | "closing_soon"
   | "pin_widget"
-  | "contact_detail" | "search" | "add_note" | "add_campaign"
+  | "contact_detail" | "search" | "add_note" | "add_campaign" | "log_outcome"
   | "save_routine" | "run_routine" | "list_routines" | "delete_routine" | "show_routine"
   | "schedule_add" | "list_schedules" | "unschedule" | "pause_schedule" | "resume_schedule"
   | "trigger_add" | "list_triggers" | "delete_trigger" | "trigger_help" | "list_runs"
@@ -64,7 +64,7 @@ export const INTENT_NAMES: IntentName[] = [
   "analyze_pipeline", "forecast", "plan_day", "plan_week", "plan_breakdown",
   "sales_cycle", "top_deals", "campaign_stats", "closing_soon",
   "pin_widget",
-  "contact_detail", "search", "add_note", "add_campaign",
+  "contact_detail", "search", "add_note", "add_campaign", "log_outcome",
   "save_routine", "run_routine", "list_routines", "delete_routine", "show_routine",
   "schedule_add", "list_schedules", "unschedule", "pause_schedule", "resume_schedule",
   "trigger_add", "list_triggers", "delete_trigger", "trigger_help", "list_runs",
@@ -509,6 +509,8 @@ export function parseIntent(raw: string): Intent {
   // known deal title in brain.ts.
   else if ((m = text.match(/^(?:add )?note (?:on|to) (.+?)\s*:\s*(.+)$/))) set("add_note", { query: m[1].trim(), text: m[2].trim() });
   else if ((m = text.match(/^(?:add )?note (?:on|to) (.+)$/))) set("add_note", { rest: m[1].trim() });
+  // Outcome logging (Milton-local; feeds the playbook's outcome phase R14-R18)
+  else if ((m = text.match(/^log (?:an? )?outcome(?: for (.+))?$/))) set("log_outcome", { query: (m[1] || "").trim() });
   // ---- custom fields (exec-crm /api/custom-fields, workspace-scoped) ----
   // "add custom field Renewal date of type date to contacts"
   // "add the VIP custom field to companies"
@@ -652,6 +654,7 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["pin this as a widget", "pin_widget"], ["add widget", "pin_widget"]], note: "pin the last analysis to the Milton tab in exec-crm" },
       { cmds: [["who is Jane Doe", "contact_detail"], ["search acme", "search"]], note: "contact detail cards and cross-entity search" },
       { cmds: [["note on Acme: called today, wants the proposal", "add_note"]], note: "pin a note to a deal — kept in Milton, shown on deal lookup" },
+      { cmds: [["log outcome for Acme", "log_outcome"]], note: "log what happened on a touch — voicemail, bounce, meeting set… feeds the playbook's outcome rules" },
       { cmds: [["new campaign Q4 Push for Acme", "add_campaign"]], note: "campaigns need a company — I'll ask if you skip it" },
       { cmds: [["move Acme deal to negotiation", "move_deal"]], note: "" },
       { cmds: [["add contact Jane Doe at Acme jane@acme.com", "add_contact"]], note: "" },

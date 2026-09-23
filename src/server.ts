@@ -13,6 +13,7 @@ import { initWorkspaceDb, listWorkspaces, getSessionWorkspace, setSessionWorkspa
 import { initChatSessionDb, listChatSessions, getChatSession, createChatSession, renameChatSession, deleteChatSession, ensureChatSession, touchChatSession } from "./chat_sessions";
 import { initReconRunsDb } from "./recon_runs";
 import { initDealNotesDb } from "./deal_notes";
+import { initOutcomesDb } from "./outcomes";
 import { initMissLogDb } from "./intent_misses";
 import { initPlaybookDb } from "./playbook";
 import { initUsabilityDb } from "./usability";
@@ -58,6 +59,7 @@ function initDataDir(dataDir: string) {
   initChatSessionDb(db, `${dataDir}/uploads`);
   initReconRunsDb(db);
   initDealNotesDb(db);
+  initOutcomesDb(db);
   initMissLogDb(db);
   initPlaybookDb(db);
   initUsabilityDb(db);

@@ -30,6 +30,7 @@
 // brain.ts imports this module; this module must never import brain.ts (cycle).
 
 import type { Deal, Task, Activity, Stage } from "./crm";
+import type { Outcome } from "./outcomes";
 import type { Database } from "bun:sqlite";
 import { existsSync, readFileSync } from "node:fs";
 import starterRulesJson from "./playbook-rules.json";
@@ -59,8 +60,20 @@ export type AssertAction = { assert: string; facts?: Record<string, unknown> };
 export type FlagAction = { flag: string; entity?: string };
 export type Action = FindingAction | SuggestAction | AssertAction | FlagAction;
 
+/**
+ * The three philosophical phases every rule belongs to, made explicit:
+ *   review  — preparation: learn the pitch, research the prospect, develop strategy
+ *   action  — execution: the touch itself (email, call, social, video, in person)
+ *   outcome — what came back: voicemail, bounce, meeting set, no interest…
+ * Outcome rules assert next-step facts that review/action rules consume, so a
+ * run is one turn of the review → action → outcome cycle.
+ */
+export type Phase = "review" | "action" | "outcome";
+export const PHASES: Phase[] = ["review", "action", "outcome"];
+const PHASE_ORDER: Record<Phase, number> = { review: 0, action: 1, outcome: 2 };
+
 export interface Rule {
-  id: string; name: string; salience?: number; active?: boolean; on?: string[];
+  id: string; name: string; phase: Phase; salience?: number; active?: boolean; on?: string[];
   when: Condition[]; then: Action[];
 }
 
@@ -73,6 +86,10 @@ export interface PlaybookInput {
   deals: Deal[]; tasks: Task[]; activities: Activity[]; stages: Stage[];
   nowMs: number;
   event?: Record<string, unknown>;
+  /** Milton-local outcome log (outcomes.ts) — feeds the outcome phase. */
+  outcomes?: Outcome[];
+  /** deal_id → Milton-local note count (deal_notes.ts) — feeds R11. */
+  noteCounts?: Record<number, number>;
 }
 
 /** Local calendar-day difference (dateStr minus nowMs), both sides pinned to
@@ -111,6 +128,7 @@ export function extractFacts(input: PlaybookInput): FactSet {
       days_since_update: dsu === null ? null : -dsu,
       open: !d.stage.startsWith("closed_"),
       days_until_close: d.expected_close ? calDays(d.expected_close, nowMs) : null,
+      note_count: input.noteCounts?.[d.id] ?? 0,
     };
   });
 
@@ -167,6 +185,43 @@ export function extractFacts(input: PlaybookInput): FactSet {
 
   const facts: FactSet = { deal, task, activity, dwell, owner_load };
   if (input.event) facts.event = [{ name: (input.event as { name?: unknown }).name, ...input.event }];
+
+  // ---- outcome phase facts (outcomes.ts) -------------------------------------
+  // Per-touch facts plus one summary per open deal: R14–R18 match the summary
+  // (the DSL has no aggregation in `when`), R15-style recency uses days_ago.
+  const outcome: Fact[] = [];
+  const byDeal = new Map<number, Outcome[]>();
+  for (const o of input.outcomes ?? []) {
+    const da = calDays((o.at || "").slice(0, 10), nowMs);
+    outcome.push({
+      deal_id: o.deal_id, method: o.method, label: o.label, category: o.category,
+      days_ago: da === null ? null : -da,
+    });
+    if (!byDeal.has(o.deal_id)) byDeal.set(o.deal_id, []);
+    byDeal.get(o.deal_id)!.push(o);
+  }
+  const dealById = new Map(deals.map((d) => [d.id, d]));
+  const deal_outcome: Fact[] = [];
+  for (const [dealId, list] of byDeal) {
+    const d = dealById.get(dealId);
+    if (!d || String(d.stage).startsWith("closed_")) continue; // open deals only
+    const sorted = [...list].sort((a, b) => (a.id < b.id ? -1 : 1));
+    const last = sorted[sorted.length - 1];
+    const lda = calDays((last.at || "").slice(0, 10), nowMs);
+    deal_outcome.push({
+      deal_id: dealId,
+      title: d.title,
+      touch_count: sorted.length,
+      conversation_count: sorted.filter((o) => o.category === "conversation").length,
+      no_contact_count: sorted.filter((o) => o.category === "no_contact").length,
+      last_label: last.label,
+      last_category: last.category,
+      last_method: last.method,
+      last_days_ago: lda === null ? null : -lda,
+    });
+  }
+  facts.outcome = outcome;
+  facts.deal_outcome = deal_outcome;
   return facts;
 }
 
@@ -428,11 +483,11 @@ function renderFactValue(v: unknown, bindings: Bindings): unknown {
 // ---- run -----------------------------------------------------------------------
 
 export interface PlaybookFinding {
-  ruleId: string; ruleName: string; kind: string; icon: string;
+  ruleId: string; ruleName: string; phase: Phase; kind: string; icon: string;
   text: string; fix?: string; why: string;
 }
 export interface PlaybookSuggestion {
-  ruleId: string; ruleName: string; text: string; chips: string[]; why: string;
+  ruleId: string; ruleName: string; phase: Phase; text: string; chips: string[]; why: string;
 }
 export interface PlaybookFlag {
   ruleId: string; kind: string; entity?: string; why: string;
@@ -517,7 +572,7 @@ function renderFindings(acts: FindingActivation[]): PlaybookFinding[] {
       const titles = sorted.map(firstTitle).filter((t): t is string => t !== undefined);
       const leafPart = g[0].why.includes(" — ") ? g[0].why.split(" — ").slice(1).join(" — ") : g[0].why;
       out.push({
-        ruleId: rule.id, ruleName: rule.name, kind: action.finding, icon: action.icon,
+        ruleId: rule.id, ruleName: rule.name, phase: rule.phase, kind: action.finding, icon: action.icon,
         text: renderAggregate(action.aggregate, g, action.orderBy),
         fix: action.fix ? renderAggregate(action.fix, g, action.orderBy) : undefined,
         why: `rule ${rule.id} · ${g.length} matched ("${titles.slice(0, 4).join('", "')}"${titles.length > 4 ? "…" : ""}) — ${leafPart}`,
@@ -525,7 +580,7 @@ function renderFindings(acts: FindingActivation[]): PlaybookFinding[] {
     } else {
       for (const a of g) {
         out.push({
-          ruleId: rule.id, ruleName: rule.name, kind: action.finding, icon: action.icon,
+          ruleId: rule.id, ruleName: rule.name, phase: rule.phase, kind: action.finding, icon: action.icon,
           text: renderTemplate(action.text ?? "", a.bindings),
           fix: action.fix ? renderTemplate(action.fix, a.bindings) : undefined,
           why: a.why,
@@ -585,9 +640,13 @@ export function runPlaybook(opts: RunPlaybookOpts): PlaybookRunResult {
       }
     }
     if (!agenda.length) break;
-    // Conflict resolution: salience desc, specificity desc, rule id asc.
-    // Array.sort is stable, so same-rule activations keep fact array order.
+    // Conflict resolution: phase order first (review → action → outcome makes
+    // the cycle explicit in execution), then salience desc, specificity desc,
+    // rule id asc. Array.sort is stable, so same-rule activations keep fact
+    // array order. Rules without a phase (hand-built, never validated) sort
+    // as "action" — the neutral middle.
     agenda.sort((a, b) =>
+      (PHASE_ORDER[a.rule.phase as Phase] ?? 1) - (PHASE_ORDER[b.rule.phase as Phase] ?? 1) ||
       (b.rule.salience ?? 50) - (a.rule.salience ?? 50) ||
       spec(b.rule) - spec(a.rule) ||
       (a.rule.id < b.rule.id ? -1 : a.rule.id > b.rule.id ? 1 : 0));
@@ -606,7 +665,7 @@ export function runPlaybook(opts: RunPlaybookOpts): PlaybookRunResult {
         findingActs.push({ rule: act.rule, action, bindings: act.bindings, why: act.why });
       } else if ("suggest" in action) {
         suggestions.push({
-          ruleId: act.rule.id, ruleName: act.rule.name,
+          ruleId: act.rule.id, ruleName: act.rule.name, phase: act.rule.phase,
           text: renderTemplate(action.suggest, act.bindings),
           chips: [...(action.chips ?? [])], why: act.why,
         });
@@ -691,6 +750,9 @@ export function validateRule(r: unknown): string[] {
   const rule = r as Record<string, unknown>;
   if (typeof rule.id !== "string" || !rule.id.trim()) errs.push("id must be a non-empty string");
   if (typeof rule.name !== "string" || !rule.name.trim()) errs.push("name must be a non-empty string");
+  if (!PHASES.includes(rule.phase as Phase)) {
+    errs.push(`phase must be one of ${PHASES.join(", ")} (review = prep, action = the touch, outcome = what came back)`);
+  }
   if (!Array.isArray(rule.when)) errs.push("when must be an array");
   else rule.when.forEach((c, i) => validateCondition(c, `when[${i}]`, errs));
   if (!Array.isArray(rule.then) || rule.then.length === 0) errs.push("then must be a non-empty array");

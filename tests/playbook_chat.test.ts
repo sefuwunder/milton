@@ -16,6 +16,7 @@ import { Database } from "bun:sqlite";
 import { handleMessage, handleWebhookEvent, daysUntil, type Session } from "../src/brain";
 import * as auto from "../src/automation";
 import { initDealNotesDb } from "../src/deal_notes";
+import { initOutcomesDb } from "../src/outcomes";
 import { initMissLogDb } from "../src/intent_misses";
 import { initPlaybookDb, setRuleActive, loadRules } from "../src/playbook";
 
@@ -26,6 +27,7 @@ delete process.env.MILTON_LLM_KEY;
 beforeAll(() => {
   auto.initAutomationDb(new Database(":memory:"));
   initDealNotesDb(new Database(":memory:"));
+  initOutcomesDb(new Database(":memory:"));
   initMissLogDb(new Database(":memory:"));
   initPlaybookDb(new Database(":memory:"));
 });
@@ -134,7 +136,17 @@ describe("hygiene via the rule engine", () => {
   test("byte-identical to the legacy hard-coded checks", async () => {
     legacyFixture();
     const got = await handleMessage(freshSession(), "check hygiene");
-    const want = legacyHygieneReply(fx.deals, fx.tasks);
+    const legacy = legacyHygieneReply(fx.deals, fx.tasks);
+    // Phase grouping reorders the five (review: no_close, no_value, no_contact;
+    // action: stale, overdue) and names the phases — the wording stays
+    // byte-identical to the legacy checks.
+    const wantItems = [legacy.cards![0].items[0], legacy.cards![0].items[1], legacy.cards![0].items[3], legacy.cards![0].items[2], legacy.cards![0].items[4]]
+      .map((f: any, i: number) => ({ ...f, phase: ["review", "review", "review", "action", "action"][i] }));
+    const want = {
+      ...legacy,
+      text: "Found 5 things worth a look — 3 in review, 2 in action:",
+      cards: [{ kind: "findings", title: "Pipeline hygiene", items: wantItems }],
+    };
     expect(got.text).toBe(want.text);
     expect(got.cards).toEqual(want.cards);
     expect(got.chips).toEqual(want.chips);
@@ -147,7 +159,7 @@ describe("hygiene via the rule engine", () => {
 
   test("clean pipeline message preserved", async () => {
     fx.deals = [deal({ id: 1, title: "Tidy Deal", value: 1000, stage: "qualification", expected_close: "2026-12-31", contact_id: 9, updated_at: isoDaysAgo(2) })];
-    fx.tasks = [task({ id: 1, title: "Future task", due_date: "2026-12-31", done: false })];
+    fx.tasks = [task({ id: 1, title: "Future task", deal_id: 1, due_date: "2026-12-31", done: false })];
     const r = await handleMessage(freshSession(), "check hygiene");
     expect(r.text).toContain("Pipeline is clean");
   });
@@ -191,7 +203,7 @@ describe("playbook chat intents", () => {
     expect(r.text).toContain("**R1**");
     expect(r.text).toContain("Quiet negotiation");
     expect(r.text).toContain("salience 85");
-    expect(r.text).toContain("Playbook rules (11)");
+    expect(r.text).toContain("Playbook rules (19)");
   });
 
   test("pause and resume a rule (case-insensitive id)", async () => {
@@ -201,11 +213,11 @@ describe("playbook chat intents", () => {
     const quiet = await handleMessage(freshSession(), "check hygiene");
     expect(JSON.stringify(quiet.cards)).not.toContain("untouched for 30+ days");
     // the other four checks still fire
-    expect(quiet.text).toBe("Found 4 things worth fixing:");
+    expect(quiet.text).toBe("Found 4 things worth a look — 3 in review, 1 in action:");
     r = await handleMessage(freshSession(), "resume rule R3");
     expect(r.text).toContain("Resumed rule **R3**");
     const back = await handleMessage(freshSession(), "check hygiene");
-    expect(back.text).toBe("Found 5 things worth fixing:");
+    expect(back.text).toBe("Found 5 things worth a look — 3 in review, 2 in action:");
   });
 
   test("pausing twice is idempotent; unknown id is explained", async () => {
@@ -219,13 +231,13 @@ describe("playbook chat intents", () => {
   test("reload playbook reports counts and preserves flags", async () => {
     await handleMessage(freshSession(), "pause rule R2");
     const r = await handleMessage(freshSession(), "reload playbook");
-    expect(r.text).toContain("**11** built-in rules");
+    expect(r.text).toContain("**19** built-in rules");
     expect(r.text).toMatch(/paused\/active flags were kept/i);
     expect(loadRules().find((x) => x.id === "R2")!.active).toBe(false);
     // and R2 stays paused in hygiene output
     legacyFixture();
     const h = await handleMessage(freshSession(), "check hygiene");
-    expect(h.text).toBe("Found 4 things worth fixing:");
+    expect(h.text).toBe("Found 4 things worth a look — 2 in review, 2 in action:");
     expect(JSON.stringify(h.cards)).not.toContain("no value set");
   });
 });

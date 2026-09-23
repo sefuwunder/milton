@@ -13,6 +13,7 @@ import * as wss from "./workspace";
 import * as chats from "./chat_sessions";
 import * as reconRuns from "./recon_runs";
 import * as dealNotes from "./deal_notes";
+import * as outcomes from "./outcomes";
 import * as misses from "./intent_misses";
 import * as playbook from "./playbook";
 import { hookSecret } from "./hookauth";
@@ -83,7 +84,7 @@ export function enrichTickDecision(
   return "keep";
 }
 export interface ChoiceState {
-  kind: "deal" | "contact" | "company" | "task" | "workspace" | "session" | "stage" | "recon" | "prep" | "intent" | "field" | "enrich_target";
+  kind: "deal" | "contact" | "company" | "task" | "workspace" | "session" | "stage" | "recon" | "prep" | "intent" | "field" | "enrich_target" | "outcome";
   options: { id: number | string; n?: number; label: string; sub?: string }[];
   then: { action: string; payload: any };
 }
@@ -597,6 +598,7 @@ async function dispatchChoice(session: Session, ch: ChoiceState, id: number | st
     }
     return dispatch(session, intent2, { raw: cmd });
   }
+  if (ch.kind === "outcome") return outcomeChoice(session, ch, String(id));
   return { text: "I lost track of that choice — try the command again." };
 }
 
@@ -1973,7 +1975,7 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
     case "contacts": return contactsReply(s.search);
     case "companies": return companiesReply(s.search);
     case "brief": return briefReply();
-    case "hygiene": return withWidget(session, hygieneReply());
+    case "hygiene": return withWidget(session, hygieneReply(session));
     case "show_misses": return showMissesReply();
     case "review_miss": return reviewMissReply(s.id || "");
     case "dismiss_miss": return dismissMissReply(s.id || "");
@@ -2054,6 +2056,7 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
     case "delete_deal": return dealByName(session, s.query, "delete_deal", {});
     case "set_deal_field": return dealByName(session, s.query, "set_deal_field", { field: s.field, value: s.value });
     case "add_note": return addNoteReply(session, s);
+    case "log_outcome": return logOutcomeStart(session, (s.query || "").trim());
     case "add_campaign": return addCampaignReply(session, s);
 
     case "list_stages": return stagesReply();
@@ -2752,51 +2755,67 @@ async function briefReply(): Promise<Reply> {
   };
 }
 
-async function hygieneReply(): Promise<Reply> {
-  // Pipeline hygiene runs through the playbook rule engine: the five legacy
-  // checks are rules R1–R5 (their aggregate wording is byte-identical to the
-  // old hard-coded text), and R6/R7/R9 add at-risk/stall coverage on top.
-  // Advisory only — nothing here writes to the CRM.
+async function hygieneReply(session: Session): Promise<Reply> {
+  // Pipeline hygiene runs through the playbook rule engine. Every rule carries
+  // an explicit phase — review (prep & strategy), action (the touch),
+  // outcome (what came back) — and findings render grouped in that order.
+  // The five legacy checks are rules R1–R5; their aggregate wording is
+  // byte-identical to the old hard-coded text. Advisory only — nothing here
+  // writes to the CRM.
+  const ws = session.workspaceId ?? null;
   const [deals, tasks, activities, stages] = await Promise.all([
     crm.getDeals(), crm.getTasks(), crm.getActivities(), crm.getStages(),
   ]);
-  const findings: { icon: string; text: string; fix?: string }[] = [];
+  const items: { icon: string; text: string; fix?: string; phase: playbook.Phase }[] = [];
   const chips = ["Show pipeline", "My tasks"];
   try {
-    const facts = playbook.extractFacts({ deals, tasks, activities, stages, nowMs: Date.now() });
+    const noteCounts: Record<number, number> = {};
+    for (const d of deals) noteCounts[d.id] = dealNotes.countDealNotes(d.id, ws);
+    const facts = playbook.extractFacts({
+      deals, tasks, activities, stages, nowMs: Date.now(),
+      outcomes: outcomes.getAllOutcomes(ws), noteCounts,
+    });
     // loadRules() returns records with active flags; the engine only sees the
     // rules it's handed, so paused rules are filtered here.
     const rules = playbook.loadRules().filter((r) => r.active);
     const res = playbook.runPlaybook({ rules, facts });
-    // Legacy five first, in the legacy order — byte-identical wording.
-    for (const kind of ["no_close", "no_value", "stale", "no_contact", "overdue"]) {
-      const f = res.findings.find((x) => x.kind === kind);
-      if (f) findings.push({ icon: f.icon, text: f.text, ...(f.fix ? { fix: f.fix } : {}) });
+    // Phase-grouped: review → action → outcome. Within a phase the legacy
+    // five keep their legacy relative order and byte-identical wording, then
+    // newer findings, then suggestions (💡) — suggestions used to be
+    // chip-only, which hid the outcome phase's advice entirely.
+    const legacyOrder = ["no_close", "no_value", "stale", "no_contact", "overdue"];
+    for (const phase of playbook.PHASES) {
+      const fs = res.findings.filter((x) => x.phase === phase).sort((a, b) => {
+        const ai = legacyOrder.indexOf(a.kind), bi = legacyOrder.indexOf(b.kind);
+        return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+      });
+      for (const f of fs) items.push({ icon: f.icon, text: f.text, ...(f.fix ? { fix: f.fix } : {}), phase });
+      for (const s of res.suggestions.filter((x) => x.phase === phase)) {
+        items.push({ icon: "💡", text: s.text, phase });
+        for (const c of s.chips) if (!chips.includes(c)) chips.push(c);
+      }
     }
-    // Then any newer playbook findings (quiet deals, stalls, close-date fantasy…).
-    for (const f of res.findings) {
-      if (["no_close", "no_value", "stale", "no_contact", "overdue"].includes(f.kind)) continue;
-      findings.push({ icon: f.icon, text: f.text, ...(f.fix ? { fix: f.fix } : {}) });
-    }
-    for (const s of res.suggestions) for (const c of s.chips) if (!chips.includes(c)) chips.push(c);
   } catch {
     return { text: "The playbook couldn't run right now — try again in a moment.", chips: ["Morning brief"] };
   }
-  if (!findings.length) {
+  if (!items.length) {
     return { text: "Pipeline is clean — every open deal has a close date, a contact, and recent activity. Nice.", chips: ["Show pipeline", "Morning brief"] };
   }
+  const phaseCount = (p: playbook.Phase) => items.filter((i) => i.phase === p).length;
+  const bits = playbook.PHASES.map((p) => ({ p, n: phaseCount(p) }))
+    .filter((x) => x.n > 0).map((x) => `${x.n} in ${x.p}`);
   const hygieneWidget: crm.Widgetable = {
     kind: "list", title: "Pipeline hygiene", source: "milton:hygiene",
     payload: {
-      items: findings.slice(0, 15).map((f) => ({
+      items: items.slice(0, 15).map((f) => ({
         text: `${f.icon} ${f.text}`,
         ...(f.fix ? { sub: f.fix } : {}),
       })),
     },
   };
   return {
-    text: `Found ${findings.length} thing${findings.length === 1 ? "" : "s"} worth fixing:`,
-    cards: [{ kind: "findings", title: "Pipeline hygiene", items: findings }],
+    text: `Found ${items.length} thing${items.length === 1 ? "" : "s"} worth a look — ${bits.join(", ")}:`,
+    cards: [{ kind: "findings", title: "Pipeline hygiene", items }],
     chips,
     widget: hygieneWidget,
   };
@@ -2854,9 +2873,9 @@ function showPlaybookReply(): Reply {
   try { rules = playbook.listRules(); }
   catch { return { text: "The playbook isn't available right now.", chips: ["Help"] }; }
   const lines = rules.map((r) =>
-    `${r.active ? "✅" : "⏸️"} **${r.id}** · ${r.name} _(salience ${r.salience}${r.builtin ? "" : ", your override"})_`);
+    `${r.active ? "✅" : "⏸️"} **${r.id}** · ${r.name} _(${r.rule.phase}, salience ${r.salience}${r.builtin ? "" : ", your override"})_`);
   return {
-    text: `**Playbook rules (${rules.length}):**\n${lines.join("\n")}\n\nSay \`pause rule <id>\` or \`resume rule <id>\` to tune them, or \`reload playbook\` after editing the starter set. Your own rules go in \`playbook.user.json\` in the data dir — reload picks them up, upgrade-safe.`,
+    text: `**Playbook rules (${rules.length}) — review → action → outcome:**\n${lines.join("\n")}\n\nSay \`pause rule <id>\` or \`resume rule <id>\` to tune them, or \`reload playbook\` after editing the starter set. Your own rules go in \`playbook.user.json\` in the data dir — reload picks them up, upgrade-safe. New rules need a \`phase\`: \`review\`, \`action\`, or \`outcome\`.`,
     chips: ["Pipeline hygiene", "Reload playbook", "Help"],
   };
 }
@@ -2890,6 +2909,69 @@ function reloadPlaybookReply(): Reply {
   } catch {
     return { text: "Couldn't reload the playbook — the starter set may be invalid.", chips: ["Show playbook"] };
   }
+}
+
+// ---- outcome logging: guided method → outcome flow ------------------------------
+// The outcome phase of the playbook (R14–R18) reads the Milton-local outcome
+// log (outcomes.ts). `log outcome [for <deal>]` walks: deal → method →
+// outcome label, using the ProspectStream outcome taxonomy. Three taps, then
+// the engine folds it into pipeline hygiene on the next run.
+async function logOutcomeStart(session: Session, query: string): Promise<Reply> {
+  if (!query) {
+    return {
+      text: "Which deal is this outcome for? Name it — e.g. `log outcome for Acme` — or say `show pipeline` to pick one.",
+      chips: ["Show pipeline"],
+    };
+  }
+  return dealByName(session, query, "log_outcome_deal", {});
+}
+
+function outcomeMethodStep(session: Session, deal: crm.Deal): Reply {
+  const methods = Object.entries(outcomes.OUTCOME_METHODS);
+  session.choice = {
+    kind: "outcome",
+    options: methods.map(([id, m], i) => ({ id, n: i + 1, label: m.name })),
+    then: { action: "log_outcome_method", payload: { dealId: deal.id, dealTitle: deal.title } },
+  };
+  return {
+    text: `How did you reach out about "${deal.title}"?`,
+    cards: [{ kind: "choices", options: session.choice.options }],
+    chips: methods.map((_, i) => String(i + 1)),
+  };
+}
+
+async function outcomeChoice(session: Session, ch: ChoiceState, id: string): Promise<Reply> {
+  const { action, payload } = ch.then;
+  const ws = session.workspaceId ?? null;
+  if (action === "log_outcome_method") {
+    const def = outcomes.OUTCOME_METHODS[id];
+    if (!def) return { text: "I lost track of that choice — try the command again." };
+    session.choice = {
+      kind: "outcome",
+      options: def.labels.map((l, i) => ({
+        id: l.label, n: i + 1,
+        label: outcomes.humanizeLabel(l.label),
+        sub: l.category.replace(/_/g, " "),
+      })),
+      then: { action: "log_outcome_label", payload: { ...payload, method: id } },
+    };
+    return {
+      text: `What happened on the ${def.name.toLowerCase()}?`,
+      cards: [{ kind: "choices", options: session.choice.options }],
+      chips: def.labels.map((_, i) => String(i + 1)),
+    };
+  }
+  if (action === "log_outcome_label") {
+    const def = outcomes.OUTCOME_METHODS[payload.method];
+    const lab = def?.labels.find((l) => l.label === id);
+    if (!lab) return { text: "I lost track of that choice — try the command again." };
+    outcomes.logOutcome(payload.dealId, payload.method, lab.label, lab.category, ws);
+    return {
+      text: `Logged: ${outcomes.methodName(payload.method)} → ${outcomes.humanizeLabel(lab.label)} for "${payload.dealTitle}". Pipeline hygiene will fold it in — say \`log outcome\` for the next one, or \`note on ${payload.dealTitle}: …\` to add context.`,
+      chips: ["Log outcome", "Pipeline hygiene"],
+    };
+  }
+  return { text: "I lost track of that choice — try the command again." };
 }
 
 // Event-scoped playbook rules for incoming exec-crm webhooks (e.g. R8a/R8b win
@@ -3745,6 +3827,7 @@ async function stageAction(session: Session, action: string, stage: crm.Stage, p
 
 async function dealAction(session: Session, action: string, deal: crm.Deal, payload: any): Promise<Reply> {
   usability.trackMention(session.id, "deal", deal.id, deal.title);
+  if (action === "log_outcome_deal") return outcomeMethodStep(session, deal);
   if (action === "move_deal") {
     const from = deal.stage;
     const d = await crm.patchDeal(deal.id, { stage: payload.stage });

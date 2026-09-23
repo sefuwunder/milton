@@ -1,1 +1,704 @@
-[{"id":"R1","name":"Deal has no expected close date","salience":50,"then":[{"aggregate":"{n} deal{s} with no expected close date: {titles}","finding":"no_close","fix":"Set {first} close date to …","icon":"📅"}],"when":[{"all":[{"fact":"d.open","operator":"equal","value":true},{"fact":"d.expected_close","operator":"equal","value":""}],"as":"d","subject":"deal"}]},{"id":"R2","name":"Deal has no value","salience":50,"then":[{"aggregate":"{n} deal{s} with no value set: {titles}","finding":"no_value","fix":"Set {first} value to …","icon":"💰"}],"when":[{"all":[{"fact":"d.open","operator":"equal","value":true},{"fact":"d.value","operator":"equal","value":0}],"as":"d","subject":"deal"}]},{"id":"R3","name":"Stale deal","salience":55,"then":[{"aggregate":"{n} stale deal{s} untouched for 30+ days (oldest first): {titles}","finding":"stale","icon":"🕸️","orderBy":"-d.days_since_update"}],"when":[{"all":[{"fact":"d.open","operator":"equal","value":true},{"fact":"d.days_since_update","operator":"greaterThan","value":30}],"as":"d","subject":"deal"}]},{"id":"R4","name":"Deal has no contact","salience":50,"then":[{"aggregate":"{n} deal{s} with no contact attached: {titles}","finding":"no_contact","icon":"👤"}],"when":[{"all":[{"fact":"d.open","operator":"equal","value":true},{"fact":"d.contact_id","operator":"equal","value":null}],"as":"d","subject":"deal"}]},{"id":"R5","name":"Overdue task","salience":55,"then":[{"aggregate":"{n} overdue task{s}","finding":"overdue","icon":"⏰"}],"when":[{"all":[{"fact":"t.open","operator":"equal","value":true},{"fact":"t.overdue","operator":"equal","value":true}],"as":"t","subject":"task"}]},{"id":"R6","name":"Quiet negotiation","salience":80,"then":[{"finding":"quiet_negotiation","icon":"🚨","text":"{d.title} (${d.value}) is quiet in {d.stage} — no activity in 14 days."},{"assert":"at_risk","facts":{"deal_id":"{d.id}","reason":"quiet_negotiation","title":"{d.title}"}}],"when":[{"all":[{"fact":"d.open","operator":"equal","value":true},{"fact":"d.stage","operator":"in","value":["negotiation","proposal"]}],"as":"d","subject":"deal"},{"not":{"all":[{"fact":"activity.days_ago","operator":"lessThan","value":14}],"subject":"activity","where":{"ref_id":"$d.id","ref_type":"deal"}}}]},{"id":"R7","name":"High-value stall","salience":85,"then":[{"finding":"high_value_stall","fix":"Nudge {d.owner} to follow up on {d.title}","icon":"🚨","text":"{d.title} (${d.value}) is 2× past median dwell in {d.stage} with no activity in 14 days."},{"assert":"at_risk","facts":{"deal_id":"{d.id}","reason":"high_value_stall","title":"{d.title}"}}],"when":[{"all":[{"fact":"d.open","operator":"equal","value":true},{"fact":"d.value","operator":"greaterThan","value":10000}],"as":"d","subject":"deal"},{"all":[{"fact":"dwell.median_dwell","operator":"lessThan","value":"$d.days_since_update/2"}],"subject":"dwell","where":{"stage":"$d.stage"}},{"not":{"all":[{"fact":"activity.days_ago","operator":"lessThan","value":14}],"subject":"activity","where":{"ref_id":"$d.id","ref_type":"deal"}}}]},{"id":"R8a","name":"Win recorded","on":["deal.stage_changed"],"salience":70,"then":[{"assert":"won","facts":{"deal_id":"{event.deal_id}","title":"{event.deal_title}"}}],"when":[{"all":[{"fact":"event.name","operator":"equal","value":"deal.stage_changed"},{"fact":"event.stage_to","operator":"equal","value":"closed_won"}],"subject":"event"}]},{"id":"R8b","name":"Win follow-through","on":["deal.stage_changed"],"salience":70,"then":[{"chips":["Show pipeline","Morning brief"],"suggest":"🎉 {w.title} was won — ask for a referral and log the win story."}],"when":[{"all":[],"as":"w","subject":"won"}]},{"id":"R9","name":"Close-date fantasy","salience":80,"then":[{"finding":"close_date_fantasy","icon":"⚠️","text":"{d.title} closes in {d.days_until_close}d but is still in {d.stage} — is that date real?"}],"when":[{"all":[{"fact":"d.open","operator":"equal","value":true},{"fact":"d.days_until_close","operator":"greaterThanInclusive","value":0},{"fact":"d.days_until_close","operator":"lessThanInclusive","value":7},{"fact":"d.stage","operator":"in","value":["prospecting","qualification"]}],"as":"d","subject":"deal"}]},{"id":"R10","name":"Task pile-up","salience":50,"then":[{"chips":["Plan my day","My tasks"],"suggest":"{o.owner} has {o.overdue_count} overdue tasks — say `plan my day` or review reassignment."}],"when":[{"all":[{"fact":"o.overdue_count","operator":"greaterThanInclusive","value":5}],"as":"o","subject":"owner_load"}]}]
+[
+ {
+  "id": "R1",
+  "name": "Deal has no expected close date",
+  "salience": 50,
+  "then": [
+   {
+    "aggregate": "{n} deal{s} with no expected close date: {titles}",
+    "finding": "no_close",
+    "fix": "Set {first} close date to …",
+    "icon": "📅"
+   }
+  ],
+  "when": [
+   {
+    "all": [
+     {
+      "fact": "d.open",
+      "operator": "equal",
+      "value": true
+     },
+     {
+      "fact": "d.expected_close",
+      "operator": "equal",
+      "value": ""
+     }
+    ],
+    "as": "d",
+    "subject": "deal"
+   }
+  ],
+  "phase": "review"
+ },
+ {
+  "id": "R2",
+  "name": "Deal has no value",
+  "salience": 50,
+  "then": [
+   {
+    "aggregate": "{n} deal{s} with no value set: {titles}",
+    "finding": "no_value",
+    "fix": "Set {first} value to …",
+    "icon": "💰"
+   }
+  ],
+  "when": [
+   {
+    "all": [
+     {
+      "fact": "d.open",
+      "operator": "equal",
+      "value": true
+     },
+     {
+      "fact": "d.value",
+      "operator": "equal",
+      "value": 0
+     }
+    ],
+    "as": "d",
+    "subject": "deal"
+   }
+  ],
+  "phase": "review"
+ },
+ {
+  "id": "R3",
+  "name": "Stale deal",
+  "salience": 55,
+  "then": [
+   {
+    "aggregate": "{n} stale deal{s} untouched for 30+ days (oldest first): {titles}",
+    "finding": "stale",
+    "icon": "🕸️",
+    "orderBy": "-d.days_since_update"
+   }
+  ],
+  "when": [
+   {
+    "all": [
+     {
+      "fact": "d.open",
+      "operator": "equal",
+      "value": true
+     },
+     {
+      "fact": "d.days_since_update",
+      "operator": "greaterThan",
+      "value": 30
+     }
+    ],
+    "as": "d",
+    "subject": "deal"
+   }
+  ],
+  "phase": "action"
+ },
+ {
+  "id": "R4",
+  "name": "Deal has no contact",
+  "salience": 50,
+  "then": [
+   {
+    "aggregate": "{n} deal{s} with no contact attached: {titles}",
+    "finding": "no_contact",
+    "icon": "👤"
+   }
+  ],
+  "when": [
+   {
+    "all": [
+     {
+      "fact": "d.open",
+      "operator": "equal",
+      "value": true
+     },
+     {
+      "fact": "d.contact_id",
+      "operator": "equal",
+      "value": null
+     }
+    ],
+    "as": "d",
+    "subject": "deal"
+   }
+  ],
+  "phase": "review"
+ },
+ {
+  "id": "R5",
+  "name": "Overdue task",
+  "salience": 55,
+  "then": [
+   {
+    "aggregate": "{n} overdue task{s}",
+    "finding": "overdue",
+    "icon": "⏰"
+   }
+  ],
+  "when": [
+   {
+    "all": [
+     {
+      "fact": "t.open",
+      "operator": "equal",
+      "value": true
+     },
+     {
+      "fact": "t.overdue",
+      "operator": "equal",
+      "value": true
+     }
+    ],
+    "as": "t",
+    "subject": "task"
+   }
+  ],
+  "phase": "action"
+ },
+ {
+  "id": "R6",
+  "name": "Quiet negotiation",
+  "salience": 80,
+  "then": [
+   {
+    "finding": "quiet_negotiation",
+    "icon": "🚨",
+    "text": "{d.title} (${d.value}) is quiet in {d.stage} — no activity in 14 days."
+   },
+   {
+    "assert": "at_risk",
+    "facts": {
+     "deal_id": "{d.id}",
+     "reason": "quiet_negotiation",
+     "title": "{d.title}"
+    }
+   }
+  ],
+  "when": [
+   {
+    "all": [
+     {
+      "fact": "d.open",
+      "operator": "equal",
+      "value": true
+     },
+     {
+      "fact": "d.stage",
+      "operator": "in",
+      "value": [
+       "negotiation",
+       "proposal"
+      ]
+     }
+    ],
+    "as": "d",
+    "subject": "deal"
+   },
+   {
+    "not": {
+     "all": [
+      {
+       "fact": "activity.days_ago",
+       "operator": "lessThan",
+       "value": 14
+      }
+     ],
+     "subject": "activity",
+     "where": {
+      "ref_id": "$d.id",
+      "ref_type": "deal"
+     }
+    }
+   }
+  ],
+  "phase": "action"
+ },
+ {
+  "id": "R7",
+  "name": "High-value stall",
+  "salience": 85,
+  "then": [
+   {
+    "finding": "high_value_stall",
+    "fix": "Nudge {d.owner} to follow up on {d.title}",
+    "icon": "🚨",
+    "text": "{d.title} (${d.value}) is 2× past median dwell in {d.stage} with no activity in 14 days."
+   },
+   {
+    "assert": "at_risk",
+    "facts": {
+     "deal_id": "{d.id}",
+     "reason": "high_value_stall",
+     "title": "{d.title}"
+    }
+   }
+  ],
+  "when": [
+   {
+    "all": [
+     {
+      "fact": "d.open",
+      "operator": "equal",
+      "value": true
+     },
+     {
+      "fact": "d.value",
+      "operator": "greaterThan",
+      "value": 10000
+     }
+    ],
+    "as": "d",
+    "subject": "deal"
+   },
+   {
+    "all": [
+     {
+      "fact": "dwell.median_dwell",
+      "operator": "lessThan",
+      "value": "$d.days_since_update/2"
+     }
+    ],
+    "subject": "dwell",
+    "where": {
+     "stage": "$d.stage"
+    }
+   },
+   {
+    "not": {
+     "all": [
+      {
+       "fact": "activity.days_ago",
+       "operator": "lessThan",
+       "value": 14
+      }
+     ],
+     "subject": "activity",
+     "where": {
+      "ref_id": "$d.id",
+      "ref_type": "deal"
+     }
+    }
+   }
+  ],
+  "phase": "action"
+ },
+ {
+  "id": "R8a",
+  "name": "Win recorded",
+  "on": [
+   "deal.stage_changed"
+  ],
+  "salience": 70,
+  "then": [
+   {
+    "assert": "won",
+    "facts": {
+     "deal_id": "{event.deal_id}",
+     "title": "{event.deal_title}"
+    }
+   }
+  ],
+  "when": [
+   {
+    "all": [
+     {
+      "fact": "event.name",
+      "operator": "equal",
+      "value": "deal.stage_changed"
+     },
+     {
+      "fact": "event.stage_to",
+      "operator": "equal",
+      "value": "closed_won"
+     }
+    ],
+    "subject": "event"
+   }
+  ],
+  "phase": "outcome"
+ },
+ {
+  "id": "R8b",
+  "name": "Win follow-through",
+  "on": [
+   "deal.stage_changed"
+  ],
+  "salience": 70,
+  "then": [
+   {
+    "chips": [
+     "Show pipeline",
+     "Morning brief"
+    ],
+    "suggest": "🎉 {w.title} was won — ask for a referral and log the win story."
+   }
+  ],
+  "when": [
+   {
+    "all": [],
+    "as": "w",
+    "subject": "won"
+   }
+  ],
+  "phase": "outcome"
+ },
+ {
+  "id": "R9",
+  "name": "Close-date fantasy",
+  "salience": 80,
+  "then": [
+   {
+    "finding": "close_date_fantasy",
+    "icon": "⚠️",
+    "text": "{d.title} closes in {d.days_until_close}d but is still in {d.stage} — is that date real?"
+   }
+  ],
+  "when": [
+   {
+    "all": [
+     {
+      "fact": "d.open",
+      "operator": "equal",
+      "value": true
+     },
+     {
+      "fact": "d.days_until_close",
+      "operator": "greaterThanInclusive",
+      "value": 0
+     },
+     {
+      "fact": "d.days_until_close",
+      "operator": "lessThanInclusive",
+      "value": 7
+     },
+     {
+      "fact": "d.stage",
+      "operator": "in",
+      "value": [
+       "prospecting",
+       "qualification"
+      ]
+     }
+    ],
+    "as": "d",
+    "subject": "deal"
+   }
+  ],
+  "phase": "review"
+ },
+ {
+  "id": "R10",
+  "name": "Task pile-up",
+  "salience": 50,
+  "then": [
+   {
+    "chips": [
+     "Plan my day",
+     "My tasks"
+    ],
+    "suggest": "{o.owner} has {o.overdue_count} overdue tasks — say `plan my day` or review reassignment."
+   }
+  ],
+  "when": [
+   {
+    "all": [
+     {
+      "fact": "o.overdue_count",
+      "operator": "greaterThanInclusive",
+      "value": 5
+     }
+    ],
+    "as": "o",
+    "subject": "owner_load"
+   }
+  ],
+  "phase": "action"
+ },
+ {
+  "id": "R11",
+  "name": "High-value deal with no research",
+  "phase": "review",
+  "salience": 60,
+  "when": [
+   {
+    "as": "d",
+    "subject": "deal",
+    "all": [
+     {
+      "fact": "d.open",
+      "operator": "equal",
+      "value": true
+     },
+     {
+      "fact": "d.value",
+      "operator": "greaterThan",
+      "value": 10000
+     },
+     {
+      "fact": "d.contact_id",
+      "operator": "notEqual",
+      "value": null
+     },
+     {
+      "fact": "d.note_count",
+      "operator": "equal",
+      "value": 0
+     }
+    ]
+   }
+  ],
+  "then": [
+   {
+    "finding": "unresearched",
+    "icon": "🔍",
+    "text": "{d.title} (${d.value}) is high-value but has no notes on file — research the prospect before the next touch.",
+    "fix": "Pin what you learn with `note on {d.title}: …`"
+   }
+  ]
+ },
+ {
+  "id": "R12",
+  "name": "Deal with no plan",
+  "phase": "review",
+  "salience": 55,
+  "when": [
+   {
+    "as": "d",
+    "subject": "deal",
+    "all": [
+     {
+      "fact": "d.open",
+      "operator": "equal",
+      "value": true
+     },
+     {
+      "fact": "d.days_since_update",
+      "operator": "lessThanInclusive",
+      "value": 30
+     }
+    ]
+   },
+   {
+    "not": {
+     "as": "task",
+     "subject": "task",
+     "where": {
+      "deal_id": "$d.id"
+     },
+     "all": [
+      {
+       "fact": "task.open",
+       "operator": "equal",
+       "value": true
+      }
+     ]
+    }
+   }
+  ],
+  "then": [
+   {
+    "finding": "no_plan",
+    "icon": "🧭",
+    "text": "{d.title} has no open tasks — no plan. Develop the strategy before acting.",
+    "fix": "Add the next step with `add task …`"
+   }
+  ]
+ },
+ {
+  "id": "R13",
+  "name": "Early pipeline going quiet",
+  "phase": "action",
+  "salience": 60,
+  "when": [
+   {
+    "as": "d",
+    "subject": "deal",
+    "all": [
+     {
+      "fact": "d.open",
+      "operator": "equal",
+      "value": true
+     },
+     {
+      "fact": "d.stage",
+      "operator": "in",
+      "value": [
+       "prospecting",
+       "qualification"
+      ]
+     },
+     {
+      "fact": "d.days_since_update",
+      "operator": "greaterThan",
+      "value": 14
+     },
+     {
+      "fact": "d.days_since_update",
+      "operator": "lessThanInclusive",
+      "value": 30
+     }
+    ]
+   }
+  ],
+  "then": [
+   {
+    "finding": "quiet_early",
+    "icon": "📣",
+    "text": "{d.title} is quiet in {d.stage} — 14+ days with no touch logged. Time for the next action.",
+    "fix": "Log the touch with `log outcome for {d.title}`"
+   }
+  ]
+ },
+ {
+  "id": "R14",
+  "name": "Touches without conversation",
+  "phase": "action",
+  "salience": 70,
+  "when": [
+   {
+    "as": "s",
+    "subject": "deal_outcome",
+    "all": [
+     {
+      "fact": "s.touch_count",
+      "operator": "greaterThanInclusive",
+      "value": 3
+     },
+     {
+      "fact": "s.conversation_count",
+      "operator": "equal",
+      "value": 0
+     }
+    ]
+   }
+  ],
+  "then": [
+   {
+    "suggest": "{s.touch_count} touches on {s.title} and still no conversation — rotate the channel or pause it before it goes stale.",
+    "chips": [
+     "Log outcome",
+     "Show pipeline"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "R15",
+  "name": "Voicemail callback",
+  "phase": "outcome",
+  "salience": 75,
+  "when": [
+   {
+    "as": "s",
+    "subject": "deal_outcome",
+    "all": [
+     {
+      "fact": "s.last_label",
+      "operator": "equal",
+      "value": "voicemail"
+     },
+     {
+      "fact": "s.last_days_ago",
+      "operator": "lessThanInclusive",
+      "value": 7
+     }
+    ]
+   }
+  ],
+  "then": [
+   {
+    "suggest": "📞 {s.title}: voicemail left {s.last_days_ago}d ago — call back in 3 days. Voicemail plus a 3-day callback is gold.",
+    "chips": [
+     "Add task",
+     "Log outcome"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "R16",
+  "name": "Bounced email",
+  "phase": "outcome",
+  "salience": 80,
+  "when": [
+   {
+    "as": "s",
+    "subject": "deal_outcome",
+    "all": [
+     {
+      "fact": "s.last_label",
+      "operator": "equal",
+      "value": "bounced"
+     }
+    ]
+   }
+  ],
+  "then": [
+   {
+    "suggest": "📧 Email to {s.title} bounced — verify the address or redirect to another contact before the next touch.",
+    "chips": [
+     "List contacts",
+     "Log outcome"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "R17",
+  "name": "Meeting set, prep the brief",
+  "phase": "outcome",
+  "salience": 70,
+  "when": [
+   {
+    "as": "s",
+    "subject": "deal_outcome",
+    "all": [
+     {
+      "fact": "s.last_label",
+      "operator": "equal",
+      "value": "meeting_scheduled"
+     }
+    ]
+   }
+  ],
+  "then": [
+   {
+    "suggest": "📅 Meeting set for {s.title} — run a prep brief on the contact before you walk in.",
+    "chips": [
+     "Log outcome",
+     "Show pipeline"
+    ]
+   }
+  ]
+ },
+ {
+  "id": "R18",
+  "name": "No-interest fork",
+  "phase": "outcome",
+  "salience": 65,
+  "when": [
+   {
+    "as": "s",
+    "subject": "deal_outcome",
+    "all": [
+     {
+      "fact": "s.last_category",
+      "operator": "equal",
+      "value": "retired"
+     }
+    ]
+   }
+  ],
+  "then": [
+   {
+    "suggest": "{s.title} came back no-interest — retire the record, or recycle it for a later push. Your call either way.",
+    "chips": [
+     "Show pipeline",
+     "Log outcome"
+    ]
+   }
+  ]
+ }
+]
