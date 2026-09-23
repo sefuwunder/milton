@@ -14,6 +14,7 @@ import * as chats from "./chat_sessions";
 import * as reconRuns from "./recon_runs";
 import * as dealNotes from "./deal_notes";
 import * as outcomes from "./outcomes";
+import * as odef from "./outcome_defs";
 import * as misses from "./intent_misses";
 import * as playbook from "./playbook";
 import { hookSecret } from "./hookauth";
@@ -444,6 +445,11 @@ async function handleMessageScoped(session: Session, raw: string, opts: MessageO
     const p = session.pending; session.pending = undefined;
     return dealByName(session, raw, "save_note", { text: p.payload.text, uploadId: p.payload.uploadId });
   }
+  // The outcome multi-select / note steps advertise `none` as an answer, but
+  // the fuzzy parser reads the bare word "none" as confirm_no. Let the exact
+  // word through on the steps where it is a valid answer.
+  const rawIsNoneAnswer = raw.trim().toLowerCase() === "none";
+  const notCancel = intent.name !== "confirm_no" || rawIsNoneAnswer;
   // 2c) resolve a pending delete-stage target: the reply names the stage that
   // receives the doomed stage's deals. Anything but cancel is read as a stage name.
   if (session.pending?.type === "delete_stage_target" && intent.name !== "confirm_no") {
@@ -483,6 +489,103 @@ async function handleMessageScoped(session: Session, raw: string, opts: MessageO
       };
     }
     return createCampaignReply(p.payload.name, ms[0].item.id, ms[0].item.name);
+  }
+  // 2f) outcome-definition builder free-text steps ("Create outcome" screen).
+  if (session.pending?.type === "create_outcome_name" && intent.name !== "confirm_no") {
+    const name = raw.trim();
+    if (!name) return { text: "Give the outcome a name — e.g. `Voicemail`.", chips: ["Cancel"] };
+    const ws = session.workspaceId ?? null;
+    if (odef.listOutcomeDefs(ws).some((d) => d.name.toLowerCase() === name.toLowerCase()))
+      return { text: `There's already an outcome called "${name}" — pick another name.`, chips: ["Cancel"] };
+    session.pending = undefined;
+    return createOutcomeCycleStep(session, name);
+  }
+  if (session.pending?.type === "create_outcome_recycle" && intent.name !== "confirm_no") {
+    const n = odef.parseRecycleDays(raw);
+    if (n === null)
+      return { text: `I need a day count (1–365) for the Default Recycle Period — the doc's example uses 3.`, chips: ["Cancel"] };
+    const p = session.pending; session.pending = undefined;
+    return createOutcomeFunctionsStep(session, { ...p.payload.def, default_recycle_days: n });
+  }
+  if (session.pending?.type === "create_outcome_functions" && notCancel) {
+    const r = odef.parseMultiSelect(raw, odef.OUTCOME_FUNCTIONS);
+    if ("error" in r)
+      return { text: "I didn't get that — reply with numbers like `1 3`, `all`, or `none`.\n" + outcomeFunctionsPrompt(), chips: ["Cancel"] };
+    const p = session.pending; session.pending = undefined;
+    return createOutcomeActionsStep(session, { ...p.payload.def, functions: r.ids });
+  }
+  if (session.pending?.type === "create_outcome_actions" && notCancel) {
+    const r = odef.parseMultiSelect(raw, odef.APPLICABLE_ACTIONS);
+    if ("error" in r)
+      return { text: "I didn't get that — reply with numbers like `1 2 6`, `all`, or `none`.\n" + outcomeActionsPrompt(), chips: ["Cancel"] };
+    const p = session.pending; session.pending = undefined;
+    return createOutcomeConfirm(session, { ...p.payload.def, applicable_actions: r.ids });
+  }
+  // 2g) "Activate outcome" free-text steps.
+  if (session.pending?.type === "activate_outcome_deal" && intent.name !== "confirm_no") {
+    const p = session.pending; session.pending = undefined;
+    return dealByName(session, raw, "activate_outcome_deal", { defId: p.payload.defId });
+  }
+  if (session.pending?.type === "activate_outcome_recycle" && intent.name !== "confirm_no") {
+    const p = session.pending;
+    const t = raw.trim().toLowerCase();
+    const d = /^(ok|yes|default|same)$/.test(t) ? p.payload.defDate : parseDate(raw);
+    if (!d) return { text: `I couldn't read "${raw.trim()}" as a date — try \`09/28/2026\`, \`Friday\`, or \`ok\` for the default (${odef.fmtMDY(p.payload.defDate)}).`, chips: ["Cancel"] };
+    session.pending = undefined;
+    return activateOutcomeSteps(session, { ...p.payload.act, recycleDate: d });
+  }
+  if (session.pending?.type === "activate_outcome_appt_start" && intent.name !== "confirm_no") {
+    const dt = odef.parseOutcomeDateTime(raw, parseDate);
+    if (!dt) return { text: `I need a date and time — e.g. \`09/28/2026 2:30 pm\` or \`tomorrow 10am\`.`, chips: ["Cancel"] };
+    const p = session.pending; session.pending = undefined;
+    return activateOutcomeSteps(session, { ...p.payload.act, apptStart: dt });
+  }
+  if (session.pending?.type === "activate_outcome_appt_end" && intent.name !== "confirm_no") {
+    const p = session.pending;
+    const dt = odef.parseOutcomeDateTime(raw, parseDate);
+    const start = p.payload.act.apptStart as { date: string; time: string };
+    if (!dt) return { text: `I need a date and time — e.g. \`09/28/2026 3:30 pm\`.`, chips: ["Cancel"] };
+    if (dt.date < start.date || (dt.date === start.date && dt.time <= start.time))
+      return { text: `The end (${odef.fmtMDYTime(dt.date, dt.time)}) has to be after the start (${odef.fmtMDYTime(start.date, start.time)}). Try again.`, chips: ["Cancel"] };
+    session.pending = undefined;
+    return activateOutcomeSteps(session, { ...p.payload.act, apptEnd: dt });
+  }
+  if (session.pending?.type === "activate_outcome_reassign" && notCancel) {
+    const p = session.pending; session.pending = undefined;
+    const t = raw.trim();
+    if (/^(skip|none)$/i.test(t)) return activateOutcomeSteps(session, { ...p.payload.act, ownerSkipped: true });
+    if (!t) return activateOutcomeSteps(session, { ...p.payload.act, ownerSkipped: true });
+    return activateOutcomeSteps(session, { ...p.payload.act, owner: t.slice(0, 80) });
+  }
+  if (session.pending?.type === "activate_outcome_redirect" && notCancel) {
+    const p = session.pending;
+    const t = raw.trim();
+    if (/^(skip|none)$/i.test(t) || !t) { session.pending = undefined; return activateOutcomeSteps(session, { ...p.payload.act, redirectSkipped: true }); }
+    const ms = await crm.resolveContact(t);
+    if (!ms.length) return { text: `No contact matching "${t}" — try another name, or \`skip\`.`, chips: ["Cancel"] };
+    const [top, second] = [ms[0], ms[1]];
+    if (top.score >= 70 && (!second || top.score - second.score >= 20)) {
+      session.pending = undefined;
+      return activateOutcomeSteps(session, { ...p.payload.act, contactId: top.item.id, contactName: top.item.name });
+    }
+    session.pending = undefined;
+    const options = ms.slice(0, 5).map((m, i) => ({ id: m.item.id, n: i + 1, label: m.item.name, sub: m.item.company_name || m.item.email || undefined }));
+    session.choice = {
+      kind: "outcome",
+      options, then: { action: "activate_outcome_redirect_pick", payload: { act: p.payload.act, contacts: ms.slice(0, 5).map((m) => ({ id: m.item.id, name: m.item.name })) } },
+    };
+    return {
+      text: `A few contacts match — redirect to which one?`,
+      cards: [{ kind: "choices", options: session.choice.options }],
+      chips: options.map((o) => String(o.n)),
+    };
+  }
+  if (session.pending?.type === "activate_outcome_note" && notCancel) {
+    const p = session.pending; session.pending = undefined;
+    const t = raw.trim();
+    // A bare "yes" means "carry on" rather than a literal note.
+    const note = intent.name === "confirm_yes" || /^(skip|none)$/i.test(t) ? "" : t.slice(0, 2000);
+    return activateOutcomeSteps(session, { ...p.payload.act, note });
   }
   if (session.pending) {
     if (intent.name === "confirm_yes") {
@@ -637,6 +740,31 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
     await crm.deleteCustomField(p.payload.id);
     return { text: `Deleted custom field ${p.label}.`, chips: ["Help"] };
   }
+  // ---- outcome definitions: CONFIRM saves the built definition ----
+  if (p.type === "create_outcome") {
+    const ws = session.workspaceId ?? null;
+    try {
+      const created = odef.createOutcomeDef(p.payload.def as odef.NewOutcomeDef, ws);
+      return {
+        text: `✅ Outcome created:\n${odef.describeDef(created)}\n\nRun it with \`activate outcome ${created.name} for <deal>\`.`,
+        chips: ["Outcomes", "Create outcome"],
+      };
+    } catch (e: any) {
+      const msg = String(e?.message || "");
+      if (msg.includes("duplicate_name"))
+        return { text: `There's already an outcome called "${p.label}" — say \`show outcome ${p.label}\` to see it.`, chips: ["Outcomes"] };
+      throw e;
+    }
+  }
+  if (p.type === "delete_outcome_def") {
+    const ws = session.workspaceId ?? null;
+    const gone = odef.deleteOutcomeDef(p.payload.id, ws);
+    return { text: gone ? `Deleted outcome "${p.label}".` : `"${p.label}" was already gone.`, chips: ["Outcomes"] };
+  }
+  // ---- "Activate outcome" SUBMIT: log + cycle-action effects ----
+  if (p.type === "activate_outcome_submit") {
+    return activateOutcomeSubmit(session, p.payload.act as ActivateState);
+  }
   if (p.type === "delete_stage") {
     await crm.deleteStage(p.payload.slug, p.payload.moveTo);
     const moved = p.payload.moveTo ? ` ${p.payload.deals} deal(s) moved to "${p.payload.moveToName}".` : "";
@@ -699,7 +827,7 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
 // ---- automations: routines, schedules, triggers ------------------------------------
 // Intents that currently ask for confirmation before acting. Routine steps resolving
 // to these never auto-confirm: interactive runs ask once up front, unattended runs skip.
-const DESTRUCTIVE_PENDING = new Set(["delete_deal", "delete_task", "close_lost", "close_won", "delete_stage", "delete_chat_session", "delete_custom_field"]);
+const DESTRUCTIVE_PENDING = new Set(["delete_deal", "delete_task", "close_lost", "close_won", "delete_stage", "delete_chat_session", "delete_custom_field", "delete_outcome_def"]);
 
 function isDestructiveIntent(intent: Intent): boolean {
   if (intent.name === "delete_deal" || intent.name === "delete_task" || intent.name === "delete_stage") return true;
@@ -2057,6 +2185,11 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
     case "set_deal_field": return dealByName(session, s.query, "set_deal_field", { field: s.field, value: s.value });
     case "add_note": return addNoteReply(session, s);
     case "log_outcome": return logOutcomeStart(session, (s.query || "").trim());
+    case "create_outcome": return createOutcomeStart(session, (s.name || "").trim());
+    case "list_outcomes": return listOutcomesReply(session);
+    case "show_outcome": return showOutcomeReply(session, (s.name || "").trim());
+    case "delete_outcome": return deleteOutcomeStart(session, (s.name || "").trim());
+    case "activate_outcome": return activateOutcomeStart(session, (s.name || "").trim(), (s.deal || "").trim());
     case "add_campaign": return addCampaignReply(session, s);
 
     case "list_stages": return stagesReply();
@@ -3006,7 +3139,395 @@ async function outcomeChoice(session: Session, ch: ChoiceState, id: string): Pro
       chips: ["Log outcome", "Pipeline hygiene"],
     };
   }
+  // ---- outcome-definition builder + activation choices ----
+  if (action === "create_outcome_cycle") {
+    const a = odef.CYCLE_ACTIONS.find((x) => x.id === id);
+    if (!a) return { text: "I lost track of that choice — try the command again." };
+    const name = String(payload.name);
+    if (a.id === "recycle") {
+      session.pending = { type: "create_outcome_recycle", label: name, payload: { def: { name, cycle_action: "recycle" } } };
+      return { text: "**Default Recycle Period** — how many days until the contact cycles back? (the doc's example uses 3)", chips: ["Cancel"] };
+    }
+    if (a.id === "complete") {
+      session.choice = {
+        kind: "outcome",
+        options: odef.COMPLETION_REASONS.map((r, i) => ({ id: r.id, n: i + 1, label: r.label })),
+        then: { action: "create_outcome_reason", payload: { name, cycle_action: "complete" } },
+      };
+      return {
+        text: "**Completion Reason** — pick one:",
+        cards: [{ kind: "choices", options: session.choice.options }],
+        chips: ["1", "2"],
+      };
+    }
+    return createOutcomeFunctionsStep(session, { name, cycle_action: a.id });
+  }
+  if (action === "create_outcome_reason") {
+    if (!odef.COMPLETION_REASONS.some((r) => r.id === id)) return { text: "I lost track of that choice — try the command again." };
+    return createOutcomeFunctionsStep(session, { name: String(payload.name), cycle_action: "complete", completion_reason: String(id) });
+  }
+  if (action === "show_outcome_def") {
+    const d = odef.getOutcomeDef(Number(id), ws);
+    if (!d) return { text: "That outcome seems to be gone — say `outcomes` to see the current list." };
+    return { text: odef.describeDef(d), chips: ["Outcomes"] };
+  }
+  if (action === "delete_outcome_def") {
+    const d = odef.getOutcomeDef(Number(id), ws);
+    if (!d) return { text: "That outcome seems to be gone." };
+    return requestDeleteOutcomeDef(session, d);
+  }
+  if (action === "activate_outcome_def") {
+    const d = odef.getOutcomeDef(Number(id), ws);
+    if (!d) return { text: "That outcome seems to be gone — say `outcomes` to see the current list." };
+    return activateOutcomeDeal(session, d, payload.deal || "");
+  }
+  if (action === "activate_outcome_reason") {
+    if (!odef.COMPLETION_REASONS.some((r) => r.id === id)) return { text: "I lost track of that choice — try the command again." };
+    return activateOutcomeSteps(session, { ...payload.act, completionReason: String(id) });
+  }
+  if (action === "activate_outcome_stage") {
+    const act = payload.act as ActivateState;
+    if (id === "none") return activateOutcomeSteps(session, { ...act, stageAsked: true });
+    const st = (await crm.getStages()).find((s) => s.slug === String(id));
+    if (!st) return { text: "That stage seems to be gone — try the activation again." };
+    return activateOutcomeSteps(session, { ...act, stageAsked: true, stageSlug: st.slug, stageName: st.name });
+  }
+  if (action === "activate_outcome_redirect_pick") {
+    const c = (payload.contacts as { id: number; name: string }[]).find((x) => x.id === Number(id));
+    if (!c) return { text: "I lost track of that choice — try the command again." };
+    return activateOutcomeSteps(session, { ...payload.act, contactId: c.id, contactName: c.name });
+  }
   return { text: "I lost track of that choice — try the command again." };
+}
+
+// ---- outcome definitions: the "Create outcome" screen as a chat workflow ----
+// Mirrors the doc's builder: Name → Contact Cycle Action → conditional
+// (Default Recycle Period | Completion Reason) → Functions (multi-select) →
+// Applicable actions (multi-select) → CONFIRM. Definitions persist in
+// Milton's SQLite (outcome_defs.ts), workspace-scoped.
+
+async function createOutcomeStart(session: Session, name: string): Promise<Reply> {
+  const ws = session.workspaceId ?? null;
+  if (!name) {
+    session.pending = { type: "create_outcome_name", label: "new outcome", payload: {} };
+    return {
+      text: "Let's build an outcome — the doc's **Create outcome** screen, as a chat.\nWhat should it be called? (e.g. `Voicemail`, `No interest`)",
+      chips: ["Cancel"],
+    };
+  }
+  if (odef.listOutcomeDefs(ws).some((d) => d.name.toLowerCase() === name.toLowerCase()))
+    return { text: `There's already an outcome called "${name}". Say \`show outcome ${name}\` to see it, or pick another name.`, chips: ["Outcomes"] };
+  return createOutcomeCycleStep(session, name);
+}
+
+function createOutcomeCycleStep(session: Session, name: string): Reply {
+  session.choice = {
+    kind: "outcome",
+    options: odef.CYCLE_ACTIONS.map((a, i) => ({ id: a.id, n: i + 1, label: a.label })),
+    then: { action: "create_outcome_cycle", payload: { name } },
+  };
+  return {
+    text: `**${name}** — Contact Cycle Action: what happens to the contact's cycle when this outcome fires?`,
+    cards: [{ kind: "choices", options: session.choice.options }],
+    chips: odef.CYCLE_ACTIONS.map((_, i) => String(i + 1)),
+  };
+}
+
+function outcomeFunctionsPrompt(): string {
+  return `**Functions** — which automations apply? Reply with numbers (e.g. \`1 3\`), \`all\`, or \`none\`:\n` +
+    odef.OUTCOME_FUNCTIONS.map((f, i) => `${i + 1}) ${f.label}`).join("\n");
+}
+
+function outcomeActionsPrompt(): string {
+  return `**Applicable actions** — which outreach actions can this outcome attach to? Reply with numbers (e.g. \`1 2 6\`), \`all\`, or \`none\`:\n` +
+    odef.APPLICABLE_ACTIONS.map((a, i) => `${i + 1}) ${a.label}`).join("\n");
+}
+
+function createOutcomeFunctionsStep(session: Session, def: odef.NewOutcomeDef): Reply {
+  session.pending = { type: "create_outcome_functions", label: def.name, payload: { def } };
+  return { text: outcomeFunctionsPrompt(), chips: ["Cancel"] };
+}
+
+function createOutcomeActionsStep(session: Session, def: odef.NewOutcomeDef): Reply {
+  session.pending = { type: "create_outcome_actions", label: def.name, payload: { def } };
+  return { text: outcomeActionsPrompt(), chips: ["Cancel"] };
+}
+
+function createOutcomeConfirm(session: Session, def: odef.NewOutcomeDef): Reply {
+  session.pending = { type: "create_outcome", label: def.name, payload: { def } };
+  const preview: odef.OutcomeDef = {
+    id: 0, name: def.name, cycle_action: def.cycle_action,
+    default_recycle_days: def.default_recycle_days ?? null,
+    completion_reason: def.completion_reason ?? null,
+    functions: def.functions ?? [], applicable_actions: def.applicable_actions ?? [],
+    created_at: "",
+  };
+  return {
+    text: `Here's the outcome — CONFIRM to save it:\n${odef.describeDef(preview)}`,
+    cards: [{ kind: "confirm", options: [{ n: 1, label: "Confirm — save outcome" }, { n: 2, label: "Cancel" }] }],
+    chips: ["Yes", "No"],
+  };
+}
+
+function listOutcomesReply(session: Session): Reply {
+  const defs = odef.listOutcomeDefs(session.workspaceId ?? null);
+  if (!defs.length)
+    return { text: "No outcome definitions yet — say `create outcome` to build the first one.", chips: ["Create outcome"] };
+  const lines = defs.map((d, i) =>
+    `${i + 1}. **${d.name}** — ${odef.cycleActionLabel(d.cycle_action)}${d.functions.length ? ` · ${d.functions.map(odef.functionLabel).join(", ")}` : ""}`);
+  return {
+    text: `**Outcome definitions**\n${lines.join("\n")}\n\nSay \`show outcome <name>\` for the full card, or \`activate outcome <name> for <deal>\` to run one.`,
+    chips: ["Create outcome"],
+  };
+}
+
+function showOutcomeReply(session: Session, name: string): Reply {
+  const defs = odef.findOutcomeDefs(name, session.workspaceId ?? null);
+  if (!defs.length) return { text: `No outcome matching "${name}". Say \`outcomes\` to see them all.`, chips: ["Outcomes", "Create outcome"] };
+  if (defs.length > 1) {
+    const options = defs.slice(0, 5).map((d, i) => ({ id: d.id, n: i + 1, label: d.name, sub: odef.cycleActionLabel(d.cycle_action) }));
+    session.choice = { kind: "outcome", options, then: { action: "show_outcome_def", payload: {} } };
+    return {
+      text: "A few outcomes match — which one?",
+      cards: [{ kind: "choices", options }],
+      chips: options.map((o) => String(o.n)),
+    };
+  }
+  return { text: odef.describeDef(defs[0]), chips: ["Outcomes", "Create outcome"] };
+}
+
+function deleteOutcomeStart(session: Session, name: string): Reply {
+  const ws = session.workspaceId ?? null;
+  const defs = odef.findOutcomeDefs(name, ws);
+  if (!defs.length) return { text: `No outcome matching "${name}".`, chips: ["Outcomes"] };
+  const exact = defs.find((d) => d.name.toLowerCase() === name.toLowerCase()) ?? (defs.length === 1 ? defs[0] : undefined);
+  if (exact) return requestDeleteOutcomeDef(session, exact);
+  const options = defs.slice(0, 5).map((d, i) => ({ id: d.id, n: i + 1, label: d.name, sub: odef.cycleActionLabel(d.cycle_action) }));
+  session.choice = { kind: "outcome", options, then: { action: "delete_outcome_def", payload: {} } };
+  return {
+    text: "A few outcomes match — delete which one?",
+    cards: [{ kind: "choices", options }],
+    chips: options.map((o) => String(o.n)),
+  };
+}
+
+function requestDeleteOutcomeDef(session: Session, d: odef.OutcomeDef): Reply {
+  session.pending = { type: "delete_outcome_def", label: d.name, payload: { id: d.id } };
+  return {
+    text: `Delete outcome "${d.name}"? This can't be undone.`,
+    cards: [{ kind: "confirm", options: [{ n: 1, label: "Yes, delete" }, { n: 2, label: "Cancel" }] }],
+    chips: ["Yes", "No"],
+  };
+}
+
+// ---- "Activate outcome": the doc's right-hand screen as a chat workflow -----
+// Resolves definition → deal, then walks the cycle-action prompts (Recycle
+// date / Completion reason / Appointment start+end + Pipeline stage),
+// the checked Functions (Reassign → owner, Redirect → contact, Pipeline →
+// stage), an optional Note, and a SUBMIT confirmation. Submit logs to the
+// outcome log (so the playbook's outcome-phase rules see it) and performs
+// the cycle action against exec-crm.
+
+interface ActivateState {
+  defId: number; dealId?: number; dealTitle?: string;
+  recycleDate?: string; completionReason?: string;
+  apptStart?: { date: string; time: string }; apptEnd?: { date: string; time: string };
+  stageAsked?: boolean; stageSlug?: string; stageName?: string;
+  owner?: string; ownerSkipped?: boolean;
+  contactId?: number; contactName?: string; redirectSkipped?: boolean;
+  note?: string;
+}
+
+async function activateOutcomeStart(session: Session, name: string, dealQuery: string): Promise<Reply> {
+  const ws = session.workspaceId ?? null;
+  const pick = (defs: odef.OutcomeDef[]) => {
+    const options = defs.map((d, i) => ({ id: d.id, n: i + 1, label: d.name, sub: odef.cycleActionLabel(d.cycle_action) }));
+    session.choice = { kind: "outcome", options, then: { action: "activate_outcome_def", payload: { deal: dealQuery } } };
+    return {
+      text: "Which outcome do you want to activate?",
+      cards: [{ kind: "choices", options }],
+      chips: options.map((o) => String(o.n)),
+    };
+  };
+  if (!name) {
+    const defs = odef.listOutcomeDefs(ws);
+    if (!defs.length) return { text: "No outcome definitions yet — say `create outcome` to build one first.", chips: ["Create outcome"] };
+    return pick(defs);
+  }
+  const defs = odef.findOutcomeDefs(name, ws);
+  if (!defs.length)
+    return { text: `No outcome matching "${name}". Say \`outcomes\` to see them, or \`create outcome\` to build it.`, chips: ["Outcomes", "Create outcome"] };
+  const exact = defs.find((d) => d.name.toLowerCase() === name.toLowerCase());
+  if (exact) return activateOutcomeDeal(session, exact, dealQuery);
+  if (defs.length === 1) return activateOutcomeDeal(session, defs[0], dealQuery);
+  return pick(defs.slice(0, 5));
+}
+
+async function activateOutcomeDeal(session: Session, def: odef.OutcomeDef, dealQuery: string): Promise<Reply> {
+  if (!dealQuery) {
+    session.pending = { type: "activate_outcome_deal", label: def.name, payload: { defId: def.id } };
+    return { text: `Activating **${def.name}** — which deal is it for? Name it.`, chips: ["Show pipeline", "Cancel"] };
+  }
+  return dealByName(session, dealQuery, "activate_outcome_deal", { defId: def.id });
+}
+
+async function activateOutcomeSteps(session: Session, act: ActivateState): Promise<Reply> {
+  const ws = session.workspaceId ?? null;
+  const def = odef.getOutcomeDef(act.defId, ws);
+  if (!def) return { text: "That outcome definition is gone — say `outcomes` to see the current list." };
+  const dealTitle = act.dealTitle ?? "the deal";
+
+  // 1) cycle-action fields, mirroring the Activate screen
+  if (def.cycle_action === "recycle" && !act.recycleDate) {
+    const days = def.default_recycle_days ?? 3;
+    const defDate = odef.addDays(todayStr(), days);
+    session.pending = { type: "activate_outcome_recycle", label: def.name, payload: { act, defDate } };
+    return {
+      text: `**Recycle** — when should "${dealTitle}" come back around?\nDefault recycle date: **${odef.fmtMDY(defDate)}** (${days} day${days === 1 ? "" : "s"}). Reply with a date or \`ok\`.`,
+      chips: ["Cancel"],
+    };
+  }
+  if (def.cycle_action === "complete" && !act.completionReason) {
+    const cur = def.completion_reason ?? "rejected";
+    session.choice = {
+      kind: "outcome",
+      options: odef.COMPLETION_REASONS.map((r, i) => ({ id: r.id, n: i + 1, label: r.label + (r.id === cur ? " (default)" : "") })),
+      then: { action: "activate_outcome_reason", payload: { act } },
+    };
+    return {
+      text: `**Complete** — completion reason for "${dealTitle}"?`,
+      cards: [{ kind: "choices", options: session.choice.options }],
+      chips: ["1", "2"],
+    };
+  }
+  if (def.cycle_action === "schedule_appointment") {
+    if (!act.apptStart) {
+      session.pending = { type: "activate_outcome_appt_start", label: def.name, payload: { act } };
+      return { text: `**Schedule appointment** — when does it start? Reply with a date and time, e.g. \`09/28/2026 2:30 pm\`.`, chips: ["Cancel"] };
+    }
+    if (!act.apptEnd) {
+      session.pending = { type: "activate_outcome_appt_end", label: def.name, payload: { act } };
+      return { text: `Starts ${odef.fmtMDYTime(act.apptStart.date, act.apptStart.time)} — when does it end?`, chips: ["Cancel"] };
+    }
+    if (!act.stageAsked) return activateOutcomeStageStep(session, act, "Pick a **Pipeline stage** for the appointment, or leave the deal where it is.");
+  }
+  // 2) checked Functions
+  if (def.functions.includes("reassign") && act.owner === undefined && !act.ownerSkipped) {
+    session.pending = { type: "activate_outcome_reassign", label: def.name, payload: { act } };
+    return { text: `**Reassign** — who should own "${dealTitle}" now? Reply with a name, or \`skip\`.`, chips: ["Cancel"] };
+  }
+  if (def.functions.includes("redirect") && act.contactId === undefined && !act.redirectSkipped) {
+    session.pending = { type: "activate_outcome_redirect", label: def.name, payload: { act } };
+    return { text: `**Redirect** — which contact should "${dealTitle}" move to? Name them, or \`skip\`.`, chips: ["Cancel"] };
+  }
+  if (def.functions.includes("pipeline") && def.cycle_action !== "schedule_appointment" && !act.stageAsked) {
+    return activateOutcomeStageStep(session, act, `**Pipeline** — move "${dealTitle}" to a different stage?`);
+  }
+  // 3) Note (optional)
+  if (act.note === undefined) {
+    session.pending = { type: "activate_outcome_note", label: def.name, payload: { act } };
+    return { text: "Add a **Note** to this activation? (optional — reply `skip`)", chips: ["Cancel"] };
+  }
+  // 4) SUBMIT
+  return activateOutcomeConfirm(session, def, act);
+}
+
+async function activateOutcomeStageStep(session: Session, act: ActivateState, prompt: string): Promise<Reply> {
+  const stages = await crm.getStages();
+  const options = [
+    ...stages.map((s) => ({ id: s.slug, label: s.name })),
+    { id: "none", label: "No stage change" },
+  ].map((o, i) => ({ ...o, n: i + 1 }));
+  session.choice = { kind: "outcome", options, then: { action: "activate_outcome_stage", payload: { act } } };
+  return { text: prompt, cards: [{ kind: "choices", options }], chips: options.map((o) => String(o.n)) };
+}
+
+function activateOutcomeConfirm(session: Session, def: odef.OutcomeDef, act: ActivateState): Reply {
+  session.pending = { type: "activate_outcome_submit", label: `${def.name} → ${act.dealTitle}`, payload: { act } };
+  const lines = [
+    "**Activate outcome** — SUBMIT to run it:",
+    `• Outcome: **${def.name}**`,
+    `• Deal: **${act.dealTitle}**`,
+  ];
+  if (act.recycleDate) lines.push(`• Recycle: ${odef.fmtMDY(act.recycleDate)}`);
+  if (act.completionReason) lines.push(`• Complete reason: ${odef.completionReasonLabel(act.completionReason)}`);
+  if (act.apptStart && act.apptEnd)
+    lines.push(`• Appointment: ${odef.fmtMDYTime(act.apptStart.date, act.apptStart.time)} – ${odef.fmtMDYTime(act.apptEnd.date, act.apptEnd.time)}`);
+  if (act.stageName) lines.push(`• Pipeline stage: ${act.stageName}`);
+  if (act.owner) lines.push(`• Reassign to: ${act.owner}`);
+  if (act.contactName) lines.push(`• Redirect to: ${act.contactName}`);
+  if (act.note) lines.push(`• Note: ${act.note}`);
+  lines.push("", activateOutcomeEffectSummary(def, act));
+  return {
+    text: lines.join("\n"),
+    cards: [{ kind: "confirm", options: [{ n: 1, label: "Submit — activate outcome" }, { n: 2, label: "Cancel" }] }],
+    chips: ["Yes", "No"],
+  };
+}
+
+function activateOutcomeEffectSummary(def: odef.OutcomeDef, act: ActivateState): string {
+  const bits = ["On submit I'll log this to the outcome log"];
+  if (def.cycle_action === "recycle") bits.push(`create a recycle follow-up task due ${odef.fmtMDY(act.recycleDate ?? "")}`);
+  else if (def.cycle_action === "complete") bits.push(`mark the deal ${act.completionReason === "successful" ? "won" : "lost"}`);
+  else if (def.cycle_action === "schedule_appointment") bits.push("create the appointment task");
+  if (act.owner) bits.push(`reassign it to ${act.owner}`);
+  if (act.contactName) bits.push(`redirect it to ${act.contactName}`);
+  if (act.stageName) bits.push(`move it to ${act.stageName}`);
+  return bits.join(", ") + ".";
+}
+
+async function activateOutcomeSubmit(session: Session, act: ActivateState): Promise<Reply> {
+  const ws = session.workspaceId ?? null;
+  const def = odef.getOutcomeDef(act.defId, ws);
+  if (!def) return { text: "That outcome definition is gone — say `outcomes` to see the current list." };
+  const deal = (await crm.getDeals()).find((d) => d.id === act.dealId);
+  if (!deal) return { text: "That deal seems to be gone — try the activation again." };
+  // 1) outcome log — activations feed the playbook's outcome-phase rules (R14–R18)
+  const details: string[] = [];
+  if (act.recycleDate) details.push(`recycle ${odef.fmtMDY(act.recycleDate)}`);
+  if (act.completionReason) details.push(odef.completionReasonLabel(act.completionReason).toLowerCase());
+  if (act.apptStart && act.apptEnd)
+    details.push(`appointment ${odef.fmtMDYTime(act.apptStart.date, act.apptStart.time)}–${odef.fmtMDYTime(act.apptEnd.date, act.apptEnd.time)}`);
+  if (act.stageName) details.push(`stage → ${act.stageName}`);
+  if (act.owner) details.push(`reassigned → ${act.owner}`);
+  if (act.contactName) details.push(`redirected → ${act.contactName}`);
+  const note = [act.note, details.join(" · ")].filter(Boolean).join(" · ");
+  outcomes.logOutcome(deal.id, odef.methodForDef(def), def.name, odef.categoryForCycle(def.cycle_action), ws, note.slice(0, 2000));
+  // 2) cycle-action effects
+  const effects: string[] = [];
+  if (def.cycle_action === "recycle" && act.recycleDate) {
+    const t = await crm.createTask({ title: `Recycle ${deal.title} — ${def.name}`, due_date: act.recycleDate, deal_id: deal.id });
+    jpush(session, `Recycle task for "${deal.title}"`, { op: "delete_task", id: t.id });
+    usability.trackMention(session.id, "task", t.id, t.title);
+    effects.push(`recycle task due ${odef.fmtMDY(act.recycleDate)}`);
+  } else if (def.cycle_action === "complete") {
+    const won = act.completionReason === "successful";
+    await crm.patchDeal(deal.id, won ? { stage: "closed_won", probability: 100 } : { stage: "closed_lost" });
+    jpush(session, `Marked "${deal.title}" as ${won ? "won" : "lost"}`, { op: "patch_deal", id: deal.id, patch: { stage: deal.stage, probability: deal.probability } });
+    effects.push(won ? "deal marked **won** 🎉" : "deal marked lost");
+  } else if (def.cycle_action === "schedule_appointment" && act.apptStart && act.apptEnd) {
+    const when = `${odef.fmtMDYTime(act.apptStart.date, act.apptStart.time)}–${odef.fmtMDYTime(act.apptEnd.date, act.apptEnd.time)}`;
+    const t = await crm.createTask({ title: `Appointment: ${def.name} — ${deal.title} (${when})`, due_date: act.apptStart.date, deal_id: deal.id });
+    jpush(session, `Appointment task for "${deal.title}"`, { op: "delete_task", id: t.id });
+    usability.trackMention(session.id, "task", t.id, t.title);
+    effects.push(`appointment task ${when}`);
+  }
+  // 3) function effects
+  const patch: { owner?: string; contact_id?: number; stage?: string } = {};
+  if (act.owner) patch.owner = act.owner;
+  if (act.contactId) patch.contact_id = act.contactId;
+  if (act.stageSlug) patch.stage = act.stageSlug;
+  if (Object.keys(patch).length) {
+    await crm.patchDeal(deal.id, patch);
+    jpush(session, `Updated "${deal.title}"`, { op: "patch_deal", id: deal.id, patch: { stage: deal.stage, owner: deal.owner, contact_id: deal.contact_id } });
+    if (act.owner) effects.push(`reassigned to ${act.owner}`);
+    if (act.contactName) effects.push(`redirected to ${act.contactName}`);
+    if (act.stageName) effects.push(`moved to ${act.stageName}`);
+  }
+  return {
+    text: `✅ Activated **${def.name}** for "${deal.title}" — logged to the outcome log${effects.length ? `: ${effects.join(", ")}` : ""}.`,
+    chips: ["Outcomes", "Log outcome", "Show pipeline"],
+  };
 }
 
 // Event-scoped playbook rules for incoming exec-crm webhooks (e.g. R8a/R8b win
@@ -3863,6 +4384,8 @@ async function stageAction(session: Session, action: string, stage: crm.Stage, p
 async function dealAction(session: Session, action: string, deal: crm.Deal, payload: any): Promise<Reply> {
   usability.trackMention(session.id, "deal", deal.id, deal.title);
   if (action === "log_outcome_deal") return outcomeMethodStep(session, deal);
+  if (action === "activate_outcome_deal")
+    return activateOutcomeSteps(session, { defId: payload.defId, dealId: deal.id, dealTitle: deal.title });
   if (action === "move_deal") {
     const from = deal.stage;
     const d = await crm.patchDeal(deal.id, { stage: payload.stage });

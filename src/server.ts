@@ -14,6 +14,7 @@ import { initChatSessionDb, listChatSessions, getChatSession, createChatSession,
 import { initReconRunsDb } from "./recon_runs";
 import { initDealNotesDb } from "./deal_notes";
 import { initOutcomesDb } from "./outcomes";
+import { initOutcomeDefsDb } from "./outcome_defs";
 import { initMissLogDb } from "./intent_misses";
 import { initPlaybookDb } from "./playbook";
 import { initUsabilityDb } from "./usability";
@@ -60,6 +61,7 @@ function initDataDir(dataDir: string) {
   initReconRunsDb(db);
   initDealNotesDb(db);
   initOutcomesDb(db);
+  initOutcomeDefsDb(db);
   initMissLogDb(db);
   initPlaybookDb(db);
   initUsabilityDb(db);
