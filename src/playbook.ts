@@ -485,9 +485,22 @@ function renderFactValue(v: unknown, bindings: Bindings): unknown {
 export interface PlaybookFinding {
   ruleId: string; ruleName: string; phase: Phase; kind: string; icon: string;
   text: string; fix?: string; why: string;
+  /** Structured entity refs so other surfaces (e.g. exec-crm's Outreach
+   *  screen) can turn a finding into a clickable action. Omitted when the
+   *  rule binds no deal — never an empty object. */
+  ref?: PlaybookRef;
 }
 export interface PlaybookSuggestion {
   ruleId: string; ruleName: string; phase: Phase; text: string; chips: string[]; why: string;
+  ref?: PlaybookRef;
+}
+/**
+ * Deal/contact refs derived from a rule activation's bindings. `deal_id`
+ * when exactly one deal is involved, `deal_ids` (capped) for aggregates
+ * like "3 stale deals", `contact_id` from the deal's linked contact.
+ */
+export interface PlaybookRef {
+  deal_id?: number; contact_id?: number; deal_ids?: number[];
 }
 export interface PlaybookFlag {
   ruleId: string; kind: string; entity?: string; why: string;
@@ -555,6 +568,53 @@ function renderAggregate(tpl: string, acts: FindingActivation[], orderBy?: strin
   return renderTemplate(withAgg, sorted.length ? sorted[0].bindings : new Map());
 }
 
+/** Map a rule's bound variable names (`as`) to their fact collection
+ *  (`subject`), from the top-level `when` clauses. Negative-existence
+ *  checks bind nothing, so clauses without `as` are skipped. */
+function varSubjects(rule: Rule): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const c of rule.when ?? []) {
+    if (c && typeof c === "object" && !Array.isArray(c)) {
+      const sc = c as SubjectCondition;
+      if (typeof sc.as === "string" && typeof sc.subject === "string") m.set(sc.as, sc.subject);
+    }
+  }
+  return m;
+}
+
+const MAX_REF_DEAL_IDS = 10;
+
+/**
+ * Derive a PlaybookRef from one activation's bindings: deal ids from
+ * `deal`-subject facts (by `id`) and `deal_outcome`-subject facts (by
+ * `deal_id`), plus the deal's linked contact. Returns undefined when the
+ * rule binds no deal — the `ref` key is then omitted entirely so
+ * shape-sensitive consumers never see an empty object.
+ */
+function deriveRef(rule: Rule, bindings: Bindings): PlaybookRef | undefined {
+  const subs = varSubjects(rule);
+  const dealIds: number[] = [];
+  let contactId: number | undefined;
+  for (const [name, fact] of bindings) {
+    const subj = subs.get(name);
+    if (!fact || typeof fact !== "object" || Array.isArray(fact)) continue;
+    const f = fact as Record<string, unknown>;
+    if (subj === "deal") {
+      if (typeof f.id === "number") dealIds.push(f.id);
+      if (contactId === undefined && typeof f.contact_id === "number") contactId = f.contact_id;
+    } else if (subj === "deal_outcome") {
+      if (typeof f.deal_id === "number") dealIds.push(f.deal_id);
+    }
+  }
+  const uniq = [...new Set(dealIds)];
+  if (!uniq.length && contactId === undefined) return undefined;
+  const ref: PlaybookRef = {};
+  if (uniq.length === 1) ref.deal_id = uniq[0];
+  else if (uniq.length > 1) ref.deal_ids = uniq.slice(0, MAX_REF_DEAL_IDS);
+  if (contactId !== undefined) ref.contact_id = contactId;
+  return ref;
+}
+
 function renderFindings(acts: FindingActivation[]): PlaybookFinding[] {
   const groups = new Map<string, FindingActivation[]>();
   const order: string[] = [];
@@ -571,19 +631,33 @@ function renderFindings(acts: FindingActivation[]): PlaybookFinding[] {
       const sorted = sortByOrder(g, action.orderBy);
       const titles = sorted.map(firstTitle).filter((t): t is string => t !== undefined);
       const leafPart = g[0].why.includes(" — ") ? g[0].why.split(" — ").slice(1).join(" — ") : g[0].why;
+      // Aggregate refs: union the deal ids across the group's activations so
+      // e.g. "3 stale deals" becomes three clickable per-deal actions.
+      const aggIds: number[] = [];
+      for (const a of g) {
+        const r = deriveRef(rule, a.bindings);
+        if (r?.deal_id !== undefined) aggIds.push(r.deal_id);
+        if (r?.deal_ids) aggIds.push(...r.deal_ids);
+      }
+      const aggUniq = [...new Set(aggIds)].slice(0, MAX_REF_DEAL_IDS);
+      const aggRef = aggUniq.length === 1 ? { deal_id: aggUniq[0] }
+        : aggUniq.length > 1 ? { deal_ids: aggUniq } : undefined;
       out.push({
         ruleId: rule.id, ruleName: rule.name, phase: rule.phase, kind: action.finding, icon: action.icon,
         text: renderAggregate(action.aggregate, g, action.orderBy),
         fix: action.fix ? renderAggregate(action.fix, g, action.orderBy) : undefined,
         why: `rule ${rule.id} · ${g.length} matched ("${titles.slice(0, 4).join('", "')}"${titles.length > 4 ? "…" : ""}) — ${leafPart}`,
+        ...(aggRef ? { ref: aggRef } : {}),
       });
     } else {
       for (const a of g) {
+        const ref = deriveRef(rule, a.bindings);
         out.push({
           ruleId: rule.id, ruleName: rule.name, phase: rule.phase, kind: action.finding, icon: action.icon,
           text: renderTemplate(action.text ?? "", a.bindings),
           fix: action.fix ? renderTemplate(action.fix, a.bindings) : undefined,
           why: a.why,
+          ...(ref ? { ref } : {}),
         });
       }
     }
@@ -664,10 +738,12 @@ export function runPlaybook(opts: RunPlaybookOpts): PlaybookRunResult {
       } else if ("finding" in action) {
         findingActs.push({ rule: act.rule, action, bindings: act.bindings, why: act.why });
       } else if ("suggest" in action) {
+        const sref = deriveRef(act.rule, act.bindings);
         suggestions.push({
           ruleId: act.rule.id, ruleName: act.rule.name, phase: act.rule.phase,
           text: renderTemplate(action.suggest, act.bindings),
           chips: [...(action.chips ?? [])], why: act.why,
+          ...(sref ? { ref: sref } : {}),
         });
       } else if ("flag" in action) {
         flags.push({

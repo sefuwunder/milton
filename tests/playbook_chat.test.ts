@@ -148,7 +148,17 @@ describe("hygiene via the rule engine", () => {
       cards: [{ kind: "findings", title: "Pipeline hygiene", items: wantItems }],
     };
     expect(got.text).toBe(want.text);
-    expect(got.cards).toEqual(want.cards);
+    // kind/ref are additive metadata for clickable actions (see
+    // playbook-refs.test.ts); the byte-identical guarantee covers the
+    // rendered wording, so they are stripped from this comparison.
+    const gotCards = got.cards!.map((c: any) => ({
+      ...c,
+      items: c.items.map((f: any) => {
+        const { kind, ref, ...legacyShape } = f;
+        return legacyShape;
+      }),
+    }));
+    expect(gotCards).toEqual(want.cards);
     expect(got.chips).toEqual(want.chips);
   });
 

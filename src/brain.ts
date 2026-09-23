@@ -2759,7 +2759,16 @@ async function briefReply(): Promise<Reply> {
 // The same engine that powers the chat reply, exposed so other surfaces
 // (e.g. exec-crm's Dashboard) can render Milton insights without parsing
 // chat text. Phase order is always review → action → outcome.
-export interface HygieneItem { icon: string; text: string; fix?: string; phase: playbook.Phase }
+export interface HygieneItem {
+  icon: string; text: string; fix?: string; phase: playbook.Phase;
+  /** What fired: the finding kind (e.g. "stale", "quiet_negotiation") for
+   *  findings, the rule id (e.g. "R15") for suggestions — lets surfaces
+   *  pick a sensible default action without parsing text. */
+  kind: string;
+  /** Structured deal/contact refs for clickable actions; omitted when the
+   *  rule binds no deal. */
+  ref?: playbook.PlaybookRef;
+}
 export interface HygieneData {
   lead: string;
   counts: Record<playbook.Phase, number>;
@@ -2800,9 +2809,12 @@ export async function hygieneData(workspaceId: number | null): Promise<HygieneDa
       const ai = legacyOrder.indexOf(a.kind), bi = legacyOrder.indexOf(b.kind);
       return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
     });
-    for (const f of fs) items.push({ icon: f.icon, text: f.text, ...(f.fix ? { fix: f.fix } : {}), phase });
+    for (const f of fs) items.push({
+      icon: f.icon, text: f.text, kind: f.kind, phase: f.phase,
+      ...(f.fix ? { fix: f.fix } : {}), ...(f.ref ? { ref: f.ref } : {}),
+    });
     for (const s of res.suggestions.filter((x) => x.phase === phase)) {
-      items.push({ icon: "💡", text: s.text, phase });
+      items.push({ icon: "💡", text: s.text, kind: s.ruleId, phase: s.phase, ...(s.ref ? { ref: s.ref } : {}) });
       for (const c of s.chips) if (!chips.includes(c)) chips.push(c);
     }
   }
