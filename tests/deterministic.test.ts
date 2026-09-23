@@ -9,6 +9,7 @@ import { parseIntent } from "../src/intents";
 import { handleMessage, runRoutineUnattended, type Session } from "../src/brain";
 import * as auto from "../src/automation";
 import { initDealNotesDb } from "../src/deal_notes";
+import { initPlaybookDb } from "../src/playbook";
 
 // ---- fixtures ---------------------------------------------------------------
 const dstr = (offsetDays: number): string => {
@@ -95,6 +96,7 @@ beforeEach(() => {
   calls.length = 0;
   auto.initAutomationDb(new Database(":memory:"));
   initDealNotesDb(new Database(":memory:"));
+  initPlaybookDb(new Database(":memory:"));
 });
 
 // ---- intent parsing ---------------------------------------------------------

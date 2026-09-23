@@ -1,7 +1,7 @@
 // meridian.test.ts — Milton's read-only Meridian recon access:
 // intent parsing, listing, dossier, entity filtering, disambiguation,
 // unreachable-Meridian handling, and the MERIDIAN_URL default.
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { describe, test, expect, beforeAll } from "bun:test";
 import { parseIntent } from "../src/intents";
 import * as mer from "../src/meridian";
 import { handleMessage, type Session } from "../src/brain";
@@ -59,12 +59,6 @@ function stubFetch(input: any, init: any = {}): Promise<Response> {
 beforeAll(() => {
   (globalThis as any).fetch = stubFetch;
   mer.clearReconCache();
-});
-
-// Restore the native fetch so later test files (e.g. tutorial.test.ts, which
-// asserts on unreachable-Meridian behavior) don't see this file's stub.
-afterAll(() => {
-  (globalThis as any).fetch = realFetch;
 });
 
 // ---- env default ----------------------------------------------------------------------

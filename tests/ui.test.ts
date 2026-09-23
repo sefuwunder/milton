@@ -7,7 +7,7 @@ function mkEl(tag: string): any {
     tag, children: [] as any[], innerHTML: "", textContent: "", value: "", className: "",
     appendChild(c: any) { this.children.push(c); return c; },
     insertAdjacentHTML(_p: string, h: string) { this.innerHTML += h; },
-    addEventListener(t, h) { (this._l ||= {})[t] = h; }, remove() {}, focus() {}, scrollTop: 0, scrollHeight: 100,
+    addEventListener() {}, remove() {}, focus() {}, scrollTop: 0, scrollHeight: 100,
     closest() { return null; }, getAttribute() { return null; },
     querySelector() { return null; }, querySelectorAll() { return []; },
     classList: { toggle() {}, add() {}, remove() {}, contains() { return false; } },
@@ -21,10 +21,8 @@ let els: Record<string, any>;
 beforeAll(async () => {
   els = {};
   ["chat", "chips", "composer", "input", "status-dot", "status-text", "help-btn",
-   "cam-btn", "photo-input", "vcf-btn", "vcf-input", "tray", "auto-badge", "auto-btn",
-   "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "palette",
-   "avatar-btn", "session-overlay", "session-list", "session-create", "session-manage-link",
-   "session-picker-close", "manage-overlay", "manage-list", "manage-close"].forEach((id) => (els[id] = mkEl("div")));
+   "cam-btn", "photo-input", "tray", "bell-btn", "bell-badge", "auto-btn",
+   "auto-view", "auto-tabs", "auto-body", "auto-close", "toast", "ws-select"].forEach((id) => (els[id] = mkEl("div")));
   (globalThis as any).document = {
     getElementById: (id: string) => els[id] || null,
     createElement: (t: string) => mkEl(t),
@@ -42,7 +40,7 @@ beforeAll(async () => {
   };
   afterAll(() => { (globalThis as any).fetch = prevFetch; });
   let src = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
-  src = src.replace("})();", ";globalThis.__t={cardHTML,md,money,esc,routineRow,scheduleRow,triggerRow,runRow,updateBadge,showAuto,hideAuto,addTrayItem,addMsg,switchSession,openPicker,closePicker};})();");
+  src = src.replace("})();", ";globalThis.__t={cardHTML,md,money,esc,routineRow,scheduleRow,triggerRow,runRow,updateBadge,showAuto,hideAuto,addTrayItem,addMsg};})();");
   eval(src);
   await new Promise((r) => setTimeout(r, 50));
   T = (globalThis as any).__t;
@@ -72,7 +70,6 @@ describe("cards", () => {
       { kind: "choices", options: [{ n: 1, label: "One", sub: "sub" }] },
       { kind: "confirm", options: [{ n: 1, label: "Yes, delete" }] },
       { kind: "findings", items: [{ icon: "📅", text: "gap" }] },
-      { kind: "suggestions", title: "Did you mean…", items: [{ name: "undo", description: "Undo the last change", usage: "undo" }, { name: "deal_journey", description: "Stage-history timeline for a deal", usage: "deal journey Acme" }] },
       { kind: "transcription", title: "Photo transcription", ocrText: "HELLO 123", confidence: 0.93, script: "print", imageUrl: "/api/file/abc" },
       { kind: "handwriting", title: "Handwriting analysis", metrics: { slantDeg: 8.5, strokeMedian: 4.2, strokeStd: 1.1, heightMean: 22.4, heightStd: 3.3, spacingRatio: 2.8, baselineDrift: -1.2, inkDensity: 0.14, chars: 42, words: 9, lines: 3 }, notes: ["Slant: leans right by 8.5°."], imageUrl: "/api/file/abc" },
     ];
@@ -136,21 +133,20 @@ describe("automations UI", () => {
   });
   test("run row shows status icon, kind and summary", () => {
     const h = T.runRow({ status: "partial", kind: "schedule", routine_name: "eod", summary: "1/2 steps ok", ran_at: "2026-09-19 12:00:00" });
-    expect(h).toContain('class="st st-warn"');
-    expect(h).toContain("<svg");
+    expect(h).toContain("⚠️");
     expect(h).toContain("eod");
     expect(h).toContain("1/2 steps ok");
-    expect(T.runRow({ status: "ok", kind: "trigger", routine_name: "x", summary: "", ran_at: "2026-09-19 12:00:00" })).toContain('class="st st-ok"');
+    expect(T.runRow({ status: "ok", kind: "trigger", routine_name: "x", summary: "", ran_at: "2026-09-19 12:00:00" })).toContain("✅");
   });
   test("updateBadge counts runs newer than last-seen", () => {
     (globalThis as any).localStorage.setItem("milton_runs_seen", "10");
     const n = T.updateBadge([{ id: 9 }, { id: 11 }, { id: 12 }]);
     expect(n).toBe(2);
-    expect(els["auto-badge"].hidden).toBe(false);
-    expect(els["auto-badge"].textContent).toBe("2");
+    expect(els["bell-badge"].hidden).toBe(false);
+    expect(els["bell-badge"].textContent).toBe("2");
     const n2 = T.updateBadge([{ id: 5 }]);
     expect(n2).toBe(0);
-    expect(els["auto-badge"].hidden).toBe(true);
+    expect(els["bell-badge"].hidden).toBe(true);
   });
   test("showAuto/hideAuto toggle the views", () => {
     T.showAuto("runs");
@@ -188,7 +184,7 @@ describe("vCard attachments", () => {
     T.addTrayItem({ name: "contacts.vcf", type: "text/vcard", size: 100 });
     const item = els["tray"].children[els["tray"].children.length - 1];
     expect(item.innerHTML).toContain("file-chip");
-    expect(item.innerHTML).toContain("<svg");
+    expect(item.innerHTML).toContain("📇");
     expect(item.innerHTML).toContain("contacts.vcf");
     expect(item.innerHTML).not.toContain("<img");
   });
@@ -205,7 +201,7 @@ describe("vCard attachments", () => {
   test("user message echoes vcf attachments as chips", () => {
     const div = T.addMsg("user", { text: "", photos: [], files: ["contacts.vcf"] });
     expect(div.innerHTML).toContain("file-chip");
-    expect(div.innerHTML).toContain("<svg");
+    expect(div.innerHTML).toContain("📇");
     expect(div.innerHTML).not.toContain("<img");
   });
 });
@@ -227,137 +223,5 @@ describe("analyst replies", () => {
     const html = T.cardHTML({ kind: "confirm", options: [{ n: 1, label: "Yes, create 3 tasks" }, { n: 2, label: "Cancel" }] });
     expect(html).toContain("Yes, create 3 tasks");
     expect(html).toContain("data-confirm");
-  });
-});
-
-describe("vcf import button", () => {
-  function fire(el: any, type: string, ev: any = {}) {
-    const h = el._l && el._l[type];
-    expect(typeof h).toBe("function");
-    h(ev);
-  }
-
-  test("vcf button is wired next to the camera button", () => {
-    expect(els["vcf-btn"]).toBeTruthy();
-    expect(els["vcf-input"]).toBeTruthy();
-    expect(typeof els["vcf-btn"]._l?.click).toBe("function");
-    expect(typeof els["vcf-input"]._l?.change).toBe("function");
-  });
-
-  test("clicking the vcf button opens the vcf file picker", () => {
-    let picked = false;
-    els["vcf-input"].click = () => { picked = true; };
-    fire(els["vcf-btn"], "click");
-    expect(picked).toBe(true);
-  });
-
-  test("choosing a .vcf stages it as a contacts file chip", () => {
-    (globalThis as any).XMLHttpRequest = class {
-      upload = { addEventListener() {} };
-      open() {}
-      addEventListener() {}
-      send() {}
-    };
-    els["tray"].children.length = 0;
-    els["vcf-input"].files = [{ name: "team.vcf", type: "text/vcard", size: 512 }];
-    fire(els["vcf-input"], "change");
-    const item = els["tray"].children[els["tray"].children.length - 1];
-    expect(item.innerHTML).toContain("file-chip");
-    expect(item.innerHTML).toContain("<svg");
-    expect(item.innerHTML).toContain("team.vcf");
-    expect(els["vcf-input"].value).toBe("");
-  });
-
-  test("oversize .vcf is rejected with a contacts-file message", () => {
-    const before = els["chat"].children.length;
-    els["tray"].children.length = 0;
-    els["vcf-input"].files = [{ name: "huge.vcf", type: "text/vcard", size: 11 * 1024 * 1024 }];
-    fire(els["vcf-input"], "change");
-    expect(els["tray"].children.length).toBe(0);
-    const html = els["chat"].children.slice(before).map((c: any) => c.innerHTML).join("\n");
-    expect(html).toContain("huge.vcf");
-    expect(html).toContain("10 MB");
-    expect(html).toContain("contacts file");
-  });
-});
-
-describe("session picker", () => {
-  const outerFetch = (globalThis as any).fetch;
-  const SESSIONS = [
-    { id: "s-a", name: "General", created_at: "", last_active_at: "", messageCount: 1, workspace: { id: null, name: "" } },
-    { id: "s-b", name: "Pipeline", created_at: "", last_active_at: "", messageCount: 0, workspace: { id: 2, name: "Acme", } },
-  ];
-  beforeAll(() => {
-    (globalThis as any).fetch = async (url: string, opts?: any) => {
-      const ok = (d: any) => ({ json: async () => d });
-      const u = String(url);
-      if (u.includes("/api/chat-sessions") && opts?.method === "POST") {
-        const created = { id: "s-c", name: "Session 3", created_at: "", last_active_at: "", messageCount: 0, workspace: { id: 2, name: "Acme" } };
-        SESSIONS.unshift(created);
-        return ok({ session: created });
-      }
-      if (u.includes("/api/chat-sessions")) return ok({ sessions: SESSIONS });
-      if (u.includes("/api/history")) {
-        const sid = new URL(u, "http://x").searchParams.get("session");
-        return ok({ messages: [{ role: "milton", text: `history for ${sid}` }] });
-      }
-      return ok({});
-    };
-  });
-  afterAll(() => { (globalThis as any).fetch = outerFetch; });
-
-  test("avatar click opens the picker listing sessions with their workspaces", async () => {
-    // real markup starts the overlay hidden
-    els["session-overlay"].hidden = true;
-    els["manage-overlay"].hidden = true;
-    els["avatar-btn"]._l.click();
-    await new Promise((r) => setTimeout(r, 60));
-    expect(els["session-overlay"].hidden).toBe(false);
-    expect(els["session-list"].innerHTML).toContain("Pipeline");
-    expect(els["session-list"].innerHTML).toContain("ws-badge");
-    expect(els["session-list"].innerHTML).toContain("Acme");
-    expect(els["session-list"].innerHTML).toContain("default");
-    // active session is marked
-    expect(els["session-list"].innerHTML).toContain("active");
-    // picker has the New session button and the management link
-    expect(typeof els["session-create"]._l.click).toBe("function");
-    expect(typeof els["session-manage-link"]._l.click).toBe("function");
-  });
-
-  test("second avatar click closes the picker", async () => {
-    els["avatar-btn"]._l.click();
-    await new Promise((r) => setTimeout(r, 30));
-    expect(els["session-overlay"].hidden).toBe(true);
-  });
-
-  test("switchSession swaps sid and reloads history", async () => {
-    T.switchSession("s-b");
-    await new Promise((r) => setTimeout(r, 60));
-    expect((globalThis as any).localStorage.getItem("milton_sid")).toBe("s-b");
-    expect(els["session-overlay"].hidden).toBe(true);
-    const html = els["chat"].children.map((c: any) => c.innerHTML).join("\n");
-    expect(html).toContain("history for s-b");
-  });
-
-  test("New session button creates a bound session and switches to it", async () => {
-    els["session-create"]._l.click();
-    await new Promise((r) => setTimeout(r, 60));
-    expect((globalThis as any).localStorage.getItem("milton_sid")).toBe("s-c");
-  });
-
-  test("Manage link opens the management modal with rename/delete rows", async () => {
-    els["session-manage-link"]._l.click();
-    await new Promise((r) => setTimeout(r, 60));
-    expect(els["manage-overlay"].hidden).toBe(false);
-    expect(els["session-overlay"].hidden).toBe(true);
-    expect(els["manage-list"].innerHTML).toContain("Pipeline");
-    expect(els["manage-list"].innerHTML).toContain("Rename");
-    expect(els["manage-list"].innerHTML).toContain("Delete");
-  });
-
-  test("single automations button: no bell button in the header", () => {
-    expect(document.getElementById("bell-btn")).toBeNull();
-    expect(typeof els["auto-btn"]._l.click).toBe("function");
-    expect(els["auto-badge"]).toBeTruthy();
   });
 });

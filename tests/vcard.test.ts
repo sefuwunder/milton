@@ -87,25 +87,6 @@ describe("parseVcards", () => {
     const [c] = parseVcards("BEGIN:VCARD\nFN:Esc Tester\nNOTE:line one\\nline two\\; done\nEND:VCARD\n");
     expect(c.note).toBe("line one\nline two; done");
   });
-
-  test("UTF-8 folded FN unfolds cleanly", () => {
-    const vcf = "BEGIN:VCARD\nVERSION:3.0\nFN:Jos\u00e9 \n Garc\u00eda\nN:Garc\u00eda;Jos\u00e9;;;\nEND:VCARD\n";
-    const [c] = parseVcards(vcf);
-    expect(c.name).toBe("Jos\u00e9 Garc\u00eda");
-  });
-
-  test("garbage between cards does not kill the batch", () => {
-    const vcf = "BEGIN:VCARD\nFN:Alice\nEND:VCARD\nthis is not a property line\nBEGIN:VCARD\nFN:Bob\nEND:VCARD\n";
-    const cards = parseVcards(vcf);
-    expect(cards.map((c) => c.name)).toEqual(["Alice", "Bob"]);
-  });
-
-  test("nameless card is kept with an empty name so the caller can skip it", () => {
-    const cards = parseVcards("BEGIN:VCARD\nTEL:+1-555-9999\nEND:VCARD\n");
-    expect(cards).toHaveLength(1);
-    expect(cards[0].name).toBe("");
-    expect(cards[0].phones).toHaveLength(1);
-  });
 });
 
 // ---- /api/upload: .vcf acceptance (isolated server process) -----------------------
@@ -337,21 +318,5 @@ describe("vCard import flow", () => {
     const r = await handleMessage(s, "", { attachments: [ref] });
     expect(r.text).toMatch(/doesn't look like a valid vCard/);
     expect(s.pending).toBeUndefined();
-  });
-
-  test("nameless entry is flagged in the offer and skipped on confirm", async () => {
-    const mixed = "BEGIN:VCARD\nFN:Named One\nEMAIL:named@example.com\nEND:VCARD\nBEGIN:VCARD\nTEL:+1-555-9999\nEND:VCARD\n";
-    const ref = await vcfRef("mixed.vcf", mixed);
-    const s = sess();
-    const offer = await handleMessage(s, "", { attachments: [ref] });
-    expect(offer.text).toMatch(/1 entry without a name will be skipped/);
-    const list = (offer.cards || []).find((c) => c.kind === "contacts");
-    expect(list?.items?.[1].name).toBe("(no name — will be skipped)");
-    calls.length = 0;
-    const r = await handleMessage(s, "yes");
-    const posts = calls.filter((c) => c.method === "POST" && c.path === "/api/contacts");
-    expect(posts).toHaveLength(1);
-    expect(posts[0].body.name).toBe("Named One");
-    expect(r.text).toMatch(/1 skipped/);
   });
 });

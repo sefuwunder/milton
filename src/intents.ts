@@ -15,27 +15,16 @@ export type IntentName =
   | "prep_brief"
   | "analyze_pipeline" | "forecast" | "plan_day" | "plan_week" | "plan_breakdown"
   | "sales_cycle" | "top_deals" | "campaign_stats" | "closing_soon"
-  | "pin_widget"
   | "contact_detail" | "search" | "add_note" | "add_campaign"
   | "save_routine" | "run_routine" | "list_routines" | "delete_routine" | "show_routine"
   | "schedule_add" | "list_schedules" | "unschedule" | "pause_schedule" | "resume_schedule"
   | "trigger_add" | "list_triggers" | "delete_trigger" | "trigger_help" | "list_runs"
   | "list_workspaces" | "switch_workspace" | "current_workspace"
-  | "chat_session" // named chat sessions; slots.action = new|list|switch|rename|delete|current
   | "list_recons" | "meridian_dossier" | "meridian_entities" | "meridian_request"
-  | "meridian_enrich" | "meridian_enrich_status"
-  | "meridian_prospect" | "meridian_prospect_status"
   | "list_stages" | "add_stage" | "rename_stage" | "delete_stage" | "move_stage"
-  | "add_custom_field" | "set_custom_field" | "show_custom_fields" | "delete_custom_field"
+  | "show_playbook" | "pause_rule" | "resume_rule" | "reload_playbook"
+  | "show_misses" | "review_miss" | "dismiss_miss"
   | "confirm_yes" | "confirm_no" | "choose_number"
-  | "disambiguate_intent" // fuzzy near-tie: numbered choice between candidate intents
-  | "tutorial" // interactive tutorial mode; slots.action = start|restart|status|skip|back|exit
-  | "wizard_start" // guided setup: bare "new deal" / "new contact" / "new company" / "new task"
-  | "undo" // undo the session's latest mutation
-  | "deal_journey" // stage history timeline for a deal
-  | "task_blockers" // what's blocking a task
-  | "duplicates" // show duplicate contacts and companies
-  | "deals_by_source" // deals from <source>
   | "unknown";
 
 export interface Intent {
@@ -43,42 +32,7 @@ export interface Intent {
   raw: string;
   text: string; // normalized
   slots: Record<string, string>;
-  fuzzy?: boolean; // set when the fuzzy interpreter (not the exact regexes) resolved this
 }
-
-// Every parser intent, enumerable: the command registry (src/commands.ts)
-// must register each one so nothing the parser understands is invisible to
-// the palette or the unknown-command suggester.
-export const INTENT_NAMES: IntentName[] = [
-  "help", "pipeline", "deals", "deal_detail", "kpis", "tasks",
-  "contacts", "companies", "brief", "hygiene", "webhooks", "hooks",
-  "deliveries", "activities", "notes",
-  "add_deal", "move_deal", "set_deal_field", "close_deal", "delete_deal",
-  "add_contact", "add_company", "add_task", "complete_task", "reopen_task",
-  "delete_task", "remind_add", "remind_list", "remind_cancel", "import_contacts",
-  "capture",
-  "ocr_read", "handwriting", "save_note",
-  "prep_brief",
-  "analyze_pipeline", "forecast", "plan_day", "plan_week", "plan_breakdown",
-  "sales_cycle", "top_deals", "campaign_stats", "closing_soon",
-  "pin_widget",
-  "contact_detail", "search", "add_note", "add_campaign",
-  "save_routine", "run_routine", "list_routines", "delete_routine", "show_routine",
-  "schedule_add", "list_schedules", "unschedule", "pause_schedule", "resume_schedule",
-  "trigger_add", "list_triggers", "delete_trigger", "trigger_help", "list_runs",
-  "list_workspaces", "switch_workspace", "current_workspace",
-  "chat_session",
-  "list_recons", "meridian_dossier", "meridian_entities", "meridian_request",
-  "meridian_enrich", "meridian_enrich_status",
-  "meridian_prospect", "meridian_prospect_status",
-  "list_stages", "add_stage", "rename_stage", "delete_stage", "move_stage",
-  "add_custom_field", "set_custom_field", "show_custom_fields", "delete_custom_field",
-  "confirm_yes", "confirm_no", "choose_number",
-  "disambiguate_intent",
-  "tutorial",
-  "wizard_start", "undo", "deal_journey", "task_blockers", "duplicates", "deals_by_source",
-  "unknown",
-];
 
 const STAGE_ALIASES: Record<string, string> = {
   prospecting: "prospecting", prospect: "prospecting",
@@ -116,7 +70,7 @@ const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "frida
 
 export function parseDate(s: string, ref: Date = new Date()): string | null {
   const t = s.toLowerCase().trim();
-  const fmt = (d: Date) => { const p = (n: number) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; }; // local calendar day, not UTC
+  const fmt = (d: Date) => d.toISOString().slice(0, 10);
   if (/^today$/.test(t)) return fmt(ref);
   if (/^tomorrow$/.test(t)) { const d = new Date(ref); d.setDate(d.getDate() + 1); return fmt(d); }
   if (/^next week$/.test(t)) { const d = new Date(ref); d.setDate(d.getDate() + 7); return fmt(d); }
@@ -277,23 +231,7 @@ function stripDealWord(q: string): string {
   return q.replace(/^(deal|opportunity|opp) /, "").replace(/ (deal|opportunity|opp)$/, "").trim();
 }
 
-// Singularize a custom-field entity word ("companies" -> "company").
-export function singCf(s: string): string {
-  const t = s.toLowerCase().trim();
-  if (/^contacts?$/.test(t)) return "contact";
-  if (/^compan(y|ies)$/.test(t)) return "company";
-  if (/^campaigns?$/.test(t)) return "campaign";
-  if (/^tasks?$/.test(t)) return "task";
-  if (/^deals?$/.test(t)) return "deal";
-  return t;
-}
-
 export function parseIntent(raw: string): Intent {
-  // A leading slash never changes a command ("/kpis" ≡ "kpis"): the chat
-  // box's "/" command palette — and muscle memory — insert it. Strip it here
-  // so every caller (handleMessage, routine steps, confirmation gating) sees
-  // the bare command; intent.raw echoes the stripped text.
-  raw = raw.replace(/^\s*\/+/, "").trim();
   const text = norm(raw);
   const cased = raw.replace(/[?!.,;:]+$/g, "").replace(/\s+/g, " ").trim(); // no lowercasing: stage labels keep their case
   const slots: Record<string, string> = {};
@@ -304,23 +242,11 @@ export function parseIntent(raw: string): Intent {
   // ---- conversational control ------------------------------------------------
   if (/^(yes|yep|yeah|y|sure|do it|confirm|go ahead|ok|okay)$/.test(text)) return { name: "confirm_yes", raw, text, slots };
   if (/^(no|nope|nah|cancel|never mind|nevermind|abort)$/.test(text)) return { name: "confirm_no", raw, text, slots };
-  if (/^(undo|undo that|undo last|undo the last (?:change|action))$/.test(text)) return { name: "undo", raw, text, slots };
   let m = text.match(/^(?:number |option |#)?([1-9])$/) || text.match(/(?:choose|pick|select|option|number)\s+([1-9])\b/);
   if (m) return { name: "choose_number", raw, text, slots: { n: m[1] } };
 
-  // ---- tutorial -----------------------------------------------------------------
-  // Before help: "start tutorial" etc. must not be swallowed by anything else.
-  // Bare skip/next/back/quit/exit only mean something inside tutorial mode;
-  // brain.ts replies with a nudge when the mode isn't active.
-  if (/^(tutorial|start tutorial|teach me milton)$/.test(text)) set("tutorial", { action: "start" });
-  else if (/^restart tutorial$/.test(text)) set("tutorial", { action: "restart" });
-  else if (/^(tutorial status|tutorial progress)$/.test(text)) set("tutorial", { action: "status" });
-  else if (/^(skip|next|skip this|skip this step|skip step)$/.test(text)) set("tutorial", { action: "skip" });
-  else if (/^(back|go back|previous|previous step)$/.test(text)) set("tutorial", { action: "back" });
-  else if (/^(exit tutorial|quit tutorial|stop tutorial|leave tutorial|quit|exit)$/.test(text)) set("tutorial", { action: "exit" });
-
   // ---- help -----------------------------------------------------------------
-  else if (/^(help|what can you do|commands|how do (i|you) work|start)$/.test(text)) set("help");
+  if (/^(help|what can you do|commands|how do (i|you) work|start)$/.test(text)) set("help");
 
   // ---- automations (routines / schedules / triggers) --------------------------------
   // Must precede the brief/hygiene/read/write matchers: "schedule morning brief …"
@@ -341,6 +267,18 @@ export function parseIntent(raw: string): Intent {
   else if (/^(automation runs|list runs|run history|recent runs)$/.test(text)) set("list_runs");
   else if ((m = text.match(/^run (.+)$/))) set("run_routine", { name: m[1].trim() });
 
+  // ---- playbook: forward-chaining CRM rules ---------------------------------------
+  // After automations (so "run …" doesn't swallow anything), before the reads.
+  else if (/^(show |list )?playbook( rules)?$/.test(text)) set("show_playbook");
+  else if ((m = text.match(/^pause rule ([\w-]+)$/))) set("pause_rule", { id: m[1] });
+  else if ((m = text.match(/^resume rule ([\w-]+)$/))) set("resume_rule", { id: m[1] });
+  else if (/^reload playbook$/.test(text)) set("reload_playbook");
+
+  // ---- intent misses: phrases the parser didn't understand -------------------------
+  else if (/^(show |list )?(intent )?misses$/.test(text) || /^(intent )?miss logs?$/.test(text)) set("show_misses");
+  else if ((m = text.match(/^(?:review miss (\d+)|mark miss (\d+) reviewed)$/))) set("review_miss", { id: m[1] || m[2] });
+  else if ((m = text.match(/^dismiss miss (\d+)$/))) set("dismiss_miss", { id: m[1] });
+
   // ---- workspaces -------------------------------------------------------------------
   // After automations (so "run …" doesn't swallow anything), before the read
   // matchers below.
@@ -348,33 +286,11 @@ export function parseIntent(raw: string): Intent {
   else if (/^current workspace$/.test(text)) set("current_workspace");
   else if ((m = text.match(/^(?:switch to|use workspace|switch workspace to) (.+)$/))) set("switch_workspace", { name: m[1].trim() });
 
-  // ---- chat sessions --------------------------------------------------------------
-  // Named conversations. "switch to X" stays the workspace switcher at the
-  // exact level; brain gives chat sessions precedence when X is a session
-  // name or a session-list number.
-  else if ((m = text.match(/^new session(?: (.+))?$/))) set("chat_session", { action: "new", name: (m[1] || "").trim() });
-  else if (/^(sessions|list sessions|my sessions|show sessions|chat sessions)$/.test(text)) set("chat_session", { action: "list" });
-  else if ((m = text.match(/^switch session to (.+)$/))) set("chat_session", { action: "switch", target: m[1].trim() });
-  else if (/^current session$/.test(text)) set("chat_session", { action: "current" });
-  else if ((m = text.match(/^rename session(?: (.+))?$/))) set("chat_session", { action: "rename", target: (m[1] || "").trim() });
-  else if ((m = text.match(/^(?:delete|remove|erase) session(?: (.+))?$/))) set("chat_session", { action: "delete", target: (m[1] || "").trim() });
-
   // ---- meridian -----------------------------------------------------------------------
   // Prefixed with "meridian" so nothing collides with exec-crm intents.
   // "meridian recon Austin" requests a NEW run; "meridian recon(s)" lists sprints.
   else if (/^meridian recons?$/.test(text)) set("list_recons");
   else if ((m = cased.match(/^meridian (?:recon|run) (.+)$/i))) set("meridian_request", { city: m[1].trim() });
-  else if ((m = cased.match(/^meridian enrich (.+)$/i))) set("meridian_enrich", { query: m[1].trim() });
-  else if ((m = cased.match(/^enrich (.+)$/i))) set("meridian_enrich", { query: m[1].trim() });
-  else if (/^(enrichment status|check enrichment)$/i.test(text)) set("meridian_enrich_status");
-  // Territory prospecting: "meridian prospect dental clinics in Madisonville".
-  // The full pattern (both slots) must come first; the bare / industry-only
-  // forms are missing-slot clarifications, never guesses.
-  else if ((m = cased.match(/^meridian prospect\s+(.+?)\s+in\s+(.+)$/i))) set("meridian_prospect", { industry: m[1].trim(), location: m[2].trim() });
-  else if (/^meridian prospect\s*$/i.test(text)) set("meridian_prospect", {});
-  else if ((m = cased.match(/^meridian prospect\s+in\s+(.+)$/i))) set("meridian_prospect", { location: m[1].trim() });
-  else if ((m = cased.match(/^meridian prospect\s+(.+)$/i))) set("meridian_prospect", { industry: m[1].trim() });
-  else if (/^(prospect status|check prospecting)$/i.test(text)) set("meridian_prospect_status");
   else if ((m = text.match(/^meridian dossier (.+)$/))) set("meridian_dossier", { query: m[1].trim() });
   else if ((m = text.match(/^meridian entities (.+)$/))) {
     // Optional trailing type filter: "meridian entities austin company".
@@ -414,7 +330,6 @@ export function parseIntent(raw: string): Intent {
   else if (/^(top deals|biggest deals|largest deals|leaderboard)$/.test(text)) set("top_deals");
   else if (/^(campaign performance|campaign roi|campaign stats|campaign report)$/.test(text)) set("campaign_stats");
   else if (/^(closing soon|closing this month|upcoming closes|deals closing soon)$/.test(text)) set("closing_soon");
-  else if (/^(pin (this|it)( as( a)? widget)?|pin( a)? widget|add( a)? widget|save (this|it)( as( a)? widget)?)$/.test(text)) set("pin_widget");
   else if (/^(plan my day|daily plan|plan today|today'?s plan)$/.test(text)) set("plan_day");
   else if (/^(plan my week|weekly plan|plan this week|this week'?s plan)$/.test(text)) set("plan_week");
   else if ((m = cased.match(/^break down (.+)$/i))) set("plan_breakdown", { goal: m[1].trim() });
@@ -432,15 +347,9 @@ export function parseIntent(raw: string): Intent {
   else if (/^(incoming hooks?|inbound hooks?|zapier|n8n|make hooks?)$/.test(text)) set("hooks");
   else if (/^(deliveries|webhook deliveries|delivery log)$/.test(text)) set("deliveries");
   else if (/^(list |show |get |all )?(companies|accounts)$/.test(text)) set("companies");
-  else if ((m = text.match(/^(?:list |show |get |all )?companies?(?: (?:named|called|like|for) (.+))?$/))) set("companies", m[1] ? { search: m[1] } : {});
   else if (/^(tasks?|to-?dos?|my tasks?|open tasks?|pending tasks?|what'?s (on|due)|due (today|tomorrow|this week))$/.test(text)) set("tasks");
   else if (/^(completed tasks?|done tasks?|finished tasks?)$/.test(text)) set("tasks", { filter: "done" });
-  else if (/^(overdue|overdue tasks?|my overdue tasks?|show overdue( tasks?)?|list overdue( tasks?)?|get overdue( tasks?)?|what'?s overdue|what is overdue)$/.test(text)) set("tasks", { filter: "overdue" });
   else if (/^(deals?|opportunities|open deals?|all deals?|my deals?)$/.test(text)) set("deals");
-  else if ((m = text.match(/^deals from (.+)$/))) set("deals_by_source", { source: m[1].trim() });
-  else if (/^(?:show|list|find|check)(?: me)? duplicates$/.test(text)) set("duplicates");
-  else if ((m = text.match(/^(?:what'?s|whats|what is) blocking (.+?)\??$/))) set("task_blockers", { query: m[1].trim() });
-  else if ((m = text.match(/^why is (.+?) blocked\??$/))) set("task_blockers", { query: m[1].trim() });
   else if ((m = text.match(new RegExp(`^(?:show |list |get )?(${STAGE_WORDS}) deals?$`)))) set("deals", { stage: parseStage(m[1])! });
   else if ((m = text.match(new RegExp(`^(?:list |show |get |all )?${DEAL_WORD}s? in (\\w[\\w ]*)$`)))) {
     // hardcoded aliases resolve here; custom/editable stages resolve in
@@ -457,12 +366,9 @@ export function parseIntent(raw: string): Intent {
     else set("deals", { stage_name: m[1] });
   }
   else if ((m = text.match(/^(?:list |show |get |find |search )?contacts?(?: (?:named|called|like|for) (.+))?$/))) set("contacts", m[1] ? { search: m[1] } : {});
-  else if ((m = text.match(/^(?:deal journey|journey)(?: for| of)? (.+)$/))) set("deal_journey", { query: stripDealWord(m[1].trim()) });
-  else if ((m = text.match(/^show (?:the )?journey (?:for|of) (.+)$/))) set("deal_journey", { query: stripDealWord(m[1].trim()) });
   else if ((m = text.match(new RegExp(`^(?:show|get|open|display|tell me about) ${DEAL_WORD} (.+)$`)))) set("deal_detail", { query: m[1] });
   else if ((m = text.match(/^(?:show|get|find|lookup|tell me about) contact (.+)$/))) set("contact_detail", { query: m[1] });
   else if ((m = text.match(/^(?:who is|who'?s) (.+)$/))) set("contact_detail", { query: m[1] });
-  else if ((m = text.match(/^(?:what'?s|whats|show|get) (his|her|their|its) (email|phone|number)$/))) set("contact_detail", { query: m[1], field: m[2] });
   else if ((m = text.match(/^(?:show|get|find) company (.+)$/))) set("companies", { search: m[1] });
   else if ((m = text.match(/^(?:show|get|list) tasks?(?: for| about| on)? (.+)$/))) set("tasks", { search: m[1] });
   else if ((m = text.match(/^search (.+)$/))) set("search", { query: m[1] });
@@ -472,13 +378,6 @@ export function parseIntent(raw: string): Intent {
   else if (/^(analyze (this |the |my )?handwriting|handwriting analysis|what does the handwriting (say|show)|describe (this |the |my )?handwriting)$/.test(text)) set("handwriting");
   else if (/^(save note to a deal|save this note|file this note)$/.test(text)) set("save_note");
   else if (/^(my notes|notes|list notes|show notes|saved notes)$/.test(text)) set("notes");
-
-  // ---- guided creation wizards --------------------------------------------------
-  // Bare "new deal" / "new contact" / "new company" / "new task" open the
-  // step-by-step wizard; anything with details after it keeps the old
-  // one-shot matchers below. Only "new" triggers it — "add a deal" with
-  // nothing after it stays unknown (historical behavior).
-  else if ((m = text.match(/^new (deal|contact|company|task)$/))) set("wizard_start", { kind: m[1] });
 
   // ---- deal writes --------------------------------------------------------------
   else if ((m = text.match(new RegExp(`^(?:mark |set )?${DEAL_WORD} (.+?) as (?:closed[ -]?)?(won|lost)$`)))) set("close_deal", { query: m[1], result: m[2] });
@@ -493,49 +392,6 @@ export function parseIntent(raw: string): Intent {
   // known deal title in brain.ts.
   else if ((m = text.match(/^(?:add )?note (?:on|to) (.+?)\s*:\s*(.+)$/))) set("add_note", { query: m[1].trim(), text: m[2].trim() });
   else if ((m = text.match(/^(?:add )?note (?:on|to) (.+)$/))) set("add_note", { rest: m[1].trim() });
-  // ---- custom fields (exec-crm /api/custom-fields, workspace-scoped) ----
-  // "add custom field Renewal date of type date to contacts"
-  // "add the VIP custom field to companies"
-  else if ((m = cased.match(/^(?:add|create|new)(?: a| an)? custom fields? (.+?)(?: of type (text|number|date|checkbox))? (?:to|for|on) (campaigns?|contacts?|compan(?:y|ies)|tasks?)$/i))) {
-    set("add_custom_field", {
-      name: m[1].trim(),
-      ...(m[2] ? { field_type: m[2].toLowerCase() } : {}),
-      entity_type: singCf(m[3]),
-    });
-  }
-  else if ((m = cased.match(/^(?:add|create|new)(?: a| an| the)? (.+?) custom fields?(?: of type (text|number|date|checkbox))? (?:to|for|on) (campaigns?|contacts?|compan(?:y|ies)|tasks?)$/i))) {
-    set("add_custom_field", {
-      name: m[1].trim(),
-      ...(m[2] ? { field_type: m[2].toLowerCase() } : {}),
-      entity_type: singCf(m[3]),
-    });
-  }
-  // "set Renewal date to 2026-10-01 for contact Amara Okafor"
-  // Before the deal writes: "set renewal date to X for contact Y" would
-  // otherwise read as set_deal_field (field="contact", query="renewal date to X for").
-  // Deals have no custom fields in exec-crm — brain.ts explains that.
-  else if ((m = cased.match(/^set (.+?) to (.+?) for (contacts?|compan(?:y|ies)|campaigns?|tasks?|deals?) (.+)$/i))) {
-    set("set_custom_field", {
-      field: m[1].trim().replace(/^(?:the|a|an)\s+/i, ""), value: m[2].trim(),
-      entity_type: singCf(m[3]), query: m[4].trim(),
-    });
-  }
-  // "remove custom field VIP from companies" / "delete the VIP custom field from companies"
-  // Before delete_task: "delete the VIP custom field from companies" must not
-  // parse as deleting a task.
-  else if ((m = cased.match(/^(?:remove|delete)(?: the)? custom fields? (.+?) from (campaigns?|contacts?|compan(?:y|ies)|tasks?)$/i))) {
-    set("delete_custom_field", { name: m[1].trim(), entity_type: singCf(m[2]) });
-  }
-  else if ((m = cased.match(/^(?:remove|delete)(?: the| a| an)? (.+?) custom fields? from (campaigns?|contacts?|compan(?:y|ies)|tasks?)$/i))) {
-    set("delete_custom_field", { name: m[1].trim(), entity_type: singCf(m[2]) });
-  }
-  // "list custom fields for contacts" / "show custom fields for company Globex"
-  else if ((m = cased.match(/^(?:show|list|get|display|what are)(?: the)? custom fields?(?: of)? (?:for )?(campaigns?|contacts?|compan(?:y|ies)|tasks?)(?: (.+))?$/i))) {
-    set("show_custom_fields", {
-      entity_type: singCf(m[1]),
-      ...(m[2] ? { query: m[2].trim() } : {}),
-    });
-  }
   else if ((m = text.match(/^(?:update |set )(?:deal )?(.+?) (value|worth|amount|probability|chance|close date|expected close|owner|contact|company) (?:to )?(.+)$/))) {
     set("set_deal_field", { query: stripDealWord(m[1]), field: m[2], value: m[3] });
   }
@@ -600,10 +456,7 @@ export function parseIntent(raw: string): Intent {
   }
   else if ((m = text.match(/^(?:complete|finish|done with|mark (?:as )?done|check off)(?: task)? (.+)$/))) set("complete_task", { query: m[1].replace(/^task /, "") });
   else if ((m = text.match(/^(?:reopen|uncomplete|mark (?:as )?not done)(?: task)? (.+)$/))) set("reopen_task", { query: m[1].replace(/^task /, "") });
-  // A custom-field delete with a typo'd marker ("delete the VIP custom feild
-  // from companies") must not land here — skip it so the fuzzy parser repairs
-  // it into delete_custom_field instead.
-  else if ((m = text.match(/^(?:delete|remove)(?!.*(?:custom|custum|costum)\s+(?:field|feild)s?)(?: task)? (.+)$/))) set("delete_task", { query: m[1].replace(/^task /, "") });
+  else if ((m = text.match(/^(?:delete|remove)(?: task)? (.+)$/))) set("delete_task", { query: m[1].replace(/^task /, "") });
 
   return { name, raw, text, slots };
 }
@@ -625,15 +478,9 @@ export const HELP_LEVELS: HelpLevel[] = [
     title: "🟢 Beginner — everyday commands",
     rows: [
       { cmds: [["morning brief", "brief"]], note: "today's digest: pipeline, closing soon, tasks, activity" },
-      { cmds: [["my tasks", "tasks"], ["overdue tasks", "tasks"], ["kpis", "kpis"], ["list deals in negotiation", "deals"], ["show negotiation deals", "deals"], ["show deal Acme", "deal_detail"]], note: "" },
-      { cmds: [["deal journey Acme", "deal_journey"], ["deals from Referral", "deals_by_source"]], note: "stage-history timeline and source-filtered deals" },
-      { cmds: [["what's blocking the launch", "task_blockers"], ["show duplicates", "duplicates"]], note: "task blockers; find duplicate contacts & companies" },
-      { cmds: [["new deal", "wizard_start"], ["new contact", "wizard_start"], ["new company", "wizard_start"], ["new task", "wizard_start"]], note: "guided setup — one question at a time, skip or cancel anytime" },
-      { cmds: [["undo", "undo"]], note: "undo the last change in this chat" },
-      { cmds: [["what's her email", "contact_detail"]], note: "pronouns work after discussing someone: it, that deal, her…" },
+      { cmds: [["my tasks", "tasks"], ["kpis", "kpis"], ["list deals in negotiation", "deals"], ["show negotiation deals", "deals"], ["show deal Acme", "deal_detail"]], note: "" },
       { cmds: [["sales cycle", "sales_cycle"], ["top deals", "top_deals"], ["closing soon", "closing_soon"]], note: "where deals stall, biggest open deals, closes in the next 30 days" },
       { cmds: [["campaign stats", "campaign_stats"], ["stale deals", "hygiene"], ["what needs attention", "hygiene"]], note: "campaign win rates & pipeline hygiene" },
-      { cmds: [["pin this as a widget", "pin_widget"], ["add widget", "pin_widget"]], note: "pin the last analysis to the Milton tab in exec-crm" },
       { cmds: [["who is Jane Doe", "contact_detail"], ["search acme", "search"]], note: "contact detail cards and cross-entity search" },
       { cmds: [["note on Acme: called today, wants the proposal", "add_note"]], note: "pin a note to a deal — kept in Milton, shown on deal lookup" },
       { cmds: [["new campaign Q4 Push for Acme", "add_campaign"]], note: "campaigns need a company — I'll ask if you skip it" },
@@ -641,8 +488,6 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["add contact Jane Doe at Acme jane@acme.com", "add_contact"]], note: "" },
       { cmds: [["add task Call Acme tomorrow", "add_task"]], note: "" },
       { cmds: [["workspaces", "list_workspaces"], ["switch to Acme", "switch_workspace"]], note: "" },
-      { cmds: [["new session Pipeline review", "chat_session"], ["sessions", "chat_session"], ["switch session to Pipeline review", "chat_session"], ["current session", "chat_session"]], note: "named chat sessions — separate history, workspace, and tutorial each" },
-      { cmds: [["rename session to Q4 push", "chat_session"], ["delete session 2", "chat_session"]], note: "rename the current session; deleting asks first" },
       { cmds: [["meridian recons", "list_recons"], ["meridian dossier Austin", "meridian_dossier"]], note: "read Meridian recon" },
       { cmds: [["prep me for my call with Acme", "prep_brief"]], note: "meeting prep: who, open deals, tasks, talking points" },
       { cmds: [["import these contacts", "import_contacts"]], note: "attach a .vcf file first — I list what's inside before importing" },
@@ -659,15 +504,13 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["schedule EOD every weekday at 6pm", "schedule_add"]], note: "put routines on a clock" },
       { cmds: [["pause schedule 3", "pause_schedule"], ["resume schedule 3", "resume_schedule"], ["unschedule 3", "unschedule"]], note: "" },
       { cmds: [["add stage Discovery before proposal", "add_stage"], ["rename stage Proposal to Scoping", "rename_stage"]], note: "edit the pipeline schema" },
-      { cmds: [["add custom field Renewal date to contacts", "add_custom_field"], ["set Renewal date to 2026-10-01 for contact Amara", "set_custom_field"]], note: "custom fields on contacts, companies, campaigns & tasks" },
-      { cmds: [["show custom fields for contacts", "show_custom_fields"], ["remove custom field Renewal date from contacts", "delete_custom_field"]], note: "" },
-      { cmds: [["meridian recon Austin", "meridian_request"]], note: "request a new Meridian recon (business data only) — I report back when it finishes" },
-      { cmds: [["meridian enrich Acme", "meridian_enrich"], ["enrichment status", "meridian_enrich_status"]], note: "enrich a company: public profile + principal contacts from its own site, then save the dossier to my notes" },
-      { cmds: [["meridian prospect dental clinics in Madisonville", "meridian_prospect"], ["prospect status", "meridian_prospect_status"]], note: "territory prospecting: stages prospect companies into exec-crm's Data Workshop Sandbox (staged, never imported without your approval)" },
+      { cmds: [["meridian recon Austin", "meridian_request"]], note: "request a new Meridian recon — I report back when it finishes" },
       { cmds: [["meridian entities Austin company", "meridian_entities"]], note: "its orgs, filtered by type" },
       { cmds: [["analyze my pipeline", "analyze_pipeline"], ["forecast", "forecast"]], note: "pipeline stats & weighted forecast — deterministic, plus analyst-model insights when set" },
       { cmds: [["plan my day", "plan_day"], ["plan my week", "plan_week"]], note: "prioritized plan from tasks, closing deals, stale deals" },
       { cmds: [["break down launch event", "plan_breakdown"]], note: "numbered steps from a built-in template — I ask before creating them as tasks; the analyst model will make them smarter when it returns" },
+      { cmds: [["show playbook", "show_playbook"], ["pause rule R7", "pause_rule"], ["reload playbook", "reload_playbook"]], note: "inspect, pause, and reload the CRM playbook rules" },
+      { cmds: [["show misses", "show_misses"]], note: "phrases I didn't understand — review them so I learn" },
     ],
   },
   {
@@ -679,9 +522,9 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["delete stage Discovery", "delete_stage"]], note: "asks first, moves its deals somewhere safe" },
       { cmds: [["delete deal Old Opp", "delete_deal"]], note: "destructive — always confirms first" },
       { cmds: [["close Acme deal as won", "close_deal"], ["mark Acme deal as lost", "close_deal"]], note: "closing a deal asks first too" },
-      { cmds: [["read this", "ocr_read"], ["analyze handwriting", "handwriting"]], note: "after snapping text with the camera button" },
+      { cmds: [["read this", "ocr_read"], ["analyze handwriting", "handwriting"]], note: "after 📷-snapping text" },
       { cmds: [], note: "Webhooks in: `POST /api/hooks/exec-crm` · `POST /api/hooks/meridian` (header `X-Milton-Secret` from `MILTON_HOOK_SECRET`)" },
-      { cmds: [["automation runs", "list_runs"]], note: "history, the bell, and live toasts in the Automations panel" },
+      { cmds: [["automation runs", "list_runs"]], note: "history, 🔔 bell, and live toasts in the ⚙️ Automations panel" },
     ],
   },
 ];
@@ -699,7 +542,5 @@ export function helpText(): string {
   }
   lines.push("Anything else I don't recognize goes to your LLM if `MILTON_LLM_URL` is set.");
   lines.push("I'll ask before anything destructive, and let you pick when a name matches more than one record.");
-  lines.push("A leading slash never changes a command: `/kpis` works the same as `kpis`.");
-  lines.push("Tip: type `/` in the chat box to browse every command, or say `undo` to reverse your last change.");
   return lines.join("\n");
 }
