@@ -157,6 +157,22 @@ function duePhrase(dateStr: string): string {
   return `due in ${d}d (${dateStr})`;
 }
 
+/** Add n calendar days to a YYYY-MM-DD date, in local time (never UTC). */
+function addDaysStr(ymd: string, n: number): string {
+  const m = (ymd || "").slice(0, 10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const d = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date();
+  d.setDate(d.getDate() + n);
+  return todayStr(d);
+}
+
+/** Monday..Sunday bounds of the week containing ref, as YYYY-MM-DD. */
+function weekBounds(ref: Date = new Date()): { start: string; end: string } {
+  const d = new Date(ref); d.setHours(0, 0, 0, 0);
+  const mon = new Date(d); mon.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+  const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+  return { start: todayStr(mon), end: todayStr(sun) };
+}
+
 // ---- entity picking -----------------------------------------------------------
 async function pickDeal(query: string): Promise<{ deal?: crm.Deal; matches: crm.Match<crm.Deal>[] }> {
   const matches = await crm.resolveDeal(query);
@@ -336,6 +352,11 @@ async function runUndo(session: Session): Promise<Reply> {
         break;
       }
       case "delete_task": await crm.deleteTask(inv.id); break;
+      case "patch_tasks":
+        for (const mv of inv.moves || []) {
+          try { await crm.patchTask(mv.id, mv.patch); } catch { /* undo as much as possible */ }
+        }
+        break;
       case "delete_tasks":
         for (const id of inv.ids || []) {
           try { await crm.deleteTask(id); } catch { /* undo as much as possible */ }
@@ -730,6 +751,27 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
     await crm.deleteTask(p.payload.id);
     if (snap) jpush(session, `Deleted task "${p.label}"`, { op: "recreate_task", snapshot: snap });
     return { text: `Deleted task "${p.label}".`, chips: ["My tasks"] };
+  }
+  if (p.type === "reschedule_tasks") {
+    const moves = (p.payload.moves || []) as ReschedMove[];
+    const done: ReschedMove[] = [];
+    for (const mv of moves) {
+      try {
+        await crm.patchTask(mv.id, { due_date: mv.to });
+        done.push(mv);
+      } catch { /* move as many as possible; report the shortfall */ }
+    }
+    if (done.length) {
+      jpush(session, `Rescheduled ${done.length} task${done.length === 1 ? "" : "s"}`,
+        { op: "patch_tasks", moves: done.map((m) => ({ id: m.id, patch: { due_date: m.from } })) });
+      for (const m of done) usability.trackMention(session.id, "task", m.id, m.title);
+    }
+    if (done.length === moves.length) {
+      const tos = [...new Set(done.map((m) => m.to))];
+      const where = tos.length === 1 ? ` to ${duePhrase(tos[0])}` : "";
+      return { text: `✅ Moved ${done.length} task${done.length === 1 ? "" : "s"}${where}.`, chips: ["My tasks", "Morning brief"] };
+    }
+    return { text: `Moved ${done.length} of ${moves.length} tasks — ${moves.length - done.length} failed.`, chips: ["My tasks"] };
   }
   if (p.type === "complete_blocked_task") {
     const t = await crm.toggleTask(p.payload.id, true);
@@ -2216,6 +2258,7 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
     case "complete_task": return taskByName(session, s.query, "complete_task", {});
     case "reopen_task": return taskByName(session, s.query, "reopen_task", {});
     case "delete_task": return taskByName(session, s.query, "delete_task", {});
+    case "reschedule_tasks": return rescheduleTasksReply(session, s);
     case "task_blockers": return taskByName(session, s.query, "task_blockers", {});
     case "wizard_start": return startWizard(session, s.kind || "deal");
     case "undo": return runUndo(session);
@@ -4899,6 +4942,7 @@ async function taskAction(session: Session, action: string, task: crm.Task, payl
       chips: ["Yes", "No"],
     };
   }
+  if (action === "reschedule_task") return rescheduleConfirm(session, [task], payload as Record<string, string>);
   return { text: "I lost track of that action — try again." };
 }
 
@@ -4928,6 +4972,64 @@ async function taskBlockersReply(task: crm.Task): Promise<Reply> {
   return {
     text: `"${t.title}" is blocked by:\n${lines}\n\n${blockers.length === 1 ? "Finish it" : "Finish them"} first, or complete the task anyway.`,
     chips: [...blockers.map((b) => `Complete ${b.title}`), `Complete ${t.title}`],
+  };
+}
+
+// ---- task rescheduling (one task or a whole group) -------------------------------
+interface ReschedMove { id: number; title: string; from: string; to: string; }
+
+const RESELECT_LABELS: Record<string, string> = {
+  overdue: "overdue tasks",
+  this_week: "tasks due this week",
+  today: "tasks due today",
+  tomorrow: "tasks due tomorrow",
+};
+
+async function rescheduleTasksReply(session: Session, s: Record<string, string>): Promise<Reply> {
+  if (s.selector === "single") return taskByName(session, s.task, "reschedule_task", s);
+  const today = todayStr();
+  const open = (await crm.getTasks()).filter((t) => !t.done);
+  let cands: crm.Task[] = [];
+  if (s.selector === "overdue") cands = open.filter((t) => t.due_date && t.due_date < today);
+  else if (s.selector === "this_week") {
+    const w = weekBounds();
+    cands = open.filter((t) => t.due_date && t.due_date >= w.start && t.due_date <= w.end);
+  }
+  else if (s.selector === "today") cands = open.filter((t) => t.due_date === today);
+  else if (s.selector === "tomorrow") cands = open.filter((t) => t.due_date === addDaysStr(today, 1));
+  return rescheduleConfirm(session, cands, s);
+}
+
+async function rescheduleConfirm(session: Session, cands: crm.Task[], s: Record<string, string>): Promise<Reply> {
+  const label = RESELECT_LABELS[s.selector] || "tasks";
+  const shift = s.shift ? parseInt(s.shift, 10) : NaN;
+  const moves: ReschedMove[] = [];
+  let skippedUndated = 0;
+  for (const t of cands) {
+    let to: string;
+    if (s.date) to = s.date;
+    else if (!t.due_date) { skippedUndated++; continue; }
+    else to = addDaysStr(t.due_date, shift);
+    if (to === (t.due_date || "")) continue;
+    moves.push({ id: t.id, title: t.title, from: t.due_date || "", to });
+  }
+  if (!moves.length) {
+    if (s.selector === "single" && cands.length) {
+      const t = cands[0];
+      if (!t.due_date) return { text: `"${t.title}" has no due date — move it to a specific day instead, e.g. \`move task ${t.title} to friday\`.`, chips: ["My tasks"] };
+      return { text: `"${t.title}" is already ${duePhrase(t.due_date)} — nothing to change.`, chips: ["My tasks"] };
+    }
+    return { text: `No ${label} to move.`, chips: ["My tasks", "Morning brief"] };
+  }
+  const noun = moves.length === 1 ? "this task" : `these ${moves.length} ${label}`;
+  session.pending = { type: "reschedule_tasks", label: `${moves.length} task${moves.length === 1 ? "" : "s"}`, payload: { moves } };
+  const lines = moves.slice(0, 25).map((m) => `• **${m.title}** — ${m.from ? duePhrase(m.from) : "no due date"} → **${duePhrase(m.to)}**`).join("\n");
+  const more = moves.length > 25 ? `\n…and ${moves.length - 25} more.` : "";
+  const skip = skippedUndated ? `\n\n${skippedUndated} without a due date ${skippedUndated === 1 ? "was" : "were"} left alone.` : "";
+  return {
+    text: `Move ${noun}?\n${lines}${more}${skip}`,
+    cards: [{ kind: "confirm", options: [{ n: 1, label: `Yes, move ${moves.length === 1 ? "it" : `all ${moves.length}`}` }, { n: 2, label: "Cancel" }] }],
+    chips: ["Yes", "No"],
   };
 }
 

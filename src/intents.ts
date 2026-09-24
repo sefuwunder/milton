@@ -9,7 +9,7 @@ export type IntentName =
   | "deliveries" | "activities" | "notes"
   | "add_deal" | "move_deal" | "set_deal_field" | "close_deal" | "delete_deal"
   | "add_contact" | "add_company" | "add_task" | "complete_task" | "reopen_task"
-  | "delete_task" | "remind_add" | "remind_list" | "remind_cancel" | "import_contacts"
+  | "delete_task" | "reschedule_tasks" | "remind_add" | "remind_list" | "remind_cancel" | "import_contacts"
   | "capture"
   | "ocr_read" | "handwriting" | "save_note"
   | "prep_brief"
@@ -58,7 +58,7 @@ export const INTENT_NAMES: IntentName[] = [
   "deliveries", "activities", "notes",
   "add_deal", "move_deal", "set_deal_field", "close_deal", "delete_deal",
   "add_contact", "add_company", "add_task", "complete_task", "reopen_task",
-  "delete_task", "remind_add", "remind_list", "remind_cancel", "import_contacts",
+  "delete_task", "reschedule_tasks", "remind_add", "remind_list", "remind_cancel", "import_contacts",
   "capture",
   "ocr_read", "handwriting", "save_note",
   "prep_brief",
@@ -167,6 +167,71 @@ export function extractDate(s: string, ref: Date = new Date()): { date: string; 
     }
   }
   return null;
+}
+
+/** Task rescheduling: "push all overdue tasks to next monday",
+ *  "move this week's tasks to the same time next week",
+ *  "reschedule task Call Acme to friday".
+ *  Selectors: overdue | this_week | today | tomorrow | single ("task <name>").
+ *  Targets: relative shift ("same time next week", "a week later", "by N days")
+ *  or an absolute date ("friday", "2026-10-01"). A bare "next week" means a
+ *  +7-day shift, matching "push this week's tasks to next week".
+ *  Returns string slots { selector, task, target, shift, date } or null. */
+function parseRescheduleTarget(raw: string): { shift?: number; date?: string } | null {
+  const t = raw.trim().toLowerCase();
+  if (/^(the )?same time next week$/.test(t)) return { shift: 7 };
+  if (/^a week later$/.test(t)) return { shift: 7 };
+  if (/^(back |out )?a week$/.test(t)) return { shift: 7 };
+  if (/^next week$/.test(t)) return { shift: 7 };
+  let m = t.match(/^by (\d+) (day|week)s?$/);
+  if (m) return { shift: Number(m[1]) * (m[2] === "week" ? 7 : 1) };
+  m = t.match(/^(\d+) (day|week)s? later$/);
+  if (m) return { shift: Number(m[1]) * (m[2] === "week" ? 7 : 1) };
+  // deadline phrasing: "by friday" — strip the "by" and keep the date
+  const dm = t.match(/^by (.+)$/);
+  const dt = extractDate(dm ? dm[1] : t);
+  if (dt && !dt.rest) return { date: dt.date };
+  return null;
+}
+
+function parseRescheduleSelector(head: string): { selector: string; task: string } | null {
+  const t = head.trim().toLowerCase();
+  if (/^(all )?(my |the )?overdue( tasks?)?$/.test(t)) return { selector: "overdue", task: "" };
+  if (/^(all )?(my |the )?tasks?( from| due)? this week$/.test(t) || /^(all of |all )?(my |the )?this week's tasks?$/.test(t))
+    return { selector: "this_week", task: "" };
+  if (/^today'?s tasks?$/.test(t) || /^(the |my )?tasks? due today$/.test(t)) return { selector: "today", task: "" };
+  if (/^tomorrow'?s tasks?$/.test(t) || /^(the |my )?tasks? due tomorrow$/.test(t)) return { selector: "tomorrow", task: "" };
+  const m = t.match(/^tasks? (.+)$/);
+  if (m && m[1].trim()) return { selector: "single", task: m[1].trim() };
+  return null;
+}
+
+export function parseReschedule(text: string): Record<string, string> | null {
+  const t = text.toLowerCase().trim();
+  const vm = t.match(/^(push|move|shift|reschedule|defer|postpone|bump)\b\s+(.+)$/);
+  if (!vm) return null;
+  const rest = vm[2];
+  // Split the selector from the target on " to " ("move X to friday") or
+  // " by " ("defer X by 3 days"); the earlier of the two wins.
+  const toAt = rest.search(/\s+to\s+/);
+  const byAt = rest.search(/\s+by\s+/);
+  let cut = -1, keepBy = false;
+  if (toAt >= 0 && (byAt < 0 || toAt < byAt)) cut = toAt;
+  else if (byAt >= 0) { cut = byAt; keepBy = true; }
+  if (cut < 0) return null;
+  const sel = parseRescheduleSelector(rest.slice(0, cut));
+  if (!sel) return null;
+  const targetRaw = keepBy ? rest.slice(cut).trim() : rest.slice(cut).replace(/^\s*to\s+/, "").trim();
+  if (!targetRaw) return null;
+  const tgt = parseRescheduleTarget(targetRaw);
+  if (!tgt) return null;
+  return {
+    selector: sel.selector,
+    task: sel.task,
+    target: targetRaw,
+    shift: tgt.shift != null ? String(tgt.shift) : "",
+    date: tgt.date || "",
+  };
 }
 
 /** One-shot reminder time parsing. Returns the fire time (epoch ms) and the
@@ -311,7 +376,7 @@ export function parseIntent(raw: string): Intent {
   if (/^(yes|yep|yeah|y|sure|do it|confirm|go ahead|ok|okay)$/.test(text)) return { name: "confirm_yes", raw, text, slots };
   if (/^(no|nope|nah|cancel|never mind|nevermind|abort)$/.test(text)) return { name: "confirm_no", raw, text, slots };
   if (/^(undo|undo that|undo last|undo the last (?:change|action))$/.test(text)) return { name: "undo", raw, text, slots };
-  let m = text.match(/^(?:number |option |#)?([1-9])$/) || text.match(/(?:choose|pick|select|option|number)\s+([1-9])\b/);
+  let m: any = text.match(/^(?:number |option |#)?([1-9])$/) || text.match(/(?:choose|pick|select|option|number)\s+([1-9])\b/);
   if (m) return { name: "choose_number", raw, text, slots: { n: m[1] } };
 
   // ---- tutorial -----------------------------------------------------------------
@@ -504,6 +569,11 @@ export function parseIntent(raw: string): Intent {
   // ---- deal writes --------------------------------------------------------------
   else if ((m = text.match(new RegExp(`^(?:mark |set )?${DEAL_WORD} (.+?) as (?:closed[ -]?)?(won|lost)$`)))) set("close_deal", { query: m[1], result: m[2] });
   else if ((m = text.match(/^(?:mark|close) (.+?) (?:as )?(won|lost)$/))) set("close_deal", { query: stripDealWord(m[1]), result: m[2] });
+  // Before move_deal: "push all overdue tasks to next monday",
+  // "move this week's tasks to the same time next week", "move task X to friday".
+  // parseReschedule returns null for deal moves ("move Acme to negotiation"),
+  // so those still fall through to move_deal below.
+  else if ((m = parseReschedule(text))) set("reschedule_tasks", m);
   else if ((m = text.match(new RegExp(`^(?:move |shift |put )${DEAL_WORD}? ?(.+?) to ([\\w ]+)$`)))) {
     const st = parseStage(m[2]);
     if (st) set("move_deal", { query: stripDealWord(m[1]), stage: st });
@@ -676,6 +746,7 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["move Acme deal to negotiation", "move_deal"]], note: "" },
       { cmds: [["add contact Jane Doe at Acme jane@acme.com", "add_contact"]], note: "" },
       { cmds: [["add task Call Acme tomorrow", "add_task"]], note: "" },
+      { cmds: [["push all overdue tasks to next monday", "reschedule_tasks"], ["move this week's tasks to the same time next week", "reschedule_tasks"]], note: "reschedule one task or a whole group — I list every move and ask first" },
       { cmds: [["workspaces", "list_workspaces"], ["switch to Acme", "switch_workspace"]], note: "" },
       { cmds: [["new session Pipeline review", "chat_session"], ["sessions", "chat_session"], ["switch session to Pipeline review", "chat_session"], ["current session", "chat_session"]], note: "named chat sessions — separate history, workspace, and tutorial each" },
       { cmds: [["rename session to Q4 push", "chat_session"], ["delete session 2", "chat_session"]], note: "rename the current session; deleting asks first" },
