@@ -2,6 +2,7 @@
 // Replies are structured (text + cards + chips) so the chat UI can render richly.
 
 import * as crm from "./crm";
+import * as wd from "./widget_draft";
 import * as mer from "./meridian";
 import { parseIntent, helpText, HELP_CHIPS, parseStage, parseMoney, parseDate, parseReminderTime, formatWhen, parseCapture, type Intent } from "./intents";
 import { parseIntentFuzzy, type DisambigOption } from "./fuzzy";
@@ -2122,6 +2123,7 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
     case "campaign_stats": return withWidget(session, campaignStatsReply());
     case "closing_soon": return withWidget(session, closingSoonReply());
     case "pin_widget": return pinWidgetReply(session);
+    case "build_widget": return buildWidgetReply(s.description || "");
     case "contact_detail": return contactDetailReply(session, s.query || "", s.field);
     case "search": return searchReply(s.query || "");
     case "activities": return activitiesReply();
@@ -2735,6 +2737,66 @@ async function pinWidgetReply(session: Session): Promise<Reply> {
   } catch (e: any) {
     return {
       text: `Couldn't reach exec-crm to pin the widget: ${String(e?.message || e).slice(0, 180)}`,
+      chips: ["Top deals"],
+    };
+  }
+}
+
+// ---- build_widget: the natural widget-making flow -----------------------------
+// The user asks in chat ("build a widget that shows stalled deals"). Milton
+// drafts a manifest + JS/CSS — from a deterministic template when one fits,
+// otherwise from the local LLM — and files it as a Phase 3 proposal. The
+// proposal card appears in exec-crm's dock (refreshed after every reply);
+// preview runs sandboxed on demo data; the user's approve tap is the only
+// thing that installs it.
+async function buildWidgetReply(desc: string): Promise<Reply> {
+  const d = desc.trim();
+  if (!d) {
+    return {
+      text: "What should the widget do? For example:",
+      chips: wd.templateExamples().map((e) => `Build ${e}`),
+    };
+  }
+  const t = wd.matchTemplate(d);
+  if (t) return fileWidgetDraft(wd.buildFromTemplate(t.template, t.params), "template");
+  const endpoint = an.llmEndpointBase();
+  if (!endpoint) {
+    return {
+      text: `That one's beyond my built-in templates — I can draft these without the LLM:\n${wd.templateExamples().map((e) => `• ${e}`).join("\n")}\n\nFor anything else, point MILTON_LLM_URL at your local model and ask again: I'll draft the widget and file it as a proposal for you to preview and approve.`,
+      chips: wd.templateExamples().map((e) => `Build ${e}`),
+    };
+  }
+  const drafted = await wd.draftWidgetViaLlm(d, {
+    endpoint,
+    model: process.env.MILTON_LLM_MODEL || "local-model",
+    key: process.env.MILTON_LLM_KEY || "",
+  });
+  if (!drafted.ok) {
+    return {
+      text: `I couldn't draft that widget: ${drafted.error}`,
+      chips: wd.templateExamples().map((e) => `Build ${e}`),
+    };
+  }
+  return fileWidgetDraft(drafted.spec, "llm");
+}
+
+async function fileWidgetDraft(spec: wd.WidgetDraftSpec, via: "template" | "llm"): Promise<Reply> {
+  try {
+    await crm.proposeWidget({
+      kind: "widget",
+      title: spec.title,
+      rationale: spec.rationale,
+      manifest: spec.manifest,
+      js: spec.js,
+      css: spec.css,
+    });
+    return {
+      text: `Drafted “${spec.title}”${via === "template" ? " from a built-in template" : " with your local model"} and filed it as a proposal — it should be in your proposals below. Preview runs it on demo data only; Approve installs it into this workspace.`,
+      chips: ["Build another widget", "Top deals"],
+    };
+  } catch (e: any) {
+    return {
+      text: `The draft was ready but exec-crm wouldn't file it: ${String(e?.message || e).slice(0, 220)}`,
       chips: ["Top deals"],
     };
   }
