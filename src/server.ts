@@ -514,6 +514,30 @@ const server = Bun.serve({
       return json({ ...reply, ms: Date.now() - t0, workspace_id: session.workspaceId ?? null, workspace_name: session.workspaceName || "" });
     }
 
+    // ---- widget proposals (phase 3): Milton proposes a deployable widget or
+    // set to exec-crm. The proposal lands in the workspace's proposal inbox;
+    // the user previews it and approves it in chat — nothing installs without
+    // that tap. Callable by automations, scripts, or LLM-mode flows.
+    if (path === "/api/widgets/propose" && method === "POST") {
+      let body: any = {};
+      try { body = await req.json(); } catch { return json({ error: "invalid JSON" }, 400); }
+      const kind = String(body.kind || "widget");
+      if (kind !== "widget" && kind !== "set") return json({ error: 'kind must be "widget" or "set"' }, 400);
+      const ws = body.workspace == null || body.workspace === ""
+        ? null : Number(body.workspace);
+      if (ws !== null && !Number.isFinite(ws)) return json({ error: "bad workspace" }, 400);
+      try {
+        const { proposeWidget } = await import("./crm");
+        const proposal = await runWithWorkspace(ws, () => proposeWidget({
+          kind, title: body.title, rationale: body.rationale,
+          manifest: body.manifest, js: body.js, css: body.css, members: body.members,
+        }));
+        return json({ proposal }, 201);
+      } catch (e: any) {
+        return json({ error: `exec-crm rejected the proposal: ${String(e?.message || e).slice(0, 200)}` }, 502);
+      }
+    }
+
     return json({ error: "not found" }, 404);
   },
 });

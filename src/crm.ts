@@ -294,3 +294,23 @@ export async function pinWidget(w: Widgetable): Promise<any> {
   const j = await req("/api/milton/widgets", "POST", w);
   return j.widget;
 }
+
+// ---- widget proposals (phase 3) ----------------------------------------------------
+// Milton proposes a deployable dashboard widget or widget set: filed into
+// exec-crm's proposal inbox for the ambient session workspace, where the user
+// previews it and approves it in chat. The user's approve tap is the
+// permission grant — nothing installs without it.
+export interface WidgetProposalSpec {
+  kind: "widget" | "set";
+  title: string;
+  rationale?: string;
+  manifest: any;
+  js?: string;
+  css?: string;
+  members?: { manifest: any; js?: string; css?: string }[];
+}
+/** File a widget/set proposal with exec-crm. Returns the pending proposal. */
+export async function proposeWidget(spec: WidgetProposalSpec): Promise<any> {
+  const j = await req("/api/widget-proposals", "POST", spec);
+  return j.proposal;
+}
