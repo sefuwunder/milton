@@ -38,6 +38,8 @@ export interface IncomingHook { id: number; name: string; key: string; created_a
 export interface Campaign { id: number; name: string; status?: string }
 
 import { currentWorkspaceId } from "./workspace";
+import { boundedEdit, maxDistFor } from "./fuzzy";
+import { buildSymSpellIndex, type SymSpellIndex } from "./symspell";
 
 const BASE = process.env.EXEC_CRM_URL || process.env.MILTON_CRM_URL || "http://localhost:3001";
 
@@ -200,18 +202,42 @@ export async function deleteTask(id: number): Promise<void> {
 
 // ---- fuzzy entity resolution ------------------------------------------------
 // Scores candidates by substring match quality; returns ranked list.
-function scoreName(name: string, query: string): number {
+function scoreName(name: string, query: string, typoIdx?: SymSpellIndex): number {
   const n = name.toLowerCase(), q = query.toLowerCase().trim();
   if (!q) return 0;
   if (n === q) return 100;
   if (n.startsWith(q)) return 80;
   const words = n.split(/\s+/);
   if (words.some((w) => w.startsWith(q))) return 70;
+  // Typo tier (60): every query token lands within typo budget of some of THIS
+  // name's tokens — "Acmee" finds Acme Corp, "Tom Reeys" finds Tom Reyes.
+  // Below word-prefix (a real prefix is a stronger signal) and above
+  // substring (a typo'd token should beat a partial hit like "Bacmee Ltd").
+  if (typoIdx && typoTier(n, q, typoIdx)) return 60;
   if (n.includes(q)) return 50;
   // token overlap fallback: every query token found somewhere
   const qt = q.split(/\s+/);
   if (qt.length > 1 && qt.every((t) => n.includes(t))) return 40;
   return 0;
+}
+
+/** Every query token within maxDistFor budget of some token of THIS name. The
+ *  index is built over all fetched names (one build per matchByName call);
+ *  the membership check keeps the tier per-item, so one typo'd name can't
+ *  promote every other item to 60. */
+function typoTier(n: string, q: string, typoIdx: SymSpellIndex): boolean {
+  const ntoks = new Set(n.split(/[^a-z0-9]+/).filter(Boolean));
+  const qt = q.split(/[^a-z0-9]+/).filter(Boolean);
+  if (!qt.length) return false;
+  return qt.every(
+    (t) =>
+      typoIdx.lookup(t, (w) => {
+        if (!ntoks.has(w)) return null;
+        const limit = maxDistFor(t, w);
+        const d = boundedEdit(t, w, limit);
+        return d <= limit ? d : null;
+      }).length > 0,
+  );
 }
 
 export interface Match<T> { item: T; score: number }
@@ -220,8 +246,15 @@ export function matchByName<T extends { id: number; name?: string; title?: strin
   items: T[], query: string
 ): Match<T>[] {
   const label = (it: T) => (it.name ?? it.title ?? "").toString();
+  // Per-call delete index over the fetched name tokens: the names are already
+  // in memory (the same array this function scores), so there is nothing to
+  // cache or invalidate — the fetch is the refresh policy.
+  const toks = new Set<string>();
+  for (const it of items)
+    for (const t of label(it).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)) toks.add(t);
+  const typoIdx = buildSymSpellIndex(toks, 2);
   return items
-    .map((item) => ({ item, score: scoreName(label(item), query) }))
+    .map((item) => ({ item, score: scoreName(label(item), query, typoIdx) }))
     .filter((m) => m.score > 0)
     .sort((a, b) => b.score - a.score || label(a.item).localeCompare(label(b.item)));
 }

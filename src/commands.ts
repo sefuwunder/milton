@@ -9,6 +9,7 @@
 
 import { HELP_LEVELS, INTENT_NAMES, type IntentName } from "./intents";
 import { boundedEdit } from "./fuzzy";
+import { buildSymSpellIndex, type SymSpellIndex } from "./symspell";
 
 export interface CommandMeta {
   name: string;
@@ -280,31 +281,55 @@ export function commandRegistry(): CommandMeta[] {
  * help examples, and description words with bounded edit distance, then
  * averages — so "updo" → undo, "deal jurney" → deal_journey, and commands
  * matching more of the input win over single-word ties.
+ *
+ * The words × targets scan now goes through one SymSpell delete-index (built
+ * once beside the commandRegistry cache): each input word does a single
+ * index lookup, and the caller's scaled-distance rule verifies every
+ * candidate, so the ranking is identical to the old scan.
  */
 export function suggestCommands(raw: string, n = 3): CommandMeta[] {
   const words = raw.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   if (!words.length) return [];
+  ensureSuggestIndex();
   const cmds = commandRegistry().filter((c) => !c.internal);
-  const scored = cmds.map((c) => {
-    const targets = new Set<string>([
-      c.name,
-      ...c.name.split("_"),
-      ...c.usage.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean),
-      ...c.examples.flatMap((e) => e.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)),
-      ...c.description.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean),
-    ]);
+  // Per input word: target word -> scaled distance, over every accepted
+  // target in the registry (same set the old per-command scan examined).
+  const wordHits: Map<string, number>[] = words.map((w) => {
+    const hits = new Map<string, number>();
+    const take = (t: string, d: number) => {
+      const scaled = d / Math.max(w.length, t.length);
+      const prev = hits.get(t);
+      if (prev === undefined || scaled < prev) hits.set(t, scaled);
+    };
+    for (const { word: t, d } of suggestIndex().lookup(w, (t2) => {
+      const d2 = boundedEdit(w, t2, 4);
+      // a real match: at most a third of the shorter word may be wrong
+      // ("updo"→"undo", "dupicates"→"duplicates"); pure noise like
+      // "frobnicator"→"activities" (d=5 of 10 chars) is capped instead.
+      return d2 <= Math.max(1, Math.floor(Math.min(w.length, t2.length) / 3)) ? d2 : null;
+    })) take(t, d);
+    if (w.length >= 15) {
+      // Capped-5 edge: boundedEdit(w, t, 4) returns 5 for true distance >= 5,
+      // and the scaled rule above can still accept that 5 when both words
+      // are long (min length >= 15). The index only finds true distance <= 4
+      // (any accepted pair with a short word has true distance <= 4 — the
+      // rule's own bound), so long input words get a verbatim scan over the
+      // long targets to keep the old behavior exactly.
+      for (const t of suggestLongTargets) {
+        const d = boundedEdit(w, t, 4);
+        if (d <= Math.max(1, Math.floor(Math.min(w.length, t.length) / 3))) take(t, d);
+      }
+    }
+    return hits;
+  });
+  const scored = cmds.map((c, ci) => {
+    const targets = suggestCmdTargets[ci];
     let total = 0;
-    for (const w of words) {
+    for (const hits of wordHits) {
       let best = Infinity;
       for (const t of targets) {
-        const d = boundedEdit(w, t, 4);
-        // a real match: at most a third of the shorter word may be wrong
-        // ("updo"→"undo", "dupicates"→"duplicates"); pure noise like
-        // "frobnicator"→"activities" (d=5 of 10 chars) is capped instead.
-        if (d <= Math.max(1, Math.floor(Math.min(w.length, t.length) / 3))) {
-          const scaled = d / Math.max(w.length, t.length);
-          if (scaled < best) best = scaled;
-        }
+        const s = hits.get(t);
+        if (s !== undefined && s < best) best = s;
       }
       total += best === Infinity ? 1 : best; // one garbage word caps at 1
     }
@@ -316,4 +341,43 @@ export function suggestCommands(raw: string, n = 3): CommandMeta[] {
   // fall back to generic help chips instead of alphabetical noise.
   if (!scored.length || scored[0].score >= 1) return [];
   return scored.slice(0, n).map((s) => s.c);
+}
+
+// ---- SymSpell index over the suggest target vocabulary --------------------
+// Built once beside the commandRegistry cache: the delete index, the
+// per-command target sets (in registry order, matching the scored array),
+// and the long-target list for the capped-5 edge above.
+
+let suggestIdx: SymSpellIndex | null = null;
+let suggestCmdTargets: Set<string>[] = [];
+let suggestLongTargets: string[] = [];
+
+function commandTargets(c: CommandMeta): Set<string> {
+  return new Set<string>([
+    c.name,
+    ...c.name.split("_"),
+    ...c.usage.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean),
+    ...c.examples.flatMap((e) => e.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)),
+    ...c.description.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean),
+  ]);
+}
+
+function ensureSuggestIndex(): void {
+  if (suggestIdx) return;
+  const cmds = commandRegistry().filter((c) => !c.internal);
+  const all = new Set<string>();
+  suggestCmdTargets = cmds.map((c) => {
+    const t = commandTargets(c);
+    for (const w of t) all.add(w);
+    return t;
+  });
+  // maxEdit 4: the scaled rule accepts true distance up to 4 (beyond that
+  // only the capped-5 long-word edge, handled separately above).
+  suggestIdx = buildSymSpellIndex(all, 4);
+  suggestLongTargets = [...all].filter((w) => w.length >= 15);
+}
+
+function suggestIndex(): SymSpellIndex {
+  ensureSuggestIndex();
+  return suggestIdx!;
 }

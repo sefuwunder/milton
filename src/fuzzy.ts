@@ -18,6 +18,7 @@
 // Fully deterministic: no ML, no randomness, no Date/clock use.
 
 import { parseIntent, type Intent, type IntentName } from "./intents";
+import { buildSymSpellIndex, type SymSpellIndex } from "./symspell";
 
 // ---------------------------------------------------------------------------
 // Normalization
@@ -1083,6 +1084,82 @@ for (const m of MATCHERS) {
 const CONTENT_STOP = new Set([...FILLER, ...REM_STOP, ...KNOWN_VOCAB]);
 
 // ---------------------------------------------------------------------------
+// SymSpell delete-index over the intent vocabulary (every keyword alias and
+// every phrase word bestToken is ever queried with). Built once at module
+// load; each input token then needs a single index lookup instead of a scan
+// over all aliases. The index only narrows candidates — intentAccept keeps
+// the exact prefilter set the old scan applied, so verification (and hence
+// behavior) is byte-identical.
+// ---------------------------------------------------------------------------
+
+const INTENT_INDEX: SymSpellIndex = buildSymSpellIndex(
+  (() => {
+    const s = new Set<string>();
+    for (const m of MATCHERS) {
+      for (const k of m.kw) s.add(k.a);
+      for (const p of m.ph) for (const w of p.w) s.add(w);
+    }
+    return s;
+  })(),
+  2,
+);
+
+/** Acceptance predicate for intent-vocabulary lookups: the exact prefilters
+ *  the old per-alias scan applied (length caps, per-pair budget, the
+ *  first-letter guard), then boundedEdit verification. */
+function intentAccept(t: string): (w: string) => number | null {
+  return (w: string) => {
+    if (t.length > 24 || Math.abs(t.length - w.length) > 2) return null;
+    const limit = maxDistFor(t, w);
+    if (Math.abs(t.length - w.length) > limit) return null;
+    // First letters are almost never typo'd: on short words a wrong initial
+    // is a different word ("call" is not "kill", "my" is not "me").
+    if (Math.min(t.length, w.length) <= 4 && t[0] !== w[0]) return null;
+    const d = boundedEdit(t, w, limit);
+    return d <= limit ? d : null;
+  };
+}
+
+/** alias -> distance for every intent-vocabulary word within budget of t.
+ *  One SymSpell lookup per token; bestToken then reads answers out of it. */
+function tokenAliasDist(t: string): Map<string, number> {
+  const m = new Map<string, number>();
+  if (FILLER.has(t)) return m; // pleasantries never carry intent meaning
+  for (const { word, d } of INTENT_INDEX.lookup(t, intentAccept(t))) m.set(word, d);
+  return m;
+}
+
+// ---------------------------------------------------------------------------
+// Glued-word segmentation ("showdeals" -> "show deals").
+// A missing space fails before any fuzzy logic runs, because tokens are
+// split on whitespace. This is strictly a FALLBACK: the classic matcher runs
+// first, and only when it yields no interpretation at all do we try splits.
+// A token is splittable only when it fails ALL single-word lookups (never
+// split a token that matched something), is >= 6 chars, and maps 1:1 onto
+// its raw token so the split position transfers exactly. Both halves must be
+// EXACT intent-vocabulary words — typo'd halves shred real words
+// ("tomorrow" is not "to"+"morrow", "tmoorrow" is not a command). The split
+// is validated by re-running the whole matcher: it is kept only if the
+// re-interpreted input actually parses. Halves re-enter the normal token
+// stream, so credit logic and build() canonicalization handle them — no new
+// scoring path. Never entity names: "AcmeCorp" must not split.
+// ---------------------------------------------------------------------------
+
+/** Exact-vocabulary split of one glued token, or null. Positions scan left
+ *  to right; the first split with both halves in KNOWN_VOCAB wins. */
+function exactSplit(t: string, r: string): { left: string; right: string; pos: number } | null {
+  if (t.length < 6) return null;
+  if (r.toLowerCase() !== t) return null; // punctuation-stripped: no clean split point
+  if (KNOWN_VOCAB.has(t) || tokenAliasDist(t).size > 0) return null; // matched: don't touch
+  for (let p = 1; p < t.length; p++) {
+    const left = t.slice(0, p);
+    const right = t.slice(p);
+    if (KNOWN_VOCAB.has(left) && KNOWN_VOCAB.has(right)) return { left, right, pos: p };
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Scoring
 // ---------------------------------------------------------------------------
 
@@ -1094,20 +1171,18 @@ interface Scored {
   maxKw: number; // strongest keyword weight consumed (chatter veto)
 }
 
-function bestToken(tokens: string[], alias: string, used: Set<number>): { idx: number; d: number } | null {
+function bestToken(
+  tokens: string[],
+  alias: string,
+  used: Set<number>,
+  dist: Map<string, number>[],
+): { idx: number; d: number } | null {
   let best: { idx: number; d: number } | null = null;
   for (let i = 0; i < tokens.length; i++) {
     if (used.has(i)) continue;
-    const t = tokens[i];
-    if (FILLER.has(t)) continue; // pleasantries never carry intent meaning
-    if (t.length > 24 || Math.abs(t.length - alias.length) > 2) continue;
-    const limit = maxDistFor(t, alias);
-    if (Math.abs(t.length - alias.length) > limit) continue;
-    // First letters are almost never typo'd: on short words a wrong initial
-    // is a different word ("call" is not "kill", "my" is not "me").
-    if (Math.min(t.length, alias.length) <= 4 && t[0] !== alias[0]) continue;
-    const d = boundedEdit(t, alias, limit);
-    if (d <= limit && (!best || d < best.d)) {
+    const d = dist[i].get(alias);
+    if (d === undefined) continue;
+    if (!best || d < best.d) {
       best = { idx: i, d };
       if (d === 0) break;
     }
@@ -1115,7 +1190,12 @@ function bestToken(tokens: string[], alias: string, used: Set<number>): { idx: n
   return best;
 }
 
-function scoreMatcher(m: FuzzMatcher, tokens: string[], blocked: Set<number> = new Set()): Scored {
+function scoreMatcher(
+  m: FuzzMatcher,
+  tokens: string[],
+  dist: Map<string, number>[],
+  blocked: Set<number> = new Set(),
+): Scored {
   const used = new Set<number>(blocked);
   const consumed = new Map<number, string>();
   const kwFirst = new Set<number>(); // token idxs consumed by keywords (not phrases)
@@ -1141,7 +1221,7 @@ function scoreMatcher(m: FuzzMatcher, tokens: string[], blocked: Set<number> = n
     for (const k of kws) {
       if (done.has(k)) continue;
       if (k.x && round === 1) continue; // exact-only keyword: no typo guessing
-      const b = bestToken(tokens, k.a, used);
+      const b = bestToken(tokens, k.a, used, dist);
       if (!b) continue;
       if ((round === 0) !== (b.d === 0)) continue;
       done.add(k);
@@ -1161,11 +1241,11 @@ function scoreMatcher(m: FuzzMatcher, tokens: string[], blocked: Set<number> = n
   // phrases never double-take the same token.
   const pused = new Set<number>();
   for (const p of m.ph) {
-    const head = bestToken(tokens, p.w[0], pused);
+    const head = bestToken(tokens, p.w[0], pused, dist);
     if (!head || head.d > 1) continue;
     let hits = 0;
     for (const w of p.w) {
-      const b = bestToken(tokens, w, pused);
+      const b = bestToken(tokens, w, pused, dist);
       if (!b || b.d > 1 || (w.length <= 3 && b.d > 0)) continue;
       hits++;
       if (used.has(b.idx)) pused.add(b.idx); // hit, already keyword-consumed
@@ -1244,11 +1324,60 @@ export function parseIntentFuzzy(raw: string): Intent {
   const rawToks = expandContractions(raw).split(/\s+/).filter(Boolean).filter((t) => !isFiller(t)).slice(0, MAX_TOKENS);
   if (!tokens.length || tokens.length !== rawToks.length) return exact;
 
+  // Classic path first: splitting never reranks a successful parse.
+  const first = interpretTokens(tokens, rawToks, raw, normed);
+  if (first) return first;
+
+  // Glued-word fallback ("showdeals" -> "show deals"): split splittable
+  // tokens one at a time, left to right, keeping the first split whose
+  // re-interpreted input actually parses.
+  const splittable: { idx: number; left: string; right: string; pos: number }[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const s = exactSplit(tokens[i], rawToks[i]);
+    if (s) splittable.push({ idx: i, ...s });
+  }
+  const applySplit = (idx: number, left: string, right: string, pos: number) => {
+    const nt = [...tokens];
+    const nr = [...rawToks];
+    nt.splice(idx, 1, left, right);
+    nr.splice(idx, 1, rawToks[idx].slice(0, pos), rawToks[idx].slice(pos));
+    return { nt, nr };
+  };
+  for (const s of splittable) {
+    const { nt, nr } = applySplit(s.idx, s.left, s.right, s.pos);
+    const hit = interpretTokens(nt, nr, raw, normed);
+    if (hit) return hit;
+  }
+  // Last resort: split every splittable token at once ("showdeals listtasks").
+  if (splittable.length > 1) {
+    const nt: string[] = [];
+    const nr: string[] = [];
+    const byIdx = new Map(splittable.map((s) => [s.idx, s]));
+    for (let i = 0; i < tokens.length; i++) {
+      const s = byIdx.get(i);
+      if (!s) { nt.push(tokens[i]); nr.push(rawToks[i]); continue; }
+      nt.push(s.left, s.right);
+      nr.push(rawToks[i].slice(0, s.pos), rawToks[i].slice(s.pos));
+    }
+    const hit = interpretTokens(nt, nr, raw, normed);
+    if (hit) return hit;
+  }
+  return exact;
+}
+
+/** The classic matcher pipeline on one token stream: the Intent, or null
+ *  when nothing interprets (the old code returned the exact parser's
+ *  "unknown" here). */
+function interpretTokens(tokens: string[], rawToks: string[], raw: string, normed: string): Intent | null {
+  // One SymSpell lookup per token; the matcher reads (alias -> distance)
+  // answers out of these instead of scanning aliases per token.
+  const dist = tokens.map(tokenAliasDist);
+
   const scored: (Scored & { cmd: string | null })[] = [];
   const failed: (Scored & { cmd: null })[] = [];
   const hasChatter = tokens.some((t) => CHATTER.has(t));
   for (const m of MATCHERS) {
-    const s = scoreMatcher(m, tokens);
+    const s = scoreMatcher(m, tokens, dist);
     if (s.credit < m.need) continue;
     if (hasChatter && s.maxKw < 2.5) continue; // small talk, not a command
     const cmd = buildCommand(s, rawToks);
@@ -1278,7 +1407,7 @@ export function parseIntentFuzzy(raw: string): Intent {
   if (claims && claims.size > 0) {
     pool = [];
     for (const m of MATCHERS) {
-      const s = scoreMatcher(m, tokens, claims);
+      const s = scoreMatcher(m, tokens, dist, claims);
       if (s.credit < m.need) continue;
       const cmd = buildCommand(s, rawToks);
       const check = cmd ? parseIntent(cmd) : null;
@@ -1286,7 +1415,7 @@ export function parseIntentFuzzy(raw: string): Intent {
       pool.push({ ...s, cmd });
     }
   }
-  if (!pool.length) return exact;
+  if (!pool.length) return null;
   pool.sort((a, b) => b.credit - a.credit || a.m.pri - b.m.pri);
 
   const tied = pool.filter((s) => pool[0].credit - s.credit < TIE_GAP).slice(0, 3);
