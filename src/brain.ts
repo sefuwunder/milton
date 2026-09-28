@@ -98,6 +98,10 @@ export interface Session {
   choice?: ChoiceState;
   enrichJob?: EnrichJobState; // in-flight Meridian enrichment (see `enrichment status`)
   prospectJob?: ProspectJobState; // in-flight Meridian territory prospecting (see `prospect status`)
+  // Last finished prospect run, kept so `import prospects` can bring it into
+  // a workspace as contacts. Companies capped at stash time (see
+  // PROSPECT_STASH_MAX) so the persisted session blob stays small.
+  lastProspect?: { industry: string; location: string; companies: mer.ProspectCompany[]; at: number };
   history: { role: "user" | "milton"; text: string }[];
   lastOcr?: { text: string; uploadId: string };
   notes?: SavedNote[];
@@ -782,6 +786,52 @@ async function runPending(session: Session, p: PendingAction): Promise<Reply> {
   if (p.type === "delete_custom_field") {
     await crm.deleteCustomField(p.payload.id);
     return { text: `Deleted custom field ${p.label}.`, chips: ["Help"] };
+  }
+  if (p.type === "prospect_import") {
+    const { workspaceId, workspaceName, items } = p.payload as {
+      workspaceId: number | null; workspaceName: string;
+      items: { name: string; industry: string; address: string }[];
+    };
+    let created = 0, skipped = 0;
+    const errors: string[] = [];
+    try {
+      await wss.runWithWorkspace(workspaceId, async () => {
+        // Re-check at confirm time: the workspace may have changed since the
+        // confirmation was shown. Find-or-create companies, then contacts.
+        const existingContacts = new Set((await crm.getContacts()).map((c) => normProspectName(c.name)));
+        const companyByName = new Map((await crm.getCompanies()).map((c) => [normProspectName(c.name), c.id]));
+        for (const it of items) {
+          const key = normProspectName(it.name);
+          try {
+            if (existingContacts.has(key)) { skipped++; continue; }
+            let companyId = companyByName.get(key);
+            if (companyId == null) {
+              const res: any = await crm.req("/api/companies", "POST", { name: it.name, industry: it.industry || "" });
+              companyId = res?.company?.id;
+              if (companyId != null) companyByName.set(key, companyId);
+            }
+            await crm.req("/api/contacts", "POST", { name: it.name, company_id: companyId ?? null, title: "" });
+            existingContacts.add(key);
+            created++;
+          } catch (e: any) {
+            errors.push(`${it.name}: ${String(e?.message || e).slice(0, 80)}`);
+          }
+        }
+      });
+    } catch (e: any) {
+      return { text: `Couldn't reach exec-crm to import into **${workspaceName}**: ${String(e?.message || e).slice(0, 150)}`, chips: ["Help"] };
+    }
+    const errNote = errors.length ? `\n\n${errors.length} failed:\n${errors.slice(0, 5).map((e) => `• ${e}`).join("\n")}` : "";
+    if (!created) {
+      return {
+        text: `Nothing imported into **${workspaceName}** — ${skipped} already there${errors.length ? `, ${errors.length} failed` : ""}.${errNote}`,
+        chips: ["List contacts", "Meridian recons"],
+      };
+    }
+    return {
+      text: `✅ Imported **${created}** ${created === 1 ? "contact" : "contacts"} into workspace **${workspaceName}**${skipped ? ` (${skipped} already in your CRM skipped)` : ""} — each with a company record, ready for prospecting.${errNote}`,
+      chips: ["List contacts", "Show pipeline"],
+    };
   }
   // ---- outcome definitions: CONFIRM saves the built definition ----
   if (p.type === "create_outcome") {
@@ -1909,8 +1959,8 @@ function csvCell(v: string): string {
   const s = String(v ?? "");
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
-/** Normalize a company name for dedupe + CRM cross-checks. */
-function normProspectName(name: string): string {
+/** Normalize a company name for dedupe + CRM cross-checks. Exported for tests. */
+export function normProspectName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
 }
 
@@ -1937,6 +1987,10 @@ export function prospectNotes(
 export interface ProspectBatch { name: string; filename: string; csv: string; count: number; samples: string[] }
 /** Cap: the sandbox allows 5000 rows; stay well under. */
 export const PROSPECT_BATCH_MAX_ROWS = 500;
+/** Cap: companies kept on the session for `import prospects` (session blob is persisted). */
+export const PROSPECT_STASH_MAX = 100;
+/** Cap: contacts created per `import prospects` run — the flow targets 20-30. */
+export const PROSPECT_IMPORT_MAX = 30;
 
 /**
  * Build the sandbox batch payload from a finished prospect job. Both `name`
@@ -2015,6 +2069,16 @@ export async function prospectTerminalReply(session: Session, job: ProspectJobSt
     };
   }
   const staged = await stageProspects(job, r);
+  // Keep the finished run for `import prospects`, even if staging failed —
+  // the companies are still importable. Capped so the persisted session blob
+  // stays small; the import itself caps again at PROSPECT_IMPORT_MAX.
+  const finished = (r.companies || []).filter((c) => c && c.name);
+  if (finished.length) {
+    session.lastProspect = {
+      industry: job.industry, location: job.location,
+      companies: finished.slice(0, PROSPECT_STASH_MAX), at: Date.now(),
+    };
+  }
   if (!staged.ok) {
     return {
       text: `Meridian finished prospecting **${job.industry}** in **${job.location}**, but I couldn't stage the results into the Data Workshop Sandbox: ${staged.error}. Nothing was imported — say \`meridian prospect ${job.industry} in ${job.location}\` to try again.`,
@@ -2029,8 +2093,101 @@ export async function prospectTerminalReply(session: Session, job: ProspectJobSt
   }
   const ws = session.workspaceName || "default workspace";
   return {
-    text: `✅ Staged **${staged.count}** ${staged.count === 1 ? "company" : "companies"} into the Data Workshop Sandbox (workspace **${ws}**) — review and approve them in exec-crm's Sandbox tab; nothing was imported.\n\nBatch \`${staged.batchId}\` — **${staged.batchName}**${(staged.samples || []).length ? `\nIncluding: ${(staged.samples || []).map((s) => `**${s}**`).join(", ")}` : ""}`,
-    chips: ["Prospect status", "Meridian recons"],
+    text: `✅ Staged **${staged.count}** ${staged.count === 1 ? "company" : "companies"} into the Data Workshop Sandbox (workspace **${ws}**) — review and approve them in exec-crm's Sandbox tab; nothing was imported.\n\nBatch \`${staged.batchId}\` — **${staged.batchName}**${(staged.samples || []).length ? `\nIncluding: ${(staged.samples || []).map((s) => `**${s}**`).join(", ")}` : ""}\n\nWant them as contacts instead? Say \`import prospects\` and I'll bring this run straight into a workspace as contacts — I list them and ask first.`,
+    chips: ["Import prospects", "Prospect status", "Meridian recons"],
+  };
+}
+
+/**
+ * `import prospects` — bring the last finished Meridian prospect run into an
+ * exec-crm workspace as contacts (company + contact per prospect). Two-phase:
+ * resolve the workspace, dedupe against it, then park a Yes/No confirmation.
+ * The actual writes happen in runPending's "prospect_import" case.
+ * Exported for tests.
+ */
+export async function prospectImportReply(session: Session, slots: Record<string, string>): Promise<Reply> {
+  const last = session.lastProspect;
+  if (!last || !last.companies.length) {
+    return {
+      text: "I don't have a finished prospect run on this session yet. Say `meridian prospect dental clinics in Madisonville` first, then `import prospects` once it's done.",
+      chips: ["Meridian recons", "Help"],
+    };
+  }
+  // 1) Resolve the target workspace.
+  let wsId: number | null = null;
+  let wsName = "";
+  const named = (slots.workspace || "").trim();
+  if (named) {
+    const matches = await wss.findWorkspace(named);
+    if (matches === null) return { text: `I can't reach exec-crm to look up workspaces right now.`, chips: ["Help"] };
+    if (!matches.length) {
+      const all = await wss.listWorkspaces();
+      const names = (all || []).map((w) => w.name).join(", ") || "none yet";
+      return { text: `I don't know a workspace called "${named}". Available: ${names}.`, chips: ["Help"] };
+    }
+    if (matches[0].score < 70 && matches.length > 1) {
+      return {
+        text: `Which workspace did you mean?\n${matches.slice(0, 4).map((m, i) => `${i + 1}) ${m.ws.name}`).join("\n")}\nSay \`import prospects into <name>\` again with the full name.`,
+        chips: ["Help"],
+      };
+    }
+    wsId = matches[0].ws.id; wsName = matches[0].ws.name;
+  } else if (session.workspaceId != null) {
+    wsId = session.workspaceId;
+    wsName = session.workspaceName || await wss.workspaceLabel(wsId);
+  } else {
+    const all = await wss.listWorkspaces();
+    const names = (all || []).map((w) => `**${w.name}**`).join(", ") || "none yet";
+    return {
+      text: `Which workspace should the prospects go into? Say \`import prospects into <name>\`.\n\nAvailable: ${names}`,
+      chips: ["Help"],
+    };
+  }
+  // 2) Dedupe against the target workspace: skip anything already there as a
+  // contact or company, dedupe within the batch, cap at PROSPECT_IMPORT_MAX.
+  const seen = new Set<string>();
+  let existingContacts = new Set<string>();
+  try {
+    await wss.runWithWorkspace(wsId, async () => {
+      existingContacts = new Set((await crm.getContacts()).map((c) => normProspectName(c.name)));
+    });
+  } catch {
+    return { text: `I can't reach exec-crm to check workspace **${wsName}** right now.`, chips: ["Help"] };
+  }
+  const items: { name: string; industry: string; address: string }[] = [];
+  let skipped = 0;
+  for (const c of last.companies) {
+    const key = normProspectName(c.name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    // Skip only when the contact itself exists. An existing company is fine —
+    // the import links the new contact to it instead of recreating it.
+    if (existingContacts.has(key)) { skipped++; continue; }
+    if (items.length >= PROSPECT_IMPORT_MAX) continue;
+    items.push({ name: c.name, industry: c.industry || last.industry, address: c.address || "" });
+  }
+  const total = seen.size;
+  if (!items.length) {
+    return {
+      text: `Nothing new to import — all ${total} ${total === 1 ? "prospect" : "prospects"} from the **${last.industry}** run in **${last.location}** ${total === 1 ? "is" : "are"} already in workspace **${wsName}**.`,
+      chips: ["List contacts", "Meridian recons"],
+    };
+  }
+  const listed = items.slice(0, 8).map((it, i) => `${i + 1}. ${it.name}`).join("\n");
+  const more = items.length > 8 ? `\n(+${items.length - 8} more)` : "";
+  const cappedNote = total - skipped > PROSPECT_IMPORT_MAX
+    ? `\n\nShowing the first ${PROSPECT_IMPORT_MAX} of ${total - skipped} new prospects — say \`import prospects\` again afterwards for the rest.`
+    : "";
+  const skipNote = skipped ? ` ${skipped} already in your CRM ${skipped === 1 ? "was" : "were"} skipped.` : "";
+  session.pending = {
+    type: "prospect_import",
+    label: `Import ${items.length} prospects into ${wsName}`,
+    payload: { workspaceId: wsId, workspaceName: wsName, items },
+  };
+  return {
+    text: `Import **${items.length}** ${items.length === 1 ? "contact" : "contacts"} into workspace **${wsName}**?\n\n${listed}${more}${cappedNote}\n\nFrom the **${last.industry}** prospect run in **${last.location}**.${skipNote}\nEach gets a company record plus a contact. This can't be undone with \`undo\` — say Yes to proceed.`,
+    cards: [{ kind: "confirm", options: [{ n: 1, label: "Yes, import" }, { n: 2, label: "Cancel" }] }],
+    chips: ["Yes", "No"],
   };
 }
 
@@ -2154,6 +2311,7 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
     case "pause_rule": return setRuleActiveReply(s.id || "", false);
     case "resume_rule": return setRuleActiveReply(s.id || "", true);
     case "reload_playbook": return reloadPlaybookReply();
+    case "prospect_import": return prospectImportReply(session, s);
     case "prep_brief": return prepBriefForName(session, s.name);
     case "analyze_pipeline": return analyzePipelineReply();
     case "forecast": return forecastReply();

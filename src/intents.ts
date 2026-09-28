@@ -25,7 +25,7 @@ export type IntentName =
   | "chat_session" // named chat sessions; slots.action = new|list|switch|rename|delete|current
   | "list_recons" | "meridian_dossier" | "meridian_entities" | "meridian_request"
   | "meridian_enrich" | "meridian_enrich_status"
-  | "meridian_prospect" | "meridian_prospect_status"
+  | "meridian_prospect" | "meridian_prospect_status" | "prospect_import"
   | "list_stages" | "add_stage" | "rename_stage" | "delete_stage" | "move_stage"
   | "add_custom_field" | "set_custom_field" | "show_custom_fields" | "delete_custom_field"
   | "show_playbook" | "pause_rule" | "resume_rule" | "reload_playbook"
@@ -74,7 +74,7 @@ export const INTENT_NAMES: IntentName[] = [
   "chat_session",
   "list_recons", "meridian_dossier", "meridian_entities", "meridian_request",
   "meridian_enrich", "meridian_enrich_status",
-  "meridian_prospect", "meridian_prospect_status",
+  "meridian_prospect", "meridian_prospect_status", "prospect_import",
   "list_stages", "add_stage", "rename_stage", "delete_stage", "move_stage",
   "add_custom_field", "set_custom_field", "show_custom_fields", "delete_custom_field",
   "show_playbook", "pause_rule", "resume_rule", "reload_playbook",
@@ -458,6 +458,12 @@ export function parseIntent(raw: string): Intent {
   else if ((m = cased.match(/^meridian prospect\s+in\s+(.+)$/i))) set("meridian_prospect", { location: m[1].trim() });
   else if ((m = cased.match(/^meridian prospect\s+(.+)$/i))) set("meridian_prospect", { industry: m[1].trim() });
   else if (/^(prospect status|check prospecting)$/i.test(text)) set("meridian_prospect_status");
+  // Import the last finished prospect run as contacts into an exec-crm
+  // workspace: "import prospects", "import prospects into Prospecting".
+  // Must sit before the generic "import <thing>" patterns below so the
+  // prospect-specific form wins.
+  else if ((m = cased.match(/^import (?:the )?prospects?(?: as contacts?)? into (?:workspace )?(.+)$/i))) set("prospect_import", { workspace: m[1].trim() });
+  else if (/^(import prospects?(?: as contacts?)?|prospect import)$/i.test(text)) set("prospect_import", {});
   else if ((m = text.match(/^meridian dossier (.+)$/))) set("meridian_dossier", { query: m[1].trim() });
   else if ((m = text.match(/^meridian entities (.+)$/))) {
     // Optional trailing type filter: "meridian entities austin company".
@@ -774,6 +780,7 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["meridian recon Austin", "meridian_request"]], note: "request a new Meridian recon (business data only) — I report back when it finishes" },
       { cmds: [["meridian enrich Acme", "meridian_enrich"], ["enrichment status", "meridian_enrich_status"]], note: "enrich a company: public profile + principal contacts from its own site, then save the dossier to my notes" },
       { cmds: [["meridian prospect dental clinics in Madisonville", "meridian_prospect"], ["prospect status", "meridian_prospect_status"]], note: "territory prospecting: stages prospect companies into exec-crm's Data Workshop Sandbox (staged, never imported without your approval)" },
+      { cmds: [["import prospects", "prospect_import"], ["import prospects into Prospecting", "prospect_import"]], note: "bring the last finished prospect run into a workspace as contacts — I list them and ask first" },
       { cmds: [["meridian entities Austin company", "meridian_entities"]], note: "its orgs, filtered by type" },
       { cmds: [["analyze my pipeline", "analyze_pipeline"], ["forecast", "forecast"]], note: "pipeline stats & weighted forecast — deterministic, plus analyst-model insights when set" },
       { cmds: [["plan my day", "plan_day"], ["plan my week", "plan_week"]], note: "prioritized plan from tasks, closing deals, stale deals" },
