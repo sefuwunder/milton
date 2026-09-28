@@ -22,7 +22,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
     title: "Reading the pipeline",
     explain: "The core capability: live read access to your entire CRM from chat. Pipeline, deals, tasks, contacts — ask in plain words and I fetch it on the spot. In the web chat, type `/` anytime for the same commands as a searchable palette: filter as you type, arrow keys to move, Enter or a tap to insert.",
     tryThis: "show my top deals",
-    expectIntents: ["top_deals", "deals"], // "show my top deals" lands on deals; "what are my biggest deals" on top_deals — both teach reading
+    expectIntents: ["top_deals", "deals"], // "show my top deals" lands on top_deals; looser phrasings fall back to deals — both teach reading
     hint: "Any phrasing works — typos and all. If a name matches more than one record, I'll ask which one.",
   },
   {

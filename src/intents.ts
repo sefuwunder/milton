@@ -495,6 +495,9 @@ export function parseIntent(raw: string): Intent {
   else if (/^(forecast|sales forecast|revenue forecast|what will close this quarter|quarterly forecast|this quarter'?s forecast)$/.test(text)) set("forecast");
   else if (/^(sales cycle|deal velocity|sales velocity|pipeline velocity|average sales cycle|cycle time|where do deals stall)$/.test(text)) set("sales_cycle");
   else if (/^(top deals|biggest deals|largest deals|leaderboard)$/.test(text)) set("top_deals");
+  // "show my top deals" must not fall through to the "show <stage> deals"
+  // catch-all below, which would read "my top" as a stage name.
+  else if (/^(?:show |list |get |all )?(?:me )?(?:my )?(top|biggest|largest) deals?$/.test(text)) set("top_deals");
   else if (/^(campaign performance|campaign roi|campaign stats|campaign report)$/.test(text)) set("campaign_stats");
   else if (/^(closing soon|closing this month|upcoming closes|deals closing soon)$/.test(text)) set("closing_soon");
   else if (/^(pin (this|it)( as( a)? widget)?|pin( a)? widget|add( a)? widget|save (this|it)( as( a)? widget)?)$/.test(text)) set("pin_widget");
