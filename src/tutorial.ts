@@ -84,7 +84,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: "meridian",
     title: "The outside world",
-    explain: "Two capabilities here. First, Meridian's recon sprints: `meridian recons`, then `meridian dossier <city>` or `meridian entities <city>`. Territory prospecting finds companies by industry and place — `meridian prospect dental clinics in Madisonville` stages them for review, and `import prospects` brings the finished run into a workspace as contacts (I list them and ask first). Second, capture from the real world — in the web chat the contacts button stages a .vcf for import (nothing imports without your Yes) and the camera button runs OCR on a photo, handwriting included — or just tell me `just met James from Vertex`.",
+    explain: "Two capabilities here. First, Meridian's recon sprints: `meridian recons`, then `meridian dossier <city>` or `meridian entities <city>`. Territory prospecting finds companies by industry and place — `beacon prospect dental clinics in Madisonville` stages them for review, and `import prospects` brings the finished run into a workspace as contacts (I list them and ask first). Second, capture from the real world — in the web chat the contacts button stages a .vcf for import (nothing imports without your Yes) and the camera button runs OCR on a photo, handwriting included — or just tell me `just met James from Vertex`.",
     tryThis: "meridian recons",
     expectIntents: ["list_recons"],
     hint: "If Meridian isn't reachable, I'll say so plainly — the step still counts.",
@@ -165,7 +165,7 @@ export function graduationText(): string {
     "- **Forgiving input**: typos, paraphrases, scrambled word order all work; near-misses get tappable suggestions.",
     "- **Sessions**: `sessions`, `new session <name>`, `switch session to <name>`, rename, delete — each keeps its own history, workspace, and tutorial.",
     "- **Structure**: custom fields on contacts, companies, campaigns, tasks (`add custom field Renewal date to contacts`, `set Renewal date to 2026-10-01 for contact Amara`) — not on deals; pipeline stages (`add stage <name>`, `rename stage <old> to <new>`, `move stage <x> before|after <y>`, `delete stage <name>`); workspaces (`switch to <name>`).",
-    "- **Outside world**: `meridian recons` / `meridian dossier <city>` / `meridian entities <city>` / `meridian prospect <industry> in <location>` (territories stage into the Data Workshop Sandbox; `import prospects` brings the finished run into a workspace as contacts); VCF import, camera OCR + handwriting, or `just met …` capture.",
+    "- **Outside world**: `meridian recons` / `meridian dossier <city>` / `meridian entities <city>` / `beacon prospect <industry> in <location>` (territories stage into the Data Workshop Sandbox; `import prospects` brings the finished run into a workspace as contacts); VCF import, camera OCR + handwriting, or `just met …` capture.",
     "- **Analysis & widgets**: `campaign stats`, `closing soon`, `sales cycle`, `pipeline hygiene` — follow any of them with `pin this as a widget`.",
     "- **Automations**: `save routine …` chains commands, `schedule …` puts them on a clock, `when … run …` fires them on CRM events. Destructive steps never auto-run.",
     "",

@@ -128,7 +128,7 @@ describe("prospectImportReply", () => {
   test("no finished run -> guidance", async () => {
     install();
     const r = await handleMessage(sess("pi-none"), "import prospects");
-    expect(r.text).toContain("meridian prospect");
+    expect(r.text).toContain("beacon prospect");
   });
   test("named workspace -> confirmation lists prospects, parks pending", async () => {
     install();

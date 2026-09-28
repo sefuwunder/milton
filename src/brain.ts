@@ -1884,9 +1884,10 @@ function enrichOfferReply(session: Session, job: EnrichJobState, r: mer.EnrichJo
   };
 }
 
-// ---- meridian territory prospecting: companies in a territory, staged --------
-// "meridian prospect dental clinics in Madisonville": POST /api/prospect, then
-// poll GET /api/prospect/:id via `prospect status`. On `done`, Milton builds
+// ---- beacon territory prospecting: companies in a territory, staged ----------
+// "beacon prospect dental clinics in Madisonville" (or the legacy
+// "meridian prospect …" alias): POST /api/search, then poll
+// GET /api/search/:id via `prospect status`. On `done`, Milton builds
 // a CONTACT-shaped CSV (name+company = company name) and POSTs it to
 // exec-crm's Data Workshop Sandbox as a new batch — staged, never committed.
 // Nothing is imported until the user approves + commits the batch in
@@ -1900,32 +1901,40 @@ async function meridianProspectReply(session: Session, slots: Record<string, str
   if (!industry) {
     return {
       text: location
-        ? `Which industry should I prospect in **${location}**? Try \`meridian prospect dental clinics in ${location}\`.`
-        : "Which industry and territory should I prospect? Try `meridian prospect dental clinics in Madisonville`.",
+        ? `Which industry should I prospect in **${location}**? Try \`beacon prospect dental clinics in ${location}\`.`
+        : "Which industry and territory should I prospect? Try `beacon prospect dental clinics in Madisonville`.",
       chips: ["Meridian recons"],
     };
   }
   if (!location) {
     return {
-      text: `Which territory should I prospect **${industry}** in? Try \`meridian prospect ${industry} in Madisonville\`.`,
+      text: `Which territory should I prospect **${industry}** in? Try \`beacon prospect ${industry} in Madisonville\`.`,
       chips: ["Meridian recons"],
     };
   }
   return launchProspect(session, industry, location);
 }
 
-/** Start the Meridian job and park it on the session for status polling. */
+/** Start the Beacon job and park it on the session for status polling. */
 async function launchProspect(session: Session, industry: string, location: string): Promise<Reply> {
   const res = await mer.requestProspect(location, industry);
   if (!res.ok) {
-    if (res.unreachable) return meridianDown();
-    return { text: `Meridian wouldn't start prospecting: ${res.error}`, chips: ["Meridian recons"] };
+    if (res.unreachable) return beaconDown();
+    return { text: `Beacon wouldn't start prospecting: ${res.error}`, chips: ["Meridian recons"] };
   }
   session.prospectJob = { job_id: res.job_id, industry, location, at: Date.now() };
   const short = res.job_id.length > 8 ? res.job_id.slice(0, 8) : res.job_id;
   return {
-    text: `🔎 Prospecting **${industry}** in **${location}** (job \`${short}\`) — Meridian is scanning the territory now. I'll check every 30 seconds and stage what it finds into the Data Workshop Sandbox when it's done, or say \`prospect status\` any time.`,
+    text: `🔎 Prospecting **${industry}** in **${location}** (job \`${short}\`) — Beacon is searching the territory now. I'll check every 30 seconds and stage what it finds into the Data Workshop Sandbox when it's done, or say \`prospect status\` any time.`,
     chips: ["Prospect status", "Meridian recons"],
+  };
+}
+
+/** Beacon unreachable — the business-entity search tool. */
+function beaconDown(): Reply {
+  return {
+    text: `I can't reach Beacon at ${mer.beaconBase()} right now — is it running? Start it with \`bun src/server.ts\` in the beacon folder, or point me elsewhere with BEACON_URL.`,
+    chips: ["Help"],
   };
 }
 
@@ -1933,10 +1942,10 @@ async function launchProspect(session: Session, industry: string, location: stri
 async function meridianProspectStatusReply(session: Session): Promise<Reply> {
   const job = session.prospectJob;
   if (!job) {
-    return { text: "No prospecting job is running right now. Say `meridian prospect dental clinics in Madisonville` to start one.", chips: ["Help"] };
+    return { text: "No prospecting job is running right now. Say `beacon prospect dental clinics in Madisonville` to start one.", chips: ["Help"] };
   }
   const r = await mer.getProspectJob(job.job_id);
-  if (!r) return meridianDown();
+  if (!r) return beaconDown();
   if (r.status === "running") {
     const p = r.progress || { done: 0, total: 0 };
     const pct = p.total ? ` — ${p.done}/${p.total}` : "";
@@ -1966,7 +1975,7 @@ export function normProspectName(name: string): string {
 
 /**
  * Row notes for a staged prospect: provenance marker, territory + industry,
- * the address, and the OSM tags Meridian reported — all on ONE line (the
+ * the address, and Beacon's description + website when present — all on ONE line (the
  * sandbox CSV parser is line-oriented, so notes must not contain newlines).
  * Best-effort: `known` flags companies already in the CRM so the reviewer
  * spots duplicates.
@@ -1975,9 +1984,11 @@ export function prospectNotes(
   c: mer.ProspectCompany, industry: string, fallbackTerritory: string, known: boolean,
 ): string {
   const parts = [
-    `meridian-prospect · territory: ${c.territory || fallbackTerritory} · industry: ${industry || c.industry || ""}`.trim(),
+    `beacon-prospect · territory: ${c.territory || fallbackTerritory} · industry: ${industry || c.industry || ""}`.trim(),
   ];
   if (c.address) parts.push(c.address);
+  if (c.description) parts.push(c.description.slice(0, 160));
+  if (c.url) parts.push(c.url);
   const tags = Object.entries(c.tags || {}).map(([k, v]) => `${k}=${v}`).join("; ");
   if (tags) parts.push(tags);
   if (known) parts.push("already in your CRM");
@@ -2016,8 +2027,8 @@ export function buildProspectBatch(
   const slug = (s: string) =>
     s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "prospects";
   return {
-    name: `Meridian prospects — ${industry} · ${location}`,
-    filename: `meridian-prospects-${slug(industry)}-${slug(location)}.csv`,
+    name: `Beacon prospects — ${industry} · ${location}`,
+    filename: `beacon-prospects-${slug(industry)}-${slug(location)}.csv`,
     csv: ["name,title,email,phone,company,notes", ...rows].join("\n"),
     count: rows.length,
     samples,
@@ -2081,13 +2092,13 @@ export async function prospectTerminalReply(session: Session, job: ProspectJobSt
   }
   if (!staged.ok) {
     return {
-      text: `Meridian finished prospecting **${job.industry}** in **${job.location}**, but I couldn't stage the results into the Data Workshop Sandbox: ${staged.error}. Nothing was imported — say \`meridian prospect ${job.industry} in ${job.location}\` to try again.`,
+      text: `Beacon finished prospecting **${job.industry}** in **${job.location}**, but I couldn't stage the results into the Data Workshop Sandbox: ${staged.error}. Nothing was imported — say \`beacon prospect ${job.industry} in ${job.location}\` to try again.`,
       chips: ["Meridian recons"],
     };
   }
   if (!staged.count) {
     return {
-      text: `Meridian finished prospecting **${job.industry}** in **${job.location}** but didn't find any companies there.`,
+      text: `Beacon finished prospecting **${job.industry}** in **${job.location}** but didn't find any companies there.`,
       chips: ["Meridian recons"],
     };
   }
@@ -2099,7 +2110,7 @@ export async function prospectTerminalReply(session: Session, job: ProspectJobSt
 }
 
 /**
- * `import prospects` — bring the last finished Meridian prospect run into an
+ * `import prospects` — bring the last finished Beacon prospect run into an
  * exec-crm workspace as contacts (company + contact per prospect). Two-phase:
  * resolve the workspace, dedupe against it, then park a Yes/No confirmation.
  * The actual writes happen in runPending's "prospect_import" case.
@@ -2109,7 +2120,7 @@ export async function prospectImportReply(session: Session, slots: Record<string
   const last = session.lastProspect;
   if (!last || !last.companies.length) {
     return {
-      text: "I don't have a finished prospect run on this session yet. Say `meridian prospect dental clinics in Madisonville` first, then `import prospects` once it's done.",
+      text: "I don't have a finished prospect run on this session yet. Say `beacon prospect dental clinics in Madisonville` first, then `import prospects` once it's done.",
       chips: ["Meridian recons", "Help"],
     };
   }

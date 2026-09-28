@@ -20,11 +20,19 @@ export interface ReconDetail {
 }
 
 export const MERIDIAN_DEFAULT = "http://localhost:3005";
+export const BEACON_DEFAULT = "http://localhost:3012";
 export const MILTON_DEFAULT = "http://localhost:3009";
 
 /** Meridian base URL (MERIDIAN_URL env, default http://localhost:3005). */
 export function meridianBase(): string {
   return process.env.MERIDIAN_URL || MERIDIAN_DEFAULT;
+}
+
+/** Beacon base URL (BEACON_URL env, default http://localhost:3012).
+ *  Beacon is the business-entity search tool; Milton's territory
+ *  prospecting was redirected here from Meridian's /api/prospect. */
+export function beaconBase(): string {
+  return (process.env.BEACON_URL || BEACON_DEFAULT).replace(/\/+$/, "");
 }
 
 /** Milton's own base URL (MILTON_BASE_URL env, default http://localhost:3009).
@@ -207,15 +215,27 @@ export async function getEnrichJob(id: string): Promise<EnrichJob | null> {
   };
 }
 
-// ---- territory prospecting (the second async write: Meridian finds companies) --
-// POST /api/prospect { location, industry } -> 201 { job_id, status: "running" };
-// the Overpass + territory pipeline can take longer than a few seconds, so the
-// job runs in Meridian's background and Milton polls GET /api/prospect/:id.
+// ---- territory prospecting (the second async write: Beacon finds companies) -
+// POST /api/search { location, industry } -> 201 { job_id, status: "running" }.
+// Beacon's endpoint is Meridian-/api/prospect-compatible by design; the
+// FindAll lookup runs in Beacon's background and Milton polls
+// GET /api/search/:id.
+
+async function bget<T>(path: string): Promise<T | null> {
+  try {
+    const res = await fetch(beaconBase() + path, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
 
 export interface ProspectCompany {
   name: string; address?: string; lat?: number; lon?: number;
   tags?: Record<string, string>; industry?: string; territory?: string;
   source?: string; prospect?: boolean;
+  description?: string; url?: string; // beacon shape
 }
 export interface ProspectJob {
   id: string; location: string; industry: string; status: string;
@@ -230,10 +250,10 @@ export type ProspectRequestResult =
   | { ok: true; job_id: string; status: string }
   | { ok: false; error: string; unreachable: boolean };
 
-/** Start a territory-prospecting job in Meridian. */
+/** Start a territory-prospecting job in Beacon. */
 export async function requestProspect(location: string, industry: string): Promise<ProspectRequestResult> {
   try {
-    const res = await fetch(meridianBase() + "/api/prospect", {
+    const res = await fetch(beaconBase() + "/api/search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ location, industry }),
@@ -252,9 +272,9 @@ export async function requestProspect(location: string, industry: string): Promi
   }
 }
 
-/** Poll one prospect job — or null when Meridian is unreachable / unknown id. */
+/** Poll one prospect job — or null when Beacon is unreachable / unknown id. */
 export async function getProspectJob(id: string): Promise<ProspectJob | null> {
-  const j = await get<any>(`/api/prospect/${encodeURIComponent(id)}`);
+  const j = await bget<any>(`/api/search/${encodeURIComponent(id)}`);
   // Tolerate a { job } wrapper, same as the enrich endpoint.
   const r = j?.job ?? j;
   if (!r || r.id == null) return null;
@@ -265,9 +285,12 @@ export async function getProspectJob(id: string): Promise<ProspectJob | null> {
     ...(c?.lon != null ? { lon: Number(c.lon) } : {}),
     tags: c?.tags && typeof c.tags === "object" ? c.tags : {},
     ...(c?.industry != null ? { industry: String(c.industry) } : {}),
-    ...(c?.territory != null ? { territory: String(c.territory) } : {}),
+    // beacon sends `location`; older Meridian rows sent `territory`
+    ...((c?.territory ?? c?.location) != null ? { territory: String(c.territory ?? c.location) } : {}),
     ...(c?.source != null ? { source: String(c.source) } : {}),
     ...(c?.prospect != null ? { prospect: Boolean(c.prospect) } : {}),
+    ...(c?.description != null ? { description: String(c.description) } : {}),
+    ...(c?.url != null ? { url: String(c.url) } : {}),
   });
   return {
     id: String(r.id),

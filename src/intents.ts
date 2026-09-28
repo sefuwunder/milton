@@ -450,13 +450,14 @@ export function parseIntent(raw: string): Intent {
   else if ((m = cased.match(/^meridian enrich (.+)$/i))) set("meridian_enrich", { query: m[1].trim() });
   else if ((m = cased.match(/^enrich (.+)$/i))) set("meridian_enrich", { query: m[1].trim() });
   else if (/^(enrichment status|check enrichment)$/i.test(text)) set("meridian_enrich_status");
-  // Territory prospecting: "meridian prospect dental clinics in Madisonville".
-  // The full pattern (both slots) must come first; the bare / industry-only
-  // forms are missing-slot clarifications, never guesses.
-  else if ((m = cased.match(/^meridian prospect\s+(.+?)\s+in\s+(.+)$/i))) set("meridian_prospect", { industry: m[1].trim(), location: m[2].trim() });
-  else if (/^meridian prospect\s*$/i.test(text)) set("meridian_prospect", {});
-  else if ((m = cased.match(/^meridian prospect\s+in\s+(.+)$/i))) set("meridian_prospect", { location: m[1].trim() });
-  else if ((m = cased.match(/^meridian prospect\s+(.+)$/i))) set("meridian_prospect", { industry: m[1].trim() });
+  // Territory prospecting: "beacon prospect dental clinics in Madisonville"
+  // ("meridian prospect …" kept as a legacy alias). The full pattern (both
+  // slots) must come first; the bare / industry-only forms are missing-slot
+  // clarifications, never guesses.
+  else if ((m = cased.match(/^(?:beacon|meridian) prospect\s+(.+?)\s+in\s+(.+)$/i))) set("meridian_prospect", { industry: m[1].trim(), location: m[2].trim() });
+  else if (/^(?:beacon|meridian) prospect\s*$/i.test(text)) set("meridian_prospect", {});
+  else if ((m = cased.match(/^(?:beacon|meridian) prospect\s+in\s+(.+)$/i))) set("meridian_prospect", { location: m[1].trim() });
+  else if ((m = cased.match(/^(?:beacon|meridian) prospect\s+(.+)$/i))) set("meridian_prospect", { industry: m[1].trim() });
   else if (/^(prospect status|check prospecting)$/i.test(text)) set("meridian_prospect_status");
   // Import the last finished prospect run as contacts into an exec-crm
   // workspace: "import prospects", "import prospects into Prospecting".
@@ -779,7 +780,7 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["show custom fields for contacts", "show_custom_fields"], ["remove custom field Renewal date from contacts", "delete_custom_field"]], note: "" },
       { cmds: [["meridian recon Austin", "meridian_request"]], note: "request a new Meridian recon (business data only) — I report back when it finishes" },
       { cmds: [["meridian enrich Acme", "meridian_enrich"], ["enrichment status", "meridian_enrich_status"]], note: "enrich a company: public profile + principal contacts from its own site, then save the dossier to my notes" },
-      { cmds: [["meridian prospect dental clinics in Madisonville", "meridian_prospect"], ["prospect status", "meridian_prospect_status"]], note: "territory prospecting: stages prospect companies into exec-crm's Data Workshop Sandbox (staged, never imported without your approval)" },
+      { cmds: [["beacon prospect dental clinics in Madisonville", "meridian_prospect"], ["prospect status", "meridian_prospect_status"]], note: "territory prospecting via Beacon: stages prospect companies into exec-crm's Data Workshop Sandbox (staged, never imported without your approval)" },
       { cmds: [["import prospects", "prospect_import"], ["import prospects into Prospecting", "prospect_import"]], note: "bring the last finished prospect run into a workspace as contacts — I list them and ask first" },
       { cmds: [["meridian entities Austin company", "meridian_entities"]], note: "its orgs, filtered by type" },
       { cmds: [["analyze my pipeline", "analyze_pipeline"], ["forecast", "forecast"]], note: "pipeline stats & weighted forecast — deterministic, plus analyst-model insights when set" },

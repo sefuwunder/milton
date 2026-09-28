@@ -1,10 +1,10 @@
-// meridian_prospect.test.ts — Milton's "meridian prospect <industry> in <location>"
+// meridian_prospect.test.ts — Milton's "beacon prospect <industry> in <location>"
 // flow: intent parsing (industry/location slots, missing-slot clarifications),
 // async job launch, status polling (running/done/failed), the 30s background
 // tick, session persistence of the in-flight job, and staging into exec-crm's
 // Data Workshop Sandbox as a workspace-scoped batch — staged, never committed.
 //
-// Stub Meridian + exec-crm in ALL tests — never hit real endpoints.
+// Stub Beacon + exec-crm in ALL tests — never hit real endpoints.
 import { describe, test, expect, afterEach, beforeAll, afterAll } from "bun:test";
 import { parseIntent } from "../src/intents";
 import * as mer from "../src/meridian";
@@ -21,7 +21,7 @@ const sess = (id: string): Session => ({ id, history: [], notes: [] });
 // ---- fixtures (mutable per test) ------------------------------------------------------
 let crmCompanies: any[] = [];
 let companiesListFails = false;
-let meridianDown = false;
+let beaconDown = false;
 let prospectScript: (id: string) => any = () => doneProspectJob;
 let lastProspectPost: any = null;
 let lastSandboxPost: any = null;
@@ -75,14 +75,14 @@ function stubFetch(input: any, init: any = {}): Promise<Response> {
     }
     return ok({ error: "not found" }, 404);
   }
-  if (url.startsWith(mer.meridianBase())) {
-    if (meridianDown) return Promise.reject(new Error("fetch failed"));
-    const path = url.slice(mer.meridianBase().length).split("?")[0];
-    if (path === "/api/prospect" && init.method === "POST") {
+  if (url.startsWith(mer.beaconBase())) {
+    if (beaconDown) return Promise.reject(new Error("fetch failed"));
+    const path = url.slice(mer.beaconBase().length).split("?")[0];
+    if (path === "/api/search" && init.method === "POST") {
       lastProspectPost = JSON.parse(String(init.body || "{}"));
       return ok({ job_id: "pjob1", status: "running" }, 201);
     }
-    const m = path.match(/^\/api\/prospect\/([^/]+)$/);
+    const m = path.match(/^\/api\/search\/([^/]+)$/);
     if (m) {
       const j = prospectScript(m[1]);
       if (!j) return ok({ error: "not found" }, 404);
@@ -96,7 +96,7 @@ function stubFetch(input: any, init: any = {}): Promise<Response> {
 const realFetch = globalThis.fetch.bind(globalThis);
 function install() {
   (globalThis as any).fetch = stubFetch;
-  meridianDown = false;
+  beaconDown = false;
   companiesListFails = false;
   crmCompanies = [];
   lastProspectPost = null;
@@ -108,8 +108,8 @@ afterEach(() => { (globalThis as any).fetch = realFetch; });
 
 // ---- intent parsing -------------------------------------------------------------------
 describe("prospect intents", () => {
-  test("meridian prospect <industry> in <location>", () => {
-    const i = parseIntent("meridian prospect dental clinics in Madisonville");
+  test("beacon prospect <industry> in <location>", () => {
+    const i = parseIntent("beacon prospect dental clinics in Madisonville");
     expect(i.name).toBe("meridian_prospect");
     expect(i.slots.industry).toBe("dental clinics");
     expect(i.slots.location).toBe("Madisonville");
@@ -120,8 +120,9 @@ describe("prospect intents", () => {
     expect(i.slots.industry).toBe("Cafes");
     expect(i.slots.location).toBe("Berlin in Germany");
   });
-  test("bare 'meridian prospect' -> missing both slots", () => {
-    const i = parseIntent("meridian prospect");
+  test("legacy 'meridian prospect' alias still parses", () => {
+    expect(parseIntent("meridian prospect dental clinics in Madisonville").name).toBe("meridian_prospect");
+    const i = parseIntent("beacon prospect");
     expect(i.name).toBe("meridian_prospect");
     expect(i.slots.industry || "").toBe("");
     expect(i.slots.location || "").toBe("");
@@ -152,7 +153,7 @@ describe("prospect clarifications", () => {
   test("bare command asks for industry + location with an example", async () => {
     install();
     const r = await handleMessage(sess("p-1"), "meridian prospect");
-    expect(r.text).toContain("meridian prospect dental clinics in Madisonville");
+    expect(r.text).toContain("beacon prospect dental clinics in Madisonville");
     expect(lastProspectPost).toBeNull();
   });
   test("industry only asks which territory", async () => {
@@ -181,7 +182,7 @@ describe("prospect client", () => {
   });
   test("requestProspect unreachable -> unreachable flag", async () => {
     install();
-    meridianDown = true;
+    beaconDown = true;
     const r = await mer.requestProspect("Madisonville", "dental clinics");
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.unreachable).toBe(true);
@@ -231,12 +232,12 @@ describe("prospect launch", () => {
     expect(s.prospectJob?.location).toBe("Madisonville");
     expect(lastSandboxPost).toBeNull(); // nothing staged at launch
   });
-  test("unreachable Meridian reports plainly", async () => {
+  test("unreachable Beacon reports plainly", async () => {
     install();
-    meridianDown = true;
+    beaconDown = true;
     const s = sess("p-5");
     const r = await handleMessage(s, "meridian prospect dental clinics in Madisonville");
-    expect(r.text).toMatch(/can't reach meridian/i);
+    expect(r.text).toMatch(/can't reach beacon/i);
     expect(s.prospectJob).toBeUndefined();
   });
 });
@@ -281,15 +282,15 @@ describe("prospect status", () => {
     // sandbox payload
     expect(lastSandboxUrl).toContain("workspace=42");
     expect(lastSandboxUrl).toContain("/api/sandbox/batches");
-    expect(lastSandboxPost.name).toBe("Meridian prospects — dental clinics · Madisonville");
-    expect(lastSandboxPost.filename).toBe("meridian-prospects-dental-clinics-madisonville.csv");
+    expect(lastSandboxPost.name).toBe("Beacon prospects — dental clinics · Madisonville");
+    expect(lastSandboxPost.filename).toBe("beacon-prospects-dental-clinics-madisonville.csv");
     const lines = String(lastSandboxPost.csv).split("\n");
     expect(lines[0]).toBe("name,title,email,phone,company,notes");
     expect(lines.length).toBe(4); // header + 3 rows
     // name and company both carry the company name
     expect(lines[1].startsWith("Bright Smile Dental,")).toBe(true);
     // notes carry the provenance marker, address, and OSM tags (quoted)
-    expect(lastSandboxPost.csv).toContain("meridian-prospect · territory: Madisonville · industry: dental clinics");
+    expect(lastSandboxPost.csv).toContain("beacon-prospect · territory: Madisonville · industry: dental clinics");
     expect(lastSandboxPost.csv).toContain("123 Main St, Madisonville, OH");
     expect(lastSandboxPost.csv).toContain("amenity=dentist; healthcare=dental");
     // CSV escaping: comma + quotes in the company name
@@ -382,7 +383,7 @@ describe("buildProspectBatch", () => {
       "dental clinics", "Elsewhere", false,
     );
     expect(n).toBe(
-      "meridian-prospect · territory: Madisonville · industry: dental clinics · 123 Main St · amenity=dentist",
+      "beacon-prospect · territory: Madisonville · industry: dental clinics · 123 Main St · amenity=dentist",
     );
     expect(n).not.toContain("\n"); // sandbox CSV is line-oriented
   });
@@ -452,10 +453,10 @@ describe("prospect tick", () => {
 
   function tickStubFetch(input: any, init: any = {}): Promise<Response> {
     const url = String(input);
-    if (url.startsWith(mer.meridianBase())) {
-      if ((globalThis as any).__tickMeridianDown)
+    if (url.startsWith(mer.beaconBase())) {
+      if ((globalThis as any).__tickBeaconDown)
         return Promise.reject(new Error("fetch failed"));
-      const m = url.match(/\/api\/prospect\/([^/?]+)/);
+      const m = url.match(/\/api\/search\/([^/?]+)/);
       if (m) return ok((globalThis as any).__tickJobJson || doneProspectJob);
       return ok({ error: "not found" }, 404);
     }
@@ -487,7 +488,7 @@ describe("prospect tick", () => {
 
   afterAll(() => {
     (globalThis as any).fetch = realFetch;
-    delete (globalThis as any).__tickMeridianDown;
+    delete (globalThis as any).__tickBeaconDown;
     delete (globalThis as any).__tickJobJson;
     delete (globalThis as any).__tickSandboxPost;
     delete (globalThis as any).__tickSandboxUrl;
@@ -517,7 +518,7 @@ describe("prospect tick", () => {
     const s = srv.loadSession(TICK_SID);
     expect(s.prospectJob).toBeUndefined();
     const post = (globalThis as any).__tickSandboxPost;
-    expect(post.name).toBe("Meridian prospects — dental clinics · Madisonville");
+    expect(post.name).toBe("Beacon prospects — dental clinics · Madisonville");
     expect(String(post.csv).split("\n")[0]).toBe("name,title,email,phone,company,notes");
     expect(s.history.some((h: any) => h.text.includes("✅ Staged **3** companies"))).toBe(true);
     expect(s.history.some((h: any) => h.text.includes("Data Workshop Sandbox"))).toBe(true);
@@ -532,14 +533,14 @@ describe("prospect tick", () => {
     expect(s.history.some((h: any) => h.text.includes("Overpass blew up"))).toBe(true);
   });
 
-  test("tick leaves the job parked when Meridian is unreachable", async () => {
-    (globalThis as any).__tickMeridianDown = true;
+  test("tick leaves the job parked when Beacon is unreachable", async () => {
+    (globalThis as any).__tickBeaconDown = true;
     try {
       parkJob({ ...tickJob });
       await srv.tickProspect();
       expect(srv.loadSession(TICK_SID).prospectJob?.job_id).toBe("pjob1");
     } finally {
-      (globalThis as any).__tickMeridianDown = false;
+      (globalThis as any).__tickBeaconDown = false;
     }
   });
 
