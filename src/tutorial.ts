@@ -20,7 +20,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: "reads",
     title: "Reading the pipeline",
-    explain: "Let's start simple: Milton reads your exec-crm straight from chat. Ask for anything — pipeline, deals, tasks — and I'll fetch it live. In the web chat, type `/` anytime for the same commands as a searchable palette: filter as you type, arrow keys to move, Enter or a tap to insert.",
+    explain: "The core capability: live read access to your entire CRM from chat. Pipeline, deals, tasks, contacts — ask in plain words and I fetch it on the spot. In the web chat, type `/` anytime for the same commands as a searchable palette: filter as you type, arrow keys to move, Enter or a tap to insert.",
     tryThis: "show my top deals",
     expectIntents: ["top_deals", "deals"], // "show my top deals" lands on deals; "what are my biggest deals" on top_deals — both teach reading
     hint: "Any phrasing works — typos and all. If a name matches more than one record, I'll ask which one.",
@@ -28,7 +28,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: "wizards",
     title: "Guided creating",
-    explain: "A bare `new deal` — or contact, company, task — starts a guided wizard: one question at a time. Answer naturally, say `skip` for a default, `cancel` to bail with nothing created. Wander off mid-wizard and I'll answer your question, then bring you back.",
+    explain: "The creation capability: a bare `new deal` — or contact, company, task — starts a guided wizard, one question at a time. Answer naturally, say `skip` for a default, `cancel` to bail with nothing created. Wander off mid-wizard and I'll answer your question, then bring you back.",
     tryThis: "new deal",
     expectIntents: ["wizard_start"],
     hint: "The wizard stays open after this step — say `cancel` to leave it and keep going with the tutorial.",
@@ -36,7 +36,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: "followups",
     title: "Follow-up questions",
-    explain: "I remember what we're talking about. Ask `deal journey Acme Website` for a stage-history timeline — or follow up in plain words: `move it to proposal`, `what's her email?`, `what's blocking this task`, `show duplicates`, `deals from referrals`.",
+    explain: "The memory capability: I remember what we're talking about, so you can talk like a person. `deal journey Acme Website` gives a stage-history timeline — then follow up in plain words: `move it to proposal`, `what's her email?`, `what's blocking this task`, `show duplicates`, `deals from referrals`.",
     tryThis: "deal journey Acme Website",
     expectIntents: ["deal_journey"],
     hint: "Pronouns like it/her resolve to the last thing we discussed — but I never guess across types.",
@@ -44,15 +44,15 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: "writes",
     title: "Managing: notes",
-    explain: "Milton writes back too. Notes stick to a deal and surface on every lookup. I'll always confirm before anything destructive.",
+    explain: "Milton writes back too — notes stick to a deal and surface on every lookup, and I'll always confirm before anything destructive. The reliable shape is `note on <deal>: <text>`; the colon cleanly separates the deal from the note.",
     tryThis: "note on Acme Website: called today",
     expectIntents: ["add_note"],
-    hint: "The shape is `note on <deal>: <text>` — the colon matters.",
+    hint: "The shape is `note on <deal>: <text>` — with the colon, I never have to guess where the deal name ends.",
   },
   {
     id: "undo",
     title: "Undo",
-    explain: "Changed your mind? `undo` takes back my last change in this chat — creates, stage moves, field updates, task toggles. One thing it can't do: un-merge. Merges are permanent, and I'll say so before doing one.",
+    explain: "The safety-net capability: `undo` takes back my last change in this chat — creates, stage moves, field updates, task toggles. One thing it can't do: un-merge. Merges are permanent, and I'll say so before doing one.",
     tryThis: "undo",
     expectIntents: ["undo"],
     hint: "Undo is per chat session — each named session has its own history.",
@@ -60,7 +60,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: "typos",
     title: "Typos welcome",
-    explain: "Type like you text. I understand typos, paraphrases, and scrambled word order — and when you're close but not quite there, I offer tappable suggestions instead of guessing.",
+    explain: "The forgiving-input capability: type like you text. I understand typos, paraphrases, and scrambled word order — and when you're close but not quite there, I offer tappable suggestions instead of guessing.",
     tryThis: "show my top daels",
     expectIntents: ["top_deals", "deals"], // fuzzy resolves the typo; exact falls back to deals
     hint: "Yes, that's really misspelled. Watch what happens.",
@@ -68,7 +68,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: "sessions",
     title: "Named chat sessions",
-    explain: "Keep separate threads: `sessions` lists them, `new session Pipeline review` starts one, `switch session to <name>` jumps between them — plus rename and delete (delete asks first). Each session keeps its own history, workspace, and tutorial progress.",
+    explain: "The threading capability: keep separate conversations. `sessions` lists them, `new session Pipeline review` starts one, `switch session to <name>` jumps between them — plus rename and delete (delete asks first). Each session keeps its own history, workspace, and tutorial progress.",
     tryThis: "sessions",
     expectIntents: ["chat_session"],
     hint: "Read-only and safe — this just lists.",
@@ -76,15 +76,15 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: "fields",
     title: "Custom fields",
-    explain: "Your CRM can grow new fields without leaving chat: `add custom field Renewal date to deals`, then `set Renewal date on Acme Website to 2026-12-01`. This lists what's already defined.",
+    explain: "Your CRM's schema is extensible from chat: grow new fields on contacts, companies, campaigns, and tasks — no settings page. (Deals don't take custom fields in exec-crm; I'll say so if you try.) This lists what's already defined.",
     tryThis: "list custom fields for contacts",
     expectIntents: ["show_custom_fields"],
-    hint: "Fields are per entity — deals, contacts, companies, tasks.",
+    hint: "Try `add custom field Renewal date to contacts`, then `set Renewal date to 2026-10-01 for contact Amara` — that exact shape.",
   },
   {
     id: "meridian",
     title: "The outside world",
-    explain: "I read Meridian's recon sprints too: `meridian recons`, then `meridian dossier <city>` or `meridian entities <city>`. Bringing contacts in? In the web chat, the contacts button stages a .vcf for import (nothing imports without your Yes), the camera button runs OCR on a photo — handwriting included — or just tell me `just met James from Vertex`.",
+    explain: "Two capabilities here. First, Meridian's recon sprints: `meridian recons`, then `meridian dossier <city>` or `meridian entities <city>`. Second, capture from the real world — in the web chat the contacts button stages a .vcf for import (nothing imports without your Yes) and the camera button runs OCR on a photo, handwriting included — or just tell me `just met James from Vertex`.",
     tryThis: "meridian recons",
     expectIntents: ["list_recons"],
     hint: "If Meridian isn't reachable, I'll say so plainly — the step still counts.",
@@ -92,7 +92,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: "stages",
     title: "Shaping your CRM",
-    explain: "The pipeline itself is editable from here: `add stage`, `rename stage`, `move stage`, `delete stage` (I'll ask where its deals go). And `workspaces` lists your workspaces — `switch to <name>` starts a fresh session inside one, since each session lives in exactly one workspace.",
+    explain: "The pipeline itself is editable from here — every command takes the stage name: `add stage Discovery`, `rename stage Old to New`, `move stage X before Y`, `delete stage X` (I'll ask where its deals go). And `workspaces` lists your workspaces — `switch to <name>` starts a fresh session inside one, since each session lives in exactly one workspace.",
     tryThis: "list stages",
     expectIntents: ["list_stages"],
     hint: "Deleting a stage with deals in it needs a destination — I won't strand them.",
@@ -100,7 +100,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: "analysis",
     title: "Analysis",
-    explain: "Beyond lookups, I analyze: campaign performance, closing forecasts, pipeline hygiene. Anything structured can become a widget in the next step.",
+    explain: "The analysis capability: beyond lookups, I compute — campaign performance, closing forecasts, pipeline hygiene. Anything structured can become a widget in the next step.",
     tryThis: "campaign stats",
     expectIntents: ["campaign_stats", "closing_soon"],
     hint: "`closing soon` works here too.",
@@ -108,7 +108,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: "widgets",
     title: "Widgets",
-    explain: "Structured answers can be pinned to the Milton tab in exec-crm as widgets. You just ran an analysis, so there's something to pin.",
+    explain: "The deployment capability: structured answers can be pinned to the Milton tab in exec-crm as widgets. You just ran an analysis, so there's something to pin.",
     tryThis: "pin this as a widget",
     expectIntents: ["pin_widget"],
     hint: "If exec-crm isn't reachable, I'll say so plainly — the step still counts.",
@@ -116,7 +116,7 @@ export const TUTORIAL_STEPS: TutorialStep[] = [
   {
     id: "automations",
     title: "Automations",
-    explain: "The advanced layer: bundle commands into routines (`save routine EOD: my tasks; kpis`), put them on a clock (`schedule EOD every weekday at 6pm`), or fire them on CRM events (`trigger help` lists them all). Destructive steps never auto-run — they always wait for you. For now, just list what's set up.",
+    explain: "The advanced capability: bundle commands into routines (`save routine EOD: my tasks; kpis`), put them on a clock (`schedule EOD every weekday at 6pm`), or fire them on CRM events (`trigger help` lists them all). Destructive steps never auto-run — they always wait for you. For now, just list what's set up.",
     tryThis: "list routines",
     expectIntents: ["list_routines"],
     hint: "Read-only and safe — nothing changes.",
@@ -164,7 +164,7 @@ export function graduationText(): string {
     "- **Managing**: `note on Acme: …`, `add task …`, `move Acme deal to negotiation`. `undo` takes back my last change — merges excepted.",
     "- **Forgiving input**: typos, paraphrases, scrambled word order all work; near-misses get tappable suggestions.",
     "- **Sessions**: `sessions`, `new session <name>`, `switch session to <name>`, rename, delete — each keeps its own history, workspace, and tutorial.",
-    "- **Structure**: custom fields (`add custom field …`), pipeline stages (`add/rename/move/delete stage`), workspaces (`switch to <name>`).",
+    "- **Structure**: custom fields on contacts, companies, campaigns, tasks (`add custom field Renewal date to contacts`, `set Renewal date to 2026-10-01 for contact Amara`) — not on deals; pipeline stages (`add stage <name>`, `rename stage <old> to <new>`, `move stage <x> before|after <y>`, `delete stage <name>`); workspaces (`switch to <name>`).",
     "- **Outside world**: `meridian recons` / `meridian dossier <city>` / `meridian entities <city>` / `meridian prospect <industry> in <location>` (territories stage into the Data Workshop Sandbox); VCF import, camera OCR + handwriting, or `just met …` capture.",
     "- **Analysis & widgets**: `campaign stats`, `closing soon`, `sales cycle`, `pipeline hygiene` — follow any of them with `pin this as a widget`.",
     "- **Automations**: `save routine …` chains commands, `schedule …` puts them on a clock, `when … run …` fires them on CRM events. Destructive steps never auto-run.",
