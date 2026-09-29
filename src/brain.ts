@@ -17,6 +17,8 @@ import * as dealNotes from "./deal_notes";
 import * as outcomes from "./outcomes";
 import * as odef from "./outcome_defs";
 import * as misses from "./intent_misses";
+import * as rea from "./reasoning";
+import { getSetting } from "./settings";
 import * as playbook from "./playbook";
 import { hookSecret } from "./hookauth";
 import { TUTORIAL_STEPS, tutorialControl, tutorialFollowup, type TutorialState, type TutorialAction } from "./tutorial";
@@ -515,6 +517,22 @@ async function handleMessageScoped(session: Session, raw: string, opts: MessageO
       };
     }
     return createCampaignReply(p.payload.name, ms[0].item.id, ms[0].item.name);
+  }
+  // 2e2) resolve a pending reach source: the reply names who to start the
+  // warm-intro path from (Phase 1b ask-first UX).
+  if (session.pending?.type === "reach_source" && intent.name !== "confirm_no") {
+    const p = session.pending; session.pending = undefined;
+    const src = await resolveReachEntity(raw);
+    if (!src) {
+      return {
+        text: `I couldn't pin down "${raw}" as a contact or company — try the full name, or say "Cancel".`,
+        chips: ["Cancel"],
+      };
+    }
+    return reachPathReply(
+      rea.nodeKey(src.kind, src.id), src.label,
+      rea.nodeKey(p.payload.targetKind, p.payload.targetId), p.payload.targetLabel,
+    );
   }
   // 2f) outcome-definition builder free-text steps ("Create outcome" screen).
   if (session.pending?.type === "create_outcome_name" && intent.name !== "confirm_no") {
@@ -2326,7 +2344,7 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
     case "prep_brief": return prepBriefForName(session, s.name);
     case "analyze_pipeline": return analyzePipelineReply();
     case "forecast": return forecastReply();
-    case "plan_day": return planDayReply();
+    case "plan_day": return planDayReply(session);
     case "plan_week": return planWeekReply();
     case "plan_breakdown": return planBreakdownReply(session, s.goal || "");
     case "sales_cycle": return withWidget(session, salesCycleReply());
@@ -2428,7 +2446,10 @@ async function dispatchInner(session: Session, intent: Intent, opts: MessageOpts
     case "reopen_task": return taskByName(session, s.query, "reopen_task", {});
     case "delete_task": return taskByName(session, s.query, "delete_task", {});
     case "reschedule_tasks": return rescheduleTasksReply(session, s);
-    case "task_blockers": return taskByName(session, s.query, "task_blockers", {});
+    case "task_blockers": return whatsBlockingReply(session, s.query);
+    case "reach": return reachReply(session, s);
+    case "key_accounts": return keyAccountsReply();
+    case "champions": return championsReply();
     case "wizard_start": return startWizard(session, s.kind || "deal");
     case "undo": return runUndo(session);
 
@@ -4407,7 +4428,7 @@ async function gatherPlanData(): Promise<PlanData> {
 
 const taskLine = (t: crm.Task) => `• **${t.title}** — ${duePhrase(t.due_date)}`;
 
-async function planDayReply(): Promise<Reply> {
+async function planDayReply(session: Session): Promise<Reply> {
   const p = await gatherPlanData();
   const sections: [string, string[]][] = [
     ["**Do first — overdue:**", p.overdue.map(taskLine)],
@@ -4419,19 +4440,10 @@ async function planDayReply(): Promise<Reply> {
   const body = sections.filter(([, ls]) => ls.length).map(([h, ls]) => `${h}\n${ls.join("\n")}`).join("\n\n")
     || "Nothing open — no tasks, no deals closing soon, nothing stale. Enjoy the quiet.";
   const lines = [`🗓️ **Plan for ${todayStr()}**`, "", body];
-  if (an.analystConfigured()) {
-    const facts = [
-      `Overdue tasks: ${p.overdue.map((t) => t.title).join("; ") || "none"}`,
-      `Due today: ${p.dueToday.map((t) => t.title).join("; ") || "none"}`,
-      `Due this week: ${p.dueThisWeek.map((t) => t.title).join("; ") || "none"}`,
-      `Deals closing within 14 days: ${p.closingSoon.map((d) => `${d.title} (${d.expected_close}, ${d.value})`).join("; ") || "none"}`,
-      `Stale deals: ${p.staleTop.map((d) => `${d.title} (${d.days}d)`).join("; ") || "none"}`,
-    ].join("\n");
-    const r = await an.askAnalyst({ system: an.PLAN_DAY_SYSTEM, facts });
-    lines.push("", r.ok
-      ? `**Suggested schedule** _(from your analyst model)_:\n${r.text}`
-      : `_Schedule skipped — ${r.error.slice(0, 200)}._`);
-  }
+  // Phase 1d: deterministic day layout replaces the dead LLM "Suggested
+  // schedule" block (the analyst path silently vanished with the LLM parked).
+  const dayPlan = await dayLayoutSection(session, p);
+  if (dayPlan.length) lines.push("", ...dayPlan);
   return {
     text: lines.join("\n").replace(/\n{3,}/g, "\n\n"),
     cards: p.overdue.length + p.dueToday.length ? [{ kind: "tasks", title: "Today's tasks", items: [...p.overdue, ...p.dueToday] }] : undefined,
@@ -4667,6 +4679,7 @@ async function dealAction(session: Session, action: string, deal: crm.Deal, payl
     return { text: `Moved "${d.title}" to **${stageLabel(d.stage)}**.`, cards: [dealCard(d)], chips: ["Show pipeline", "Morning brief"] };
   }
   if (action === "deal_journey") return dealJourneyReply(deal);
+  if (action === "deal_blockers") return dealBlockersReply(session, deal);
   if (action === "close_deal") {
     const won = payload.result === "won";
     // Both directions ask first: closing moves pipeline state and money.
@@ -5226,6 +5239,295 @@ async function dealJourneyReply(deal: crm.Deal): Promise<Reply> {
     cards: [dealCard(deal)],
     chips: [`Show deal ${deal.title}`, "Show pipeline"],
   };
+}
+
+// ---- Phase 1a: what's blocking <deal> ------------------------------------------------
+// Kahn topo over open tasks (blocker -> dependent), the open-blocker frontier
+// per blocked task, the unit-duration critical chain, and cycle reporting.
+
+function ownerTag(owner: string): string {
+  return owner ? `(${owner})` : "(unassigned)";
+}
+
+async function dealBlockersReply(session: Session, deal: crm.Deal): Promise<Reply> {
+  usability.trackMention(session.id, "deal", deal.id, deal.title);
+  const tasks = await crm.getTasks();
+  const nodes = tasks.map(rea.toTaskNode);
+  const dealIds = new Set(tasks.filter((t) => !t.done && t.deal_id === deal.id).map((t) => t.id));
+  if (!dealIds.size) {
+    return {
+      text: `"${deal.title}" has no open tasks — nothing to be blocked.`,
+      cards: [dealCard(deal)],
+      chips: ["Show pipeline", "My tasks"],
+    };
+  }
+  const sub = rea.taskSubgraph(nodes, dealIds);
+  const byId = new Map(sub.map((n) => [n.id, n]));
+  const name = (id: number) => byId.get(id)?.title || `#${id}`;
+  const lines = [`🚧 **What's blocking "${deal.title}":**`, ""];
+  const infos = rea.blockingFrontier(sub, dealIds);
+  if (infos.length) {
+    for (const info of infos) {
+      const bs = info.blockers.map((b) => `"${b.title}" ${ownerTag(b.owner)}`).join(", ");
+      lines.push(`• **"${info.task.title}"** is blocked by: ${bs}`);
+    }
+  } else {
+    lines.push("No blocked tasks — everything is either ready or already moving.");
+  }
+  const ready = rea.readyTasks(sub, dealIds);
+  if (ready.length) {
+    lines.push("", `**Ready now:** ${ready.map((t) => `"${t.title}"`).join(", ")}`);
+  }
+  const chainIds = rea.criticalChain(sub);
+  if (chainIds.length > 1) {
+    lines.push("", `**Critical chain** (${chainIds.length} tasks): ${chainIds.map((id) => `"${name(id)}"`).join(" → ")}`);
+  }
+  const { cyclic } = rea.kahnTopo(sub);
+  const cycleIds = [...new Set(cyclic.filter((id) => {
+    // report cycles touching the deal's tasks
+    if (dealIds.has(id)) return true;
+    const n = byId.get(id);
+    return !!n && n.blockedBy.some((b) => dealIds.has(b));
+  }))].sort((a, b) => a - b);
+  if (cycleIds.length) {
+    lines.push("", `⚠️ **Circular dependency:** ${cycleIds.map((id) => `"${name(id)}"`).join(" ↔ ")} — break the loop before planning around it.`);
+  }
+  return {
+    text: lines.join("\n"),
+    cards: [dealCard(deal)],
+    chips: ["Show pipeline", "My tasks", `Deal journey ${deal.title}`],
+  };
+}
+
+/** "what's blocking X": task first (existing behavior), deal fallback (P1a). */
+async function whatsBlockingReply(session: Session, query: string): Promise<Reply> {
+  if (!query) return { text: "What's blocking — name a task or a deal." };
+  const taskMatches = await crm.resolveTask(query);
+  if (taskMatches.length) return taskByName(session, query, "task_blockers", {});
+  return dealByName(session, query, "deal_blockers", {});
+}
+
+// ---- Phase 1b: reachability ----------------------------------------------------------
+// BFS warm-intro chains over the contact/company/deal subgraph. "how do I
+// reach X" defaults the source to the my_contact_id setting (F1); without it
+// Milton asks who to start from (pending reach_source).
+
+interface ReachEntity { kind: rea.ReachKind; id: number; label: string }
+
+/** Strict entity resolution: top match wins only when clearly ahead. */
+async function resolveReachEntity(query: string): Promise<ReachEntity | null> {
+  const q = query.trim();
+  if (!q) return null;
+  const [cm, om] = await Promise.all([crm.resolveContact(q), crm.resolveCompany(q)]);
+  const cands: { kind: rea.ReachKind; m: crm.Match<any> }[] = [
+    ...cm.map((m) => ({ kind: "contact" as rea.ReachKind, m })),
+    ...om.map((m) => ({ kind: "company" as rea.ReachKind, m })),
+  ].sort((a, b) => b.m.score - a.m.score);
+  if (!cands.length) return null;
+  const [top, second] = [cands[0], cands[1]];
+  if (top.m.score >= 70 && (!second || top.m.score - second.m.score >= 20)) {
+    return { kind: top.kind, id: top.m.item.id, label: top.m.item.name };
+  }
+  return null;
+}
+
+async function reachPathReply(fromKey: string, fromLabel: string, toKey: string, toLabel: string): Promise<Reply> {
+  if (fromKey === toKey) return { text: `**${fromLabel}** — you're already there.` };
+  const [contacts, companies, deals] = await Promise.all([crm.getContacts(), crm.getCompanies(), crm.getDeals()]);
+  const g = rea.buildReachGraph(contacts, companies, deals);
+  const path = rea.bfsPath(g.adj, g.nodes, fromKey, toKey, 4);
+  if (!path) {
+    return {
+      text: `No path within 4 hops between **${fromLabel}** and **${toLabel}** — they sit in disconnected parts of your network.`,
+      chips: ["Key accounts", "Champions"],
+    };
+  }
+  const hops = [`**${fromLabel}**`, ...path.map((s) => `→ **${s.node.label}** _(${s.via})_`)].join(" ");
+  return {
+    text: `🤝 **How to reach ${toLabel}:**\n${hops}\n\n_${path.length} hop${path.length === 1 ? "" : "s"} — each step cites the record behind it._`,
+    chips: ["Key accounts", "Champions", "Show pipeline"],
+  };
+}
+
+async function reachReply(session: Session, slots: Record<string, string>): Promise<Reply> {
+  if (slots.from && slots.to) {
+    const [a, b] = await Promise.all([resolveReachEntity(slots.from), resolveReachEntity(slots.to)]);
+    if (!a) return { text: `I couldn't pin down "${slots.from}" as a contact or company — try the full name.` };
+    if (!b) return { text: `I couldn't pin down "${slots.to}" as a contact or company — try the full name.` };
+    return reachPathReply(rea.nodeKey(a.kind, a.id), a.label, rea.nodeKey(b.kind, b.id), b.label);
+  }
+  const target = slots.target || "";
+  const t = await resolveReachEntity(target);
+  if (!t) return { text: `I couldn't pin down "${target}" as a contact or company — try the full name.` };
+  const mine = getSetting("my_contact_id");
+  if (mine && /^\d+$/.test(mine)) {
+    const contacts = await crm.getContacts();
+    const me = contacts.find((c) => c.id === Number(mine));
+    if (me) return reachPathReply(rea.nodeKey("contact", me.id), "you", rea.nodeKey(t.kind, t.id), t.label);
+  }
+  // Ask-first UX (research spec, ship (b) first): who should I start from?
+  session.pending = {
+    type: "reach_source", label: t.label,
+    payload: { targetKind: t.kind, targetId: t.id, targetLabel: t.label },
+  };
+  return {
+    text: `To reach **${t.label}** — who should I start from? Name a contact or company.`,
+    chips: ["Cancel"],
+  };
+}
+
+// ---- Phase 1c: key accounts + champions ------------------------------------------------
+// Value-weighted PageRank (damping 0.85, 30 fixed iterations) over the
+// company/contact graph. Deal->company edges carry open deal value; the
+// decomposition shows why an account matters, not just that it does.
+
+async function keyAccountsReply(): Promise<Reply> {
+  const [contacts, companies, deals] = await Promise.all([crm.getContacts(), crm.getCompanies(), crm.getDeals()]);
+  if (!companies.length) return { text: "No companies yet — add one and I'll rank your accounts." };
+  const r = rea.pageRank(companies, contacts, deals);
+  const openValue = new Map<number, number>();
+  for (const d of deals) {
+    if (String(d.stage).startsWith("closed_") || !d.company_id) continue;
+    openValue.set(d.company_id, (openValue.get(d.company_id) || 0) + (d.value || 0));
+  }
+  const tops = rea.topCompanies(r, 5);
+  if (!tops.length || tops.every((t) => t.score <= 0)) {
+    return { text: "Not enough network yet — companies with open deals or contacts will show up here." };
+  }
+  const lines = tops.map((t, i) => {
+    const v = openValue.get(t.node.id) || 0;
+    const bits = [`${fmtMoney(v)} open pipeline`, `${t.dealCount} open deal${t.dealCount === 1 ? "" : "s"}`];
+    return `${i + 1}. **${t.node.label}** — ${bits.join(" · ")}\n   _rank driven ${t.dealPct}% by deal value, ${100 - t.dealPct}% by network_`;
+  });
+  return {
+    text: `🏦 **Key accounts** (network influence, deal-weighted):\n${lines.join("\n")}`,
+    chips: ["Champions", "Top deals", "Show pipeline"],
+  };
+}
+
+async function championsReply(): Promise<Reply> {
+  const [contacts, companies, deals] = await Promise.all([crm.getContacts(), crm.getCompanies(), crm.getDeals()]);
+  if (!contacts.length) return { text: "No contacts yet — add some and I'll surface your champions." };
+  const r = rea.pageRank(companies, contacts, deals);
+  const tops = rea.topContacts(r, 5).filter((t) => t.score > 0);
+  if (!tops.length) return { text: "Not enough network yet — contacts tied to companies and deals will show up here." };
+  const lines = tops.map((t, i) =>
+    `${i + 1}. **${t.node.label}** — ${t.dealCount} open deal${t.dealCount === 1 ? "" : "s"} across ${t.companyCount} compan${t.companyCount === 1 ? "y" : "ies"}`);
+  return {
+    text: `🌟 **Champions** (your most connected contacts):\n${lines.join("\n")}\n\n_These are the multi-account connectors a plain deal list misses._`,
+    chips: ["Key accounts", "Top deals", "Show pipeline"],
+  };
+}
+
+// ---- Phase 1d: deterministic day layout ------------------------------------------------
+// Replaces the dead LLM "Suggested schedule" block in planDayReply.
+// Earliest-finish greedy (unweighted default); weight-ordered when the
+// day_layout_weighted setting is "1". Reminders are 0-duration anchors that
+// split blocks — no task block may straddle one.
+
+function parseHm(s: string, fallback: number): number {
+  const m = /^(\d{1,2}):(\d{2})$/.exec((s || "").trim());
+  if (!m) return fallback;
+  const h = Number(m[1]), min = Number(m[2]);
+  if (h > 23 || min > 59) return fallback;
+  return h * 60 + min;
+}
+
+function fmtHm(mins: number): string {
+  const h = Math.floor(mins / 60), m = mins % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+interface DayBlock { task: crm.Task; start: number; end: number }
+
+function layoutDay(
+  tasks: crm.Task[], anchors: number[], workStart: number, workEnd: number,
+  minutes: number, weights?: Map<number, number>,
+): { blocks: DayBlock[]; overflow: crm.Task[] } {
+  const sorted = [...tasks].sort((a, b) => {
+    const wa = weights?.get(a.id) ?? 0, wb = weights?.get(b.id) ?? 0;
+    if (wb !== wa) return wb - wa;
+    return a.id - b.id;
+  });
+  const blocks: DayBlock[] = [];
+  const overflow: crm.Task[] = [];
+  let cursor = workStart;
+  const anchorAt = [...anchors].sort((a, b) => a - b);
+  for (const t of sorted) {
+    let start = cursor;
+    // no block may straddle a reminder anchor: push past it
+    for (const a of anchorAt) {
+      if (start < a && a < start + minutes) start = a;
+    }
+    if (start + minutes > workEnd) { overflow.push(t); continue; }
+    blocks.push({ task: t, start, end: start + minutes });
+    cursor = start + minutes;
+  }
+  return { blocks, overflow };
+}
+
+async function dayLayoutSection(session: Session, p: PlanData): Promise<string[]> {
+  const workStart = parseHm(getSetting("workday_start") || "09:00", 540);
+  const workEnd = parseHm(getSetting("workday_end") || "17:30", 1050);
+  const minutes = Math.max(5, Number(getSetting("task_minutes") || 30) || 30);
+  const weighted = getSetting("day_layout_weighted") === "1";
+  const candidates = [...p.overdue, ...p.dueToday];
+  if (!candidates.length) return [];
+  // today's pending reminders become 0-duration anchors
+  const today = todayStr();
+  const anchors: { at: number; text: string }[] = [];
+  try {
+    for (const r of auto.listReminders(session.id)) {
+      if (r.status !== "pending") continue;
+      const d = new Date(r.fire_at);
+      const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      if (ymd !== today) continue;
+      const at = d.getHours() * 60 + d.getMinutes();
+      if (at >= workStart && at < workEnd) anchors.push({ at, text: r.text });
+    }
+  } catch { /* reminders unavailable — lay out without anchors */ }
+  anchors.sort((a, b) => a.at - b.at);
+  let weights: Map<number, number> | undefined;
+  if (weighted) {
+    // overdue = 3, due today = 2, deal-linked = max(1 + value/100k),
+    // stale-deal follow-up = max(1.5)
+    const deals = await crm.getDeals().catch(() => [] as crm.Deal[]);
+    const byId = new Map(deals.map((d) => [d.id, d]));
+    const staleIds = new Set(deals.filter((d) => {
+      if (String(d.stage).startsWith("closed_")) return false;
+      const days = daysSince(d.updated_at);
+      return days !== null && days >= 30;
+    }).map((d) => d.id));
+    weights = new Map();
+    for (const t of candidates) {
+      let w = p.overdue.includes(t) ? 3 : 2;
+      if (t.deal_id) {
+        const d = byId.get(t.deal_id);
+        if (d) {
+          w = Math.max(w, 1 + (d.value || 0) / 100000);
+          if (staleIds.has(d.id)) w = Math.max(w, 1.5);
+        }
+      }
+      weights.set(t.id, w);
+    }
+  }
+  const { blocks, overflow } = layoutDay(candidates, anchors.map((a) => a.at), workStart, workEnd, minutes, weights);
+  const out = ["**Your day** _(deterministic plan):_"];
+  const events: { at: number; kind: "block" | "anchor"; block?: DayBlock; text?: string }[] = [
+    ...blocks.map((b) => ({ at: b.start, kind: "block" as const, block: b })),
+    ...anchors.map((a) => ({ at: a.at, kind: "anchor" as const, text: a.text })),
+  ].sort((a, b) => a.at - b.at || (a.kind === "anchor" ? -1 : 1));
+  for (const e of events) {
+    if (e.kind === "block" && e.block) {
+      out.push(`${fmtHm(e.block.start)}–${fmtHm(e.block.end)}  ${e.block.task.title}`);
+    } else {
+      out.push(`⏰ ${fmtHm(e.at)} — ${e.text} _(reminder)_`);
+    }
+  }
+  if (overflow.length) {
+    out.push(`**Didn't fit today:** ${overflow.map((t) => `"${t.title}"`).join(", ")} → see plan my week`);
+  }
+  return out;
 }
 
 async function duplicatesReply(): Promise<Reply> {

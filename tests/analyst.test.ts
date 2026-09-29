@@ -5,6 +5,8 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { initAutomationDb } from "../src/automation";
 import { initDealNotesDb } from "../src/deal_notes";
+import { initSettingsDb } from "../src/settings";
+import { initObserverDb } from "../src/observer";
 import { parseIntent } from "../src/intents";
 import * as an from "../src/analyst";
 import { handleMessage, runRoutineUnattended, type Session } from "../src/brain";
@@ -103,6 +105,8 @@ beforeEach(() => {
   (globalThis as any).fetch = stubFetch;
   initAutomationDb(new Database(":memory:"));
   initDealNotesDb(new Database(":memory:"));
+  initSettingsDb(new Database(":memory:"));
+  initObserverDb(new Database(":memory:"));
   an.setEmbeddedEndpoint(null);
   calls.length = 0;
   llmMode = "ok";
@@ -322,11 +326,12 @@ describe("plan my day / plan my week", () => {
     expect(r.text).toContain("Acme pilot"); // closing soon
     expect(r.text).not.toContain("Suggested schedule");
   });
-  test("day plan with LLM -> suggested schedule", async () => {
+  test("day plan with LLM -> deterministic layout replaces the suggested schedule", async () => {
     process.env.MILTON_LLM_URL = LLM_URL;
     llmMode = "bullets";
     const r = await handleMessage(sess(), "plan my day");
-    expect(r.text).toContain("Suggested schedule");
+    expect(r.text).not.toContain("Suggested schedule");
+    expect(r.text).toContain("Your day");
   });
   test("week plan groups by day", async () => {
     const r = await handleMessage(sess(), "plan my week");

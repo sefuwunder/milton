@@ -36,7 +36,10 @@ export type IntentName =
   | "wizard_start" // guided setup: bare "new deal" / "new contact" / "new company" / "new task"
   | "undo" // undo the session's latest mutation
   | "deal_journey" // stage history timeline for a deal
-  | "task_blockers" // what's blocking a task
+  | "task_blockers" // what's blocking a task (falls back to deal_blockers action when no task matches)
+  | "reach" // how do I reach X / path from A to B (BFS warm-intro chains)
+  | "key_accounts" // value-weighted PageRank top companies
+  | "champions" // value-weighted PageRank top contacts
   | "duplicates" // show duplicate contacts and companies
   | "deals_by_source" // deals from <source>
   | "unknown";
@@ -82,7 +85,8 @@ export const INTENT_NAMES: IntentName[] = [
   "confirm_yes", "confirm_no", "choose_number",
   "disambiguate_intent",
   "tutorial",
-  "wizard_start", "undo", "deal_journey", "task_blockers", "duplicates", "deals_by_source",
+  "wizard_start", "undo", "deal_journey", "task_blockers",
+  "reach", "key_accounts", "champions", "duplicates", "deals_by_source",
   "unknown",
 ];
 
@@ -555,6 +559,13 @@ export function parseIntent(raw: string): Intent {
   else if ((m = text.match(/^(?:list |show |get |find |search )?contacts?(?: (?:named|called|like|for) (.+))?$/))) set("contacts", m[1] ? { search: m[1] } : {});
   else if ((m = text.match(/^(?:deal journey|journey)(?: for| of)? (.+)$/))) set("deal_journey", { query: stripDealWord(m[1].trim()) });
   else if ((m = text.match(/^show (?:the )?journey (?:for|of) (.+)$/))) set("deal_journey", { query: stripDealWord(m[1].trim()) });
+  // ---- Phase 1 deterministic reasoning -----------------------------------------
+  // "how do I reach Dana" / "path from Acme to Dana" — BFS warm-intro chains.
+  else if ((m = text.match(/^how (?:do|can) i reach (.+?)\??$/))) set("reach", { target: m[1].trim() });
+  else if ((m = text.match(/^how to reach (.+?)\??$/))) set("reach", { target: m[1].trim() });
+  else if ((m = text.match(/^(?:path|route) from (.+?) to (.+?)\??$/))) set("reach", { from: m[1].trim(), to: m[2].trim() });
+  else if (/^(key accounts|top accounts|most important accounts|most valuable accounts)$/.test(text)) set("key_accounts");
+  else if (/^(champions|key contacts|top contacts|most connected( contacts)?)$/.test(text)) set("champions");
   else if ((m = text.match(new RegExp(`^(?:show|get|open|display|tell me about) ${DEAL_WORD} (.+)$`)))) set("deal_detail", { query: m[1] });
   else if ((m = text.match(/^(?:show|get|find|lookup|tell me about) contact (.+)$/))) set("contact_detail", { query: m[1] });
   else if ((m = text.match(/^(?:who is|who'?s) (.+)$/))) set("contact_detail", { query: m[1] });
@@ -784,7 +795,10 @@ export const HELP_LEVELS: HelpLevel[] = [
       { cmds: [["import prospects", "prospect_import"], ["import prospects into Prospecting", "prospect_import"]], note: "bring the last finished prospect run into a workspace as contacts — I list them and ask first" },
       { cmds: [["meridian entities Austin company", "meridian_entities"]], note: "its orgs, filtered by type" },
       { cmds: [["analyze my pipeline", "analyze_pipeline"], ["forecast", "forecast"]], note: "pipeline stats & weighted forecast — deterministic, plus analyst-model insights when set" },
-      { cmds: [["plan my day", "plan_day"], ["plan my week", "plan_week"]], note: "prioritized plan from tasks, closing deals, stale deals" },
+      { cmds: [["plan my day", "plan_day"], ["plan my week", "plan_week"]], note: "prioritized plan from tasks, closing deals, stale deals — the day plan now includes a deterministic time layout" },
+      { cmds: [["what's blocking Acme", "task_blockers"]], note: "blocker frontier, critical chain, and cycle check for a task or deal" },
+      { cmds: [["how do I reach Dana Cole", "reach"], ["path from Acme to Dana Cole", "reach"]], note: "warm-intro path through your network (asks who to start from until your contact is set)" },
+      { cmds: [["key accounts", "key_accounts"], ["champions", "champions"]], note: "network influence ranking — deal-weighted, with the why behind each rank" },
       { cmds: [["break down launch event", "plan_breakdown"]], note: "numbered steps from a built-in template — I ask before creating them as tasks; the analyst model will make them smarter when it returns" },
       { cmds: [["show playbook", "show_playbook"], ["pause rule R7", "pause_rule"], ["reload playbook", "reload_playbook"]], note: "inspect, pause, and reload the CRM playbook rules" },
       { cmds: [["show misses", "show_misses"], ["review miss 1", "review_miss"], ["dismiss miss 1", "dismiss_miss"]], note: "phrases I didn't understand — review them so I learn" },
