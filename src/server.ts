@@ -16,6 +16,8 @@ import { initDealNotesDb } from "./deal_notes";
 import { initOutcomesDb } from "./outcomes";
 import { initOutcomeDefsDb } from "./outcome_defs";
 import { initMissLogDb } from "./intent_misses";
+import { initSettingsDb } from "./settings";
+import { initObserverDb, maybeObserve } from "./observer";
 import { initPlaybookDb } from "./playbook";
 import { initUsabilityDb } from "./usability";
 import { commandRegistry } from "./commands";
@@ -63,6 +65,8 @@ function initDataDir(dataDir: string) {
   initOutcomesDb(db);
   initOutcomeDefsDb(db);
   initMissLogDb(db);
+  initSettingsDb(db);
+  initObserverDb(db);
   initPlaybookDb(db);
   initUsabilityDb(db);
 }
@@ -73,8 +77,8 @@ initDataDir(DATA_DIR);
 
 /**
  * Test-only hook: re-point the server — sessions, uploads, automation,
- * workspace, chat-session, recon-run, deal-note and usability stores — at a
- * fresh data dir. bun shares module state across test files and server.ts
+ * workspace, chat-session, recon-run, deal-note, usability, settings and
+ * observer stores — at a fresh data dir. bun shares module state across test files and server.ts
  * binds its database on first import, so without this a test file that
  * imports server.ts after another file did silently reuses the other file's
  * MILTON_DATA, and tests pass or fail depending on test-file order.
@@ -632,6 +636,18 @@ async function tickProspect() {
 
 // scheduler: run due schedules every 30s (plus one sweep shortly after boot)
 let ticking = false;
+
+// F2 observer: hourly deal snapshots + close_log. maybeObserve() no-ops on a
+// cheap settings read until the hour is up; failures are logged, never thrown.
+async function tickObserver() {
+  try {
+    const { ran, report } = await maybeObserve();
+    if (ran && report && !report.ok) {
+      console.error("observer pass failed:", report.reason || report.errors.join("; "));
+    }
+  } catch (e) { console.error("observer tick failed:", e); }
+}
+
 async function sweep() {
   if (ticking) return;
   ticking = true;
@@ -639,6 +655,7 @@ async function sweep() {
     await tickAutomation(Date.now());
     await tickEnrichment();
     await tickProspect();
+    await tickObserver();
   }
   catch (e) { console.error("scheduler sweep failed:", e); }
   finally { ticking = false; }
